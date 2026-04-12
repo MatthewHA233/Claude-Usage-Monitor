@@ -1,0 +1,19 @@
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri build
+src-tauri/target/
+
+# Python
+__pycache__/
+*.pyc
+backtest.py
+backtest2.py
+
+# Vite
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
