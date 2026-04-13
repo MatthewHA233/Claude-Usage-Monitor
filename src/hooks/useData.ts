@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
 
@@ -74,29 +74,49 @@ export function useAnalysis() {
   return { analysis, loading, refetch: fetch };
 }
 
-export function useHistory(alias: string) {
+const PAGE_SIZE = 50;
+
+export function useHistory(alias: string, limit = PAGE_SIZE) {
   const [history, setHistory] = useState<UsageSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const offsetRef = useRef(0);
 
-  const fetch = useCallback(async () => {
+  const fetchPage = useCallback(async (offset: number, append: boolean) => {
     if (!alias) return;
-    setLoading(true);
+    if (append) setLoadingMore(true); else setLoading(true);
     try {
-      const data = await invoke<UsageSnapshot[]>("get_history", {
-        alias,
-        limit: 100,
-      });
-      setHistory(data);
+      const data = await invoke<UsageSnapshot[]>("get_history", { alias, limit, offset });
+      if (append) {
+        setHistory(prev => [...prev, ...data]);
+      } else {
+        setHistory(data);
+        offsetRef.current = 0;
+      }
+      offsetRef.current = offset + data.length;
+      setHasMore(data.length === limit);
     } catch {
       // ignore
     } finally {
-      setLoading(false);
+      if (append) setLoadingMore(false); else setLoading(false);
     }
-  }, [alias]);
+  }, [alias, limit]);
+
+  const loadMore = useCallback(() => {
+    if (!loadingMore && hasMore) {
+      void fetchPage(offsetRef.current, true);
+    }
+  }, [fetchPage, loadingMore, hasMore]);
+
+  const refetch = useCallback(() => {
+    setHasMore(true);
+    void fetchPage(0, false);
+  }, [fetchPage]);
 
   useEffect(() => {
-    void fetch();
-  }, [fetch]);
+    refetch();
+  }, [refetch]);
 
-  return { history, loading, refetch: fetch };
+  return { history, loading, loadingMore, hasMore, loadMore, refetch };
 }

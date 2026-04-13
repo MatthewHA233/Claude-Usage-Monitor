@@ -8,8 +8,8 @@ pub fn get_latest_snapshots(state: State<AppState>) -> Vec<UsageSnapshot> {
 }
 
 #[tauri::command]
-pub fn get_history(alias: String, limit: i64, state: State<AppState>) -> Vec<UsageSnapshot> {
-    state.db.history(&alias, limit).unwrap_or_default()
+pub fn get_history(alias: String, limit: i64, offset: i64, state: State<AppState>) -> Vec<UsageSnapshot> {
+    state.db.history(&alias, limit, offset).unwrap_or_default()
 }
 
 #[tauri::command]

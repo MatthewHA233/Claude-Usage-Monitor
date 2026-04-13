@@ -9,7 +9,7 @@ pub fn analyze_all(db: &Database, aliases: &[String]) -> Vec<AccountAnalysis> {
 }
 
 fn analyze_account(db: &Database, alias: &str) -> AccountAnalysis {
-    let records = match db.history(alias, 500) {
+    let records = match db.history(alias, 500, 0) {
         Ok(r) => r,
         Err(_) => return empty_analysis(alias),
     };

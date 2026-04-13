@@ -98,8 +98,8 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// 获取某账号的历史记录，最新在前
-    pub fn history(&self, alias: &str, limit: i64) -> Result<Vec<UsageSnapshot>> {
+    /// 获取某账号的历史记录，最新在前，支持分页
+    pub fn history(&self, alias: &str, limit: i64, offset: i64) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, account_alias, collected_at,
@@ -108,9 +108,9 @@ impl Database {
              FROM usage_snapshots
              WHERE account_alias = ?1
              ORDER BY collected_at DESC
-             LIMIT ?2",
+             LIMIT ?2 OFFSET ?3",
         )?;
-        let rows = stmt.query_map(params![alias, limit], row_to_snapshot)?;
+        let rows = stmt.query_map(params![alias, limit, offset], row_to_snapshot)?;
         rows.collect()
     }
 

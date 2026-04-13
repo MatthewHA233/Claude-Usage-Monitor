@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
@@ -14,7 +14,7 @@ const HEADER_H = 28;    // 时间标题行高（px）
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80"];
 
 const STORAGE_KEY = (alias: string) => `sprint_blocks_${alias}`;
-interface Block { id: number; wallHour: number; }
+interface Block { id: number; wallHour: number; startMs: number; }
 // 只取日期部分（"2026-04-09"），避免毫秒级抖动导致误判为新周
 interface Persisted { blocks: Block[]; nextId: number; weeklyResetDate: string; }
 
@@ -237,6 +237,186 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
+// ── Daily session stats ───────────────────────────────────
+interface DayStats { date: string; consumed: number; }
+
+function computeDailyStats(records: UsageSnapshot[]): {
+  days: DayStats[];
+  weeklyResetDates: Set<string>;
+} {
+  const sorted = [...records]
+    .filter(r => r.error == null && r.session_pct != null && r.weekly_pct != null)
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+
+  if (sorted.length === 0) return { days: [], weeklyResetDates: new Set() };
+
+  // 按本地日期分组
+  const byDate = new Map<string, UsageSnapshot[]>();
+  for (const r of sorted) {
+    const date = new Date(r.collected_at).toLocaleDateString("en-CA"); // YYYY-MM-DD
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date)!.push(r);
+  }
+
+  // 生成首日到今日的完整日期序列（最多显示 30 天）
+  const allDates: string[] = [];
+  const firstDate = [...byDate.keys()].sort()[0];
+  let cur = new Date(firstDate + "T00:00:00");
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  while (cur <= today) {
+    allDates.push(cur.toLocaleDateString("en-CA"));
+    cur.setDate(cur.getDate() + 1);
+  }
+  const displayDates = new Set(allDates.slice(-30));
+
+  const weeklyResetDates = new Set<string>();
+  const days: DayStats[] = [];
+
+  let prev_s = sorted[0].session_pct!;
+  let prev_w = sorted[0].weekly_pct!;
+
+  for (const date of allDates) {
+    const recs = byDate.get(date) ?? [];
+    let daily = 0;
+    for (const r of recs) {
+      const cs = r.session_pct!;
+      const cw = r.weekly_pct!;
+      if (cs >= prev_s) {
+        daily += cs - prev_s;
+      } else if (prev_s - cs >= 2) {
+        daily += cs;
+      }
+      if (prev_w - cw > 10) weeklyResetDates.add(date);
+      prev_s = cs;
+      prev_w = cw;
+    }
+    if (displayDates.has(date)) {
+      days.push({ date, consumed: Math.round(daily * 10) / 10 });
+    }
+  }
+
+  return { days, weeklyResetDates };
+}
+
+// 按周切分 days 数组，返回 [{startI, endI, weekIdx}]
+function splitWeekBands(days: DayStats[], weeklyResetDates: Set<string>) {
+  const bands: { startI: number; endI: number; weekIdx: number }[] = [];
+  let weekIdx = 0, start = 0;
+  for (let i = 1; i < days.length; i++) {
+    if (weeklyResetDates.has(days[i].date)) {
+      bands.push({ startI: start, endI: i - 1, weekIdx });
+      weekIdx++;
+      start = i;
+    }
+  }
+  bands.push({ startI: start, endI: days.length - 1, weekIdx });
+  return bands;
+}
+
+const BAND_FILLS = [
+  "rgba(74,158,255,0.07)",
+  "rgba(204,120,92,0.07)",
+  "rgba(74,222,128,0.07)",
+];
+
+// ── DailySessionChart ─────────────────────────────────────
+function DailySessionChart({ days, weeklyResetDates }: {
+  days: DayStats[];
+  weeklyResetDates: Set<string>;
+}) {
+  if (days.length < 2) return null;
+
+  const VW = 600, VH = 130;
+  const PAD = { top: 22, right: 12, bottom: 22, left: 38 };
+  const cW = VW - PAD.left - PAD.right;
+  const cH = VH - PAD.top - PAD.bottom;
+  const n = days.length;
+
+  const maxVal = Math.max(...days.map(d => d.consumed), 50);
+  const xOf = (i: number) => PAD.left + (n === 1 ? cW / 2 : (i / (n - 1)) * cW);
+  const yOf = (v: number) => PAD.top + cH - (v / maxVal) * cH;
+
+  const linePath = days.map((d, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(d.consumed).toFixed(1)}`).join(" ");
+  const areaPath = linePath + ` L${xOf(n - 1).toFixed(1)},${(PAD.top + cH).toFixed(1)} L${xOf(0).toFixed(1)},${(PAD.top + cH).toFixed(1)} Z`;
+
+  const bands = splitWeekBands(days, weeklyResetDates);
+  const labelStep = Math.max(1, Math.ceil(n / 6));
+
+  return (
+    <div className="card p-0 overflow-hidden mb-3">
+      <div className="px-4 py-2.5" style={{ borderBottom: "1px solid #3a3a3a" }}>
+        <span className="text-sm font-semibold" style={{ color: "#ddd" }}>每日 Session 消耗</span>
+        <span className="text-xs ml-2" style={{ color: "#666" }}>近30天</span>
+      </div>
+      <div className="px-3 py-2">
+        <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: 130 }}>
+          {/* 周色带背景 */}
+          {bands.map(({ startI, endI, weekIdx }) => {
+            const x1 = startI === 0 ? PAD.left : xOf(startI);
+            const x2 = endI === n - 1 ? PAD.left + cW : xOf(endI);
+            return (
+              <rect key={weekIdx} x={x1} y={PAD.top} width={x2 - x1} height={cH}
+                fill={BAND_FILLS[weekIdx % BAND_FILLS.length]} />
+            );
+          })}
+
+          {/* 横向参考线 */}
+          {[0, 0.5, 1].map(f => {
+            const yv = yOf(f * maxVal);
+            return (
+              <g key={f}>
+                <line x1={PAD.left} y1={yv} x2={PAD.left + cW} y2={yv} stroke="#2a2a2a" strokeWidth={1} />
+                <text x={PAD.left - 4} y={yv + 4} textAnchor="end" fontSize={9} fill="#888">
+                  {Math.round(f * maxVal)}%
+                </text>
+              </g>
+            );
+          })}
+
+          {/* 面积填充 */}
+          <path d={areaPath} fill="#4a9eff" opacity={0.1} />
+
+          {/* 周重置竖线 */}
+          {days.map((d, i) => weeklyResetDates.has(d.date) && (
+            <g key={d.date}>
+              <line x1={xOf(i)} y1={PAD.top} x2={xOf(i)} y2={PAD.top + cH}
+                stroke="#f0a500" strokeWidth={1} strokeDasharray="3,3" opacity={0.8} />
+              <text x={xOf(i) + 3} y={PAD.top + 9} fontSize={8} fill="#f0a500">周重置</text>
+            </g>
+          ))}
+
+          {/* 折线 */}
+          <path d={linePath} fill="none" stroke="#4a9eff" strokeWidth={1.5} strokeLinejoin="round" />
+
+          {/* 数据点 + 数值标签 */}
+          {days.map((d, i) => (
+            <g key={i}>
+              <circle cx={xOf(i)} cy={yOf(d.consumed)} r={2.5} fill="#4a9eff" />
+              {d.consumed > 0 && (
+                <text x={xOf(i)} y={yOf(d.consumed) - 5} textAnchor="middle" fontSize={8} fill="#aad4ff">
+                  {d.consumed}
+                </text>
+              )}
+            </g>
+          ))}
+
+          {/* X 轴日期标签 */}
+          {days.map((d, i) => {
+            if (i % labelStep !== 0 && i !== n - 1) return null;
+            const [, mm, dd] = d.date.split("-");
+            return (
+              <text key={i} x={xOf(i)} y={VH - 4} textAnchor="middle" fontSize={9} fill="#999">
+                {parseInt(mm)}/{parseInt(dd)}
+              </text>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 // ── ConfirmDialog ─────────────────────────────────────────
 function ConfirmDialog({ message, onConfirm, onCancel }: {
   message: string; onConfirm: () => void; onCancel: () => void;
@@ -258,8 +438,42 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
 
 // ── HistoryPanel ──────────────────────────────────────────
 function HistoryPanel({ alias }: { alias: string }) {
-  const { history, loading, refetch } = useHistory(alias);
+  const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(alias);
+  const { history: statsRecords } = useHistory(alias, 1000);
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
+
+  const { days, weeklyResetDates } = computeDailyStats(statsRecords);
+
+  // 向上查找实际在滚动的祖先（scrollHeight > clientHeight），监听滚动
+  useEffect(() => {
+    let node: HTMLElement | null = anchorRef.current?.parentElement ?? null;
+    while (node && node !== document.body) {
+      if (node.scrollHeight > node.clientHeight + 1) break;
+      node = node.parentElement;
+    }
+    const scrollEl = node ?? document.documentElement;
+    const handleScroll = () => {
+      if (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 150) {
+        loadMore();
+      }
+    };
+    scrollEl.addEventListener("scroll", handleScroll);
+    return () => scrollEl.removeEventListener("scroll", handleScroll);
+  }, [loadMore]);
+
+  // 按 weekly_reset_at 分周，给每个周分配色带索引（旧→新顺序）
+  const weekColorIdx = new Map<string, number>();
+  let wci = 0;
+  for (const snap of [...history].reverse()) {
+    const key = (snap.weekly_reset_at ?? "").substring(0, 10);
+    if (key && !weekColorIdx.has(key)) weekColorIdx.set(key, wci++);
+  }
+  const ROW_WEEK_COLORS = ["#1c1c2a", "#1c2220", "#221e1c"];
+  const rowWeekBg = (snap: UsageSnapshot) => {
+    const key = (snap.weekly_reset_at ?? "").substring(0, 10);
+    return ROW_WEEK_COLORS[(weekColorIdx.get(key) ?? 0) % ROW_WEEK_COLORS.length];
+  };
 
   const handleDelete = async (id: number) => {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -268,10 +482,11 @@ function HistoryPanel({ alias }: { alias: string }) {
     refetch();
   };
 
-  if (loading) return <div className="text-center py-8 text-sm" style={{ color: "#888" }}>加载中…</div>;
-  if (history.length === 0) return <div className="text-center py-8 text-sm" style={{ color: "#888" }}>暂无历史数据</div>;
+  if (loading) return <div className="text-center py-8 text-sm" style={{ color: "#999" }}>加载中…</div>;
+  if (history.length === 0) return <div className="text-center py-8 text-sm" style={{ color: "#999" }}>暂无历史数据</div>;
   return (
-    <>
+    <div ref={anchorRef}>
+      <DailySessionChart days={days} weeklyResetDates={weeklyResetDates} />
       {confirmId !== null && (
         <ConfirmDialog
           message="确认删除这条记录？"
@@ -283,7 +498,7 @@ function HistoryPanel({ alias }: { alias: string }) {
         <div className="overflow-auto">
           <table className="w-full text-xs">
             <thead className="sticky top-0" style={{ background: "#242424" }}>
-              <tr style={{ color: "#aaa", borderBottom: "1px solid #3a3a3a" }}>
+              <tr style={{ color: "#bbb", borderBottom: "1px solid #3a3a3a" }}>
                 <th className="text-left px-3 py-2.5 font-semibold">时间</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Session</th>
                 <th className="text-left px-3 py-2.5 font-semibold">重置</th>
@@ -294,8 +509,8 @@ function HistoryPanel({ alias }: { alias: string }) {
             </thead>
             <tbody>
               {history.map((snap, i) => (
-                <tr key={snap.id ?? i} style={{ borderBottom: "1px solid #333" }} className="hover:bg-white/5">
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#bbb" }}>{formatLocalTime(snap.collected_at)}</td>
+                <tr key={snap.id ?? i} style={{ borderBottom: "1px solid #2e2e2e", background: rowWeekBg(snap) }} className="hover:brightness-125">
+                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#ccc" }}>{formatLocalTime(snap.collected_at)}</td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2 min-w-[90px]">
                       <span className="font-mono font-semibold w-12"
@@ -305,7 +520,7 @@ function HistoryPanel({ alias }: { alias: string }) {
                       <ProgressBar pct={snap.session_pct} className="flex-1" />
                     </div>
                   </td>
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#999" }}>{formatLocalTime(snap.session_reset_at)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.session_reset_at)}</td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2 min-w-[90px]">
                       <span className="font-mono font-semibold w-12"
@@ -315,13 +530,13 @@ function HistoryPanel({ alias }: { alias: string }) {
                       <ProgressBar pct={snap.weekly_pct} className="flex-1" />
                     </div>
                   </td>
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#999" }}>{formatLocalTime(snap.weekly_reset_at)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.weekly_reset_at)}</td>
                   <td className="px-3 py-2 text-right">
                     <button
                       onClick={() => snap.id != null && setConfirmId(snap.id)}
-                      style={{ color: "#666", fontSize: 12, background: "none", border: "none", cursor: "pointer", padding: "2px 4px", borderRadius: 4 }}
+                      style={{ color: "#777", fontSize: 12, background: "none", border: "none", cursor: "pointer", padding: "2px 4px", borderRadius: 4 }}
                       onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
-                      onMouseLeave={(e) => (e.currentTarget.style.color = "#666")}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = "#777")}
                       title="删除此记录"
                     >✕</button>
                   </td>
@@ -329,9 +544,21 @@ function HistoryPanel({ alias }: { alias: string }) {
               ))}
             </tbody>
           </table>
+          <div className="py-3 text-center">
+            {loadingMore ? (
+              <span className="text-xs" style={{ color: "#888" }}>加载中…</span>
+            ) : hasMore ? (
+              <button onClick={loadMore} className="text-xs px-4 py-1.5 rounded-lg"
+                style={{ background: "#2c2c2c", color: "#aaa", border: "1px solid #444" }}>
+                加载更多
+              </button>
+            ) : (
+              <span className="text-xs" style={{ color: "#666" }}>已加载全部</span>
+            )}
+          </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -388,6 +615,36 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
     }
   }, [allBlocks, allNextId, snapshots]);
 
+  // 过期 block 自动清理 + 碰撞检测：启动时 + 每分钟检查
+  useEffect(() => {
+    const cleanup = () => {
+      const now = Date.now();
+      setAllBlocks((prev) => {
+        let changed = false;
+        const next: Record<string, Block[]> = {};
+        for (const alias of Object.keys(prev)) {
+          // 1. 过期：startMs 已过的块清除（无 startMs 的旧数据也清除）
+          let filtered = (prev[alias] ?? []).filter((b) => b.startMs != null && b.startMs > now);
+          // 2. 碰撞：与进行中 session 重叠的规划块清除
+          const snap = snapshots.find((s) => s.account_alias === alias);
+          if (snap?.session_reset_at) {
+            const sessionEndMs = new Date(snap.session_reset_at).getTime();
+            if (sessionEndMs > now) {
+              // 进行中 session 结束时间之前开始的规划块 = 碰撞
+              filtered = filtered.filter((b) => b.startMs >= sessionEndMs);
+            }
+          }
+          if (filtered.length !== (prev[alias] ?? []).length) changed = true;
+          next[alias] = filtered;
+        }
+        return changed ? next : prev;
+      });
+    };
+    cleanup();
+    const timer = setInterval(cleanup, 60_000);
+    return () => clearInterval(timer);
+  }, [snapshots]);
+
   // 时间基准
   const nowMs = Date.now();
   const nowDate = new Date(nowMs);
@@ -413,8 +670,11 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
       );
       if (overlaps) return prev;
       const id = (allNextId[alias] ?? 0);
+      // startMs：当天 0 点 + wallHour 小时（wallHour 可 >23 跨天）
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const startMs = today.getTime() + wallHour * 3_600_000;
       setAllNextId((p) => ({ ...p, [alias]: id + 1 }));
-      return { ...prev, [alias]: [...existing, { id, wallHour }] };
+      return { ...prev, [alias]: [...existing, { id, wallHour, startMs }] };
     });
   }, [allNextId]);
 
@@ -457,7 +717,11 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
     const color = ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
     const blocks = allBlocks[snap.account_alias] ?? [];
     const weeklyUsed = snap.weekly_pct ?? null;
-    const sessionRemainingPct = snap.session_pct != null ? 100 - snap.session_pct : null;
+    // 只有 session_reset_at 在未来（有进行中的块）才计入当前 session 预估消耗
+    const sessionRemainingHours = snap.session_reset_at
+      ? (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000 : null;
+    const hasActiveSession = sessionRemainingHours != null && sessionRemainingHours > 0;
+    const sessionRemainingPct = hasActiveSession && snap.session_pct != null ? 100 - snap.session_pct : null;
     const currCost = avgCost != null && sessionRemainingPct != null
       ? (sessionRemainingPct / 100) * avgCost : null;
     const placed = (currCost ?? 0) + blocks.length * (avgCost ?? 0);
