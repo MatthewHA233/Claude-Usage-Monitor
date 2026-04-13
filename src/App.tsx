@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from "react";
+import logoUrl from "./assets/logo.png";
 import { useLatestSnapshots, useRecommendation, useAnalysis } from "./hooks/useData";
 import StatusCards from "./components/StatusCards";
 
@@ -28,12 +29,7 @@ export default function App() {
         data-tauri-drag-region
       >
         <div className="flex items-center gap-2.5">
-          <div style={{
-            width: 28, height: 28,
-            background: "linear-gradient(135deg, #cc785c, #d4956b)",
-            borderRadius: 8, display: "flex", alignItems: "center",
-            justifyContent: "center", fontSize: 14, fontWeight: 700, color: "#fff",
-          }}>C</div>
+          <img src={logoUrl} alt="logo" style={{ width: 28, height: 28, borderRadius: 6, objectFit: "contain" }} />
           <div>
             <div className="text-sm font-semibold" style={{ color: "#fff" }}>Claude Switch</div>
             {snapsLoading && (
