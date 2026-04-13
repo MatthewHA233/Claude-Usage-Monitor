@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
-import { useHistory } from "../hooks/useData";
+import { useHistory, useAllHistories, useAccountColors } from "../hooks/useData";
 
 // ── 时间轴常量 ────────────────────────────────────────────
 const SESSION_HOURS = 5;
@@ -26,6 +26,8 @@ interface Props {
   onRefresh: () => void;
 }
 
+const DEFAULT_COLOR = "#cc785c";
+
 function sessionResetColor(h: number | null) {
   if (h === null) return "#bbb";
   if (h < 1) return "#f87171";
@@ -41,6 +43,7 @@ function weeklyResetColor(h: number | null) {
 
 // ── StatusCards ───────────────────────────────────────────
 export default function StatusCards({ snapshots, recommendation, analysis, onRefresh }: Props) {
+  const { colors, setColor } = useAccountColors();
   const snapshotMap = Object.fromEntries(snapshots.map((s) => [s.account_alias, s]));
 
   const orderedAliases = (() => {
@@ -93,6 +96,8 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
               isRecommended={recommendation?.recommended_alias === alias}
               avgCost={avgCost}
               allSnapshots={snapshots}
+              colors={colors}
+              setColor={setColor}
             />
           );
         })
@@ -110,10 +115,14 @@ interface CardProps {
   isRecommended: boolean;
   avgCost: number | null;
   allSnapshots: UsageSnapshot[];
+  colors: Record<string, string>;
+  setColor: (alias: string, color: string) => Promise<void>;
 }
 
-function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots }: CardProps) {
+function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots, colors, setColor }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
+  const colorInputRef = useRef<HTMLInputElement>(null);
+  const accountColor = colors[alias] ?? DEFAULT_COLOR;
 
   const weeklyPct = snap?.weekly_pct ?? null;
   const weeklyRemaining = weeklyPct != null ? 100 - weeklyPct : null;
@@ -123,17 +132,29 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
 
   return (
     <>
-      <div className="card" style={isRecommended ? { outline: "1px solid #cc785c88" } : {}}>
+      <div className="card" style={isRecommended ? { outline: `1px solid ${accountColor}88` } : {}}>
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <div style={{
-              width: 30, height: 30, borderRadius: 8, flexShrink: 0,
-              background: "linear-gradient(135deg, #cc785c, #d4956b)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 14, fontWeight: 700, color: "#fff",
-            }}>
+            <div
+              title="点击设置颜色"
+              onClick={() => colorInputRef.current?.click()}
+              style={{
+                width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+                background: accountColor,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer",
+                position: "relative",
+              }}
+            >
               {alias[0]?.toUpperCase() ?? "?"}
+              <input
+                ref={colorInputRef}
+                type="color"
+                value={accountColor}
+                onChange={(e) => void setColor(alias, e.target.value)}
+                style={{ position: "absolute", opacity: 0, width: 0, height: 0, pointerEvents: "none" }}
+              />
             </div>
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
@@ -187,12 +208,16 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
 
       {modal === "history" && (
         <Modal title={`历史记录 · ${alias}`} onClose={() => setModal(null)}>
-          <HistoryPanel alias={alias} />
+          <HistoryPanel
+            alias={alias}
+            allAliases={allSnapshots.map((s) => s.account_alias)}
+            colors={colors}
+          />
         </Modal>
       )}
       {modal === "sprint" && (
         <Modal title="规划时间轴" onClose={() => setModal(null)}>
-          <SprintPanel snapshots={allSnapshots} avgCost={avgCost} />
+          <SprintPanel snapshots={allSnapshots} avgCost={avgCost} colors={colors} />
         </Modal>
       )}
     </>
@@ -320,12 +345,13 @@ const BAND_FILLS = [
   "rgba(74,222,128,0.07)",
 ];
 
-// ── DailySessionChart ─────────────────────────────────────
-function DailySessionChart({ days, weeklyResetDates }: {
+// ── DailySessionChartSvg（单账号折线，无外框） ───────────────
+function DailySessionChartSvg({ days, weeklyResetDates, color = "#4a9eff" }: {
   days: DayStats[];
   weeklyResetDates: Set<string>;
+  color?: string;
 }) {
-  if (days.length < 2) return null;
+  if (days.length < 2) return <div className="py-6 text-center text-sm" style={{ color: "#888" }}>数据不足</div>;
 
   const VW = 600, VH = 130;
   const PAD = { top: 22, right: 12, bottom: 22, left: 38 };
@@ -344,74 +370,219 @@ function DailySessionChart({ days, weeklyResetDates }: {
   const labelStep = Math.max(1, Math.ceil(n / 6));
 
   return (
-    <div className="card p-0 overflow-hidden mb-3">
-      <div className="px-4 py-2.5" style={{ borderBottom: "1px solid #3a3a3a" }}>
-        <span className="text-sm font-semibold" style={{ color: "#ddd" }}>每日 Session 消耗</span>
-        <span className="text-xs ml-2" style={{ color: "#666" }}>近30天</span>
-      </div>
-      <div className="px-3 py-2">
-        <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: 130 }}>
-          {/* 周色带背景 */}
-          {bands.map(({ startI, endI, weekIdx }) => {
-            const x1 = startI === 0 ? PAD.left : xOf(startI);
-            const x2 = endI === n - 1 ? PAD.left + cW : xOf(endI);
-            return (
-              <rect key={weekIdx} x={x1} y={PAD.top} width={x2 - x1} height={cH}
-                fill={BAND_FILLS[weekIdx % BAND_FILLS.length]} />
-            );
-          })}
-
-          {/* 横向参考线 */}
-          {[0, 0.5, 1].map(f => {
-            const yv = yOf(f * maxVal);
-            return (
-              <g key={f}>
-                <line x1={PAD.left} y1={yv} x2={PAD.left + cW} y2={yv} stroke="#2a2a2a" strokeWidth={1} />
-                <text x={PAD.left - 4} y={yv + 4} textAnchor="end" fontSize={9} fill="#888">
-                  {Math.round(f * maxVal)}%
-                </text>
-              </g>
-            );
-          })}
-
-          {/* 面积填充 */}
-          <path d={areaPath} fill="#4a9eff" opacity={0.1} />
-
-          {/* 周重置竖线 */}
-          {days.map((d, i) => weeklyResetDates.has(d.date) && (
-            <g key={d.date}>
-              <line x1={xOf(i)} y1={PAD.top} x2={xOf(i)} y2={PAD.top + cH}
-                stroke="#f0a500" strokeWidth={1} strokeDasharray="3,3" opacity={0.8} />
-              <text x={xOf(i) + 3} y={PAD.top + 9} fontSize={8} fill="#f0a500">周重置</text>
+    <div className="px-3 py-2">
+      <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: 130 }}>
+        {bands.map(({ startI, endI, weekIdx }) => {
+          const x1 = startI === 0 ? PAD.left : xOf(startI);
+          const x2 = endI === n - 1 ? PAD.left + cW : xOf(endI);
+          return <rect key={weekIdx} x={x1} y={PAD.top} width={x2 - x1} height={cH} fill={BAND_FILLS[weekIdx % BAND_FILLS.length]} />;
+        })}
+        {[0, 0.5, 1].map(f => {
+          const yv = yOf(f * maxVal);
+          return (
+            <g key={f}>
+              <line x1={PAD.left} y1={yv} x2={PAD.left + cW} y2={yv} stroke="#2a2a2a" strokeWidth={1} />
+              <text x={PAD.left - 4} y={yv + 4} textAnchor="end" fontSize={9} fill="#888">{Math.round(f * maxVal)}%</text>
             </g>
-          ))}
+          );
+        })}
+        <path d={areaPath} fill={color} opacity={0.1} />
+        {days.map((d, i) => weeklyResetDates.has(d.date) && (
+          <g key={d.date}>
+            <line x1={xOf(i)} y1={PAD.top} x2={xOf(i)} y2={PAD.top + cH} stroke="#f0a500" strokeWidth={1} strokeDasharray="3,3" opacity={0.8} />
+            <text x={xOf(i) + 3} y={PAD.top + 9} fontSize={8} fill="#f0a500">周重置</text>
+          </g>
+        ))}
+        <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
+        {days.map((d, i) => (
+          <g key={i}>
+            <circle cx={xOf(i)} cy={yOf(d.consumed)} r={2.5} fill={color} />
+            {d.consumed > 0 && (
+              <text x={xOf(i)} y={yOf(d.consumed) - 5} textAnchor="middle" fontSize={8} fill={color + "cc"}>{d.consumed}</text>
+            )}
+          </g>
+        ))}
+        {days.map((d, i) => {
+          if (i % labelStep !== 0 && i !== n - 1) return null;
+          const [, mm, dd] = d.date.split("-");
+          return <text key={i} x={xOf(i)} y={VH - 4} textAnchor="middle" fontSize={9} fill="#999">{parseInt(mm)}/{parseInt(dd)}</text>;
+        })}
+      </svg>
+    </div>
+  );
+}
 
-          {/* 折线 */}
-          <path d={linePath} fill="none" stroke="#4a9eff" strokeWidth={1.5} strokeLinejoin="round" />
+// ── computeAllDailyStats（多账号） ────────────────────────
+function computeAllDailyStats(
+  histories: Record<string, UsageSnapshot[]>,
+  colors: Record<string, string>
+): {
+  dates: string[];
+  accountSeries: Array<{ alias: string; color: string; values: number[] }>;
+  totals: number[];
+  weeklyResetDates: Set<string>;
+} {
+  const aliases = Object.keys(histories);
+  if (aliases.length === 0) return { dates: [], accountSeries: [], totals: [], weeklyResetDates: new Set() };
 
-          {/* 数据点 + 数值标签 */}
-          {days.map((d, i) => (
-            <g key={i}>
-              <circle cx={xOf(i)} cy={yOf(d.consumed)} r={2.5} fill="#4a9eff" />
-              {d.consumed > 0 && (
-                <text x={xOf(i)} y={yOf(d.consumed) - 5} textAnchor="middle" fontSize={8} fill="#aad4ff">
-                  {d.consumed}
-                </text>
-              )}
+  // 先算每个账号的每日数据，找到全局最早日期
+  const perAccount: Array<{
+    alias: string;
+    byDate: Map<string, number>;
+    weeklyResetDates: Set<string>;
+  }> = [];
+
+  let globalEarliest: string | null = null;
+
+  for (const alias of aliases) {
+    const { days, weeklyResetDates } = computeDailyStats(histories[alias]);
+    const byDate = new Map(days.map(d => [d.date, d.consumed]));
+    perAccount.push({ alias, byDate, weeklyResetDates });
+    if (days.length > 0) {
+      const first = days[0].date;
+      if (globalEarliest === null || first < globalEarliest) globalEarliest = first;
+    }
+  }
+
+  if (globalEarliest === null) return { dates: [], accountSeries: [], totals: [], weeklyResetDates: new Set() };
+
+  // 从最早账号的起始天到今天生成日期序列
+  const dates: string[] = [];
+  const todayStr = new Date().toLocaleDateString("en-CA");
+  const cur = new Date(globalEarliest + "T00:00:00");
+  const todayEnd = new Date(todayStr + "T00:00:00");
+  while (cur <= todayEnd) {
+    dates.push(cur.toLocaleDateString("en-CA"));
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  const allWeeklyResetDates = new Set<string>();
+  const accountSeries: Array<{ alias: string; color: string; values: number[] }> = [];
+
+  for (const { alias, byDate, weeklyResetDates } of perAccount) {
+    for (const d of weeklyResetDates) allWeeklyResetDates.add(d);
+    accountSeries.push({
+      alias,
+      color: colors[alias] ?? DEFAULT_COLOR,
+      values: dates.map(date => byDate.get(date) ?? 0),
+    });
+  }
+
+  const totals = dates.map((_, i) =>
+    Math.round(accountSeries.reduce((sum, s) => sum + s.values[i], 0) * 10) / 10
+  );
+
+  return { dates, accountSeries, totals, weeklyResetDates: allWeeklyResetDates };
+}
+
+// ── TotalDailyChartSvg（堆叠彩带面积图） ─────────────────
+function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, currentAlias }: {
+  dates: string[];
+  accountSeries: Array<{ alias: string; color: string; values: number[] }>;
+  totals: number[];
+  weeklyResetDates: Set<string>;
+  currentAlias: string;
+}) {
+  if (dates.length < 2 || accountSeries.length === 0)
+    return <div className="py-6 text-center text-sm" style={{ color: "#888" }}>数据不足</div>;
+
+  // 当前账号在最底层，其他随意叠上去
+  const sorted = [
+    ...accountSeries.filter(s => s.alias === currentAlias),
+    ...accountSeries.filter(s => s.alias !== currentAlias),
+  ];
+
+  const VW = 600, VH = 160;
+  const PAD = { top: 22, right: 12, bottom: 22, left: 42 };
+  const cW = VW - PAD.left - PAD.right;
+  const cH = VH - PAD.top - PAD.bottom;
+  const n = dates.length;
+  const bottom = PAD.top + cH;
+
+  const maxVal = Math.max(...totals, 50);
+  const xOf = (i: number) => PAD.left + (i / (n - 1)) * cW;
+  const yOf = (v: number) => PAD.top + cH - (v / maxVal) * cH;
+  const labelStep = Math.max(1, Math.ceil(n / 6));
+
+  // 每列的累计高度 stacks[j][i] = sorted[0..j] 在第 i 天的累计值
+  const stacks: number[][] = sorted.map((_, j) =>
+    dates.map((__, i) => sorted.slice(0, j + 1).reduce((s, a) => s + a.values[i], 0))
+  );
+
+  // 周色带
+  const weekBands: { startI: number; endI: number; weekIdx: number }[] = [];
+  let wk = 0, ws = 0;
+  for (let i = 1; i < n; i++) {
+    if (weeklyResetDates.has(dates[i])) { weekBands.push({ startI: ws, endI: i - 1, weekIdx: wk }); wk++; ws = i; }
+  }
+  weekBands.push({ startI: ws, endI: n - 1, weekIdx: wk });
+
+  return (
+    <div className="px-3 py-2">
+      <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: 160 }}>
+        {/* 周色带 */}
+        {weekBands.map(({ startI, endI, weekIdx }) => {
+          const x1 = startI === 0 ? PAD.left : xOf(startI);
+          const x2 = endI === n - 1 ? PAD.left + cW : xOf(endI);
+          return <rect key={weekIdx} x={x1} y={PAD.top} width={x2 - x1} height={cH} fill={BAND_FILLS[weekIdx % BAND_FILLS.length]} />;
+        })}
+        {/* Y 轴参考线 */}
+        {[0, 0.5, 1].map(f => {
+          const yv = yOf(f * maxVal);
+          return (
+            <g key={f}>
+              <line x1={PAD.left} y1={yv} x2={PAD.left + cW} y2={yv} stroke="#2a2a2a" strokeWidth={1} />
+              <text x={PAD.left - 4} y={yv + 4} textAnchor="end" fontSize={9} fill="#888">{Math.round(f * maxVal)}%</text>
             </g>
-          ))}
-
-          {/* X 轴日期标签 */}
-          {days.map((d, i) => {
-            if (i % labelStep !== 0 && i !== n - 1) return null;
-            const [, mm, dd] = d.date.split("-");
-            return (
-              <text key={i} x={xOf(i)} y={VH - 4} textAnchor="middle" fontSize={9} fill="#999">
-                {parseInt(mm)}/{parseInt(dd)}
-              </text>
-            );
-          })}
-        </svg>
+          );
+        })}
+        {/* 堆叠彩带：从底层到顶层依次绘制 */}
+        {sorted.map(({ alias, color }, j) => {
+          const topStack = stacks[j];
+          const prevStack = j > 0 ? stacks[j - 1] : null;
+          // 顶部路径（左→右）
+          const topPath = topStack.map((v, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
+          // 底部路径（右→左，闭合彩带）
+          const botPath = prevStack
+            ? [...prevStack].reverse().map((v, ri) => `L${xOf(n - 1 - ri).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ") + " Z"
+            : ` L${xOf(n - 1).toFixed(1)},${bottom.toFixed(1)} L${xOf(0).toFixed(1)},${bottom.toFixed(1)} Z`;
+          return (
+            <g key={alias}>
+              <path d={topPath + " " + botPath} fill={color} opacity={0.55} />
+              {/* 彩带顶边线 */}
+              <path d={topPath} fill="none" stroke={color} strokeWidth={1.2} strokeLinejoin="round" opacity={0.9} />
+              {/* 顶边节点 */}
+              {topStack.map((v, i) => v > 0 && (
+                <circle key={i} cx={xOf(i)} cy={yOf(v)} r={2} fill={color} opacity={0.95} />
+              ))}
+            </g>
+          );
+        })}
+        {/* 总计节点数值（堆叠顶端） */}
+        {totals.map((v, i) => v > 0 && (
+          <text key={i} x={xOf(i)} y={yOf(v) - 4} textAnchor="middle" fontSize={8} fill="#ddd">{v}</text>
+        ))}
+        {/* 周重置竖线 */}
+        {dates.map((d, i) => weeklyResetDates.has(d) && (
+          <line key={d} x1={xOf(i)} y1={PAD.top} x2={xOf(i)} y2={bottom} stroke="#f0a500" strokeWidth={1} strokeDasharray="3,3" opacity={0.7} />
+        ))}
+        {/* X 轴日期 */}
+        {dates.map((d, i) => {
+          if (i % labelStep !== 0 && i !== n - 1) return null;
+          const [, mm, dd] = d.split("-");
+          return <text key={i} x={xOf(i)} y={VH - 4} textAnchor="middle" fontSize={9} fill="#999">{parseInt(mm)}/{parseInt(dd)}</text>;
+        })}
+      </svg>
+      {/* 图例（底层→顶层顺序） */}
+      <div className="flex flex-wrap gap-3 px-1 pb-1" style={{ marginTop: -2 }}>
+        {sorted.map(({ alias, color }) => (
+          <div key={alias} className="flex items-center gap-1.5">
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: color, opacity: 0.8 }} />
+            <span style={{ fontSize: 10, color: "#aaa" }}>
+              {alias.split("@")[0]}{alias === currentAlias ? " (当前)" : ""}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -437,13 +608,21 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
 }
 
 // ── HistoryPanel ──────────────────────────────────────────
-function HistoryPanel({ alias }: { alias: string }) {
+function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
+  alias: string;
+  allAliases: string[];
+  colors: Record<string, string>;
+}) {
   const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(alias);
   const { history: statsRecords } = useHistory(alias, 1000);
+  const { histories, loading: allLoading } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [chartMode, setChartMode] = useState<"single" | "total">("single");
   const anchorRef = useRef<HTMLDivElement>(null);
 
   const { days, weeklyResetDates } = computeDailyStats(statsRecords);
+  const accountColor = colors[alias] ?? DEFAULT_COLOR;
+  const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
 
   // 向上查找实际在滚动的祖先（scrollHeight > clientHeight），监听滚动
   useEffect(() => {
@@ -486,7 +665,34 @@ function HistoryPanel({ alias }: { alias: string }) {
   if (history.length === 0) return <div className="text-center py-8 text-sm" style={{ color: "#999" }}>暂无历史数据</div>;
   return (
     <div ref={anchorRef}>
-      <DailySessionChart days={days} weeklyResetDates={weeklyResetDates} />
+      {/* 每日消耗图（可切换单账号/总览） */}
+      <div className="card p-0 overflow-hidden mb-3">
+        <div className="px-4 py-2.5 flex items-center justify-between" style={{ borderBottom: "1px solid #3a3a3a" }}>
+          <div>
+            <span className="text-sm font-semibold" style={{ color: "#ddd" }}>每日 Session 消耗</span>
+            <span className="text-xs ml-2" style={{ color: "#666" }}>近30天</span>
+          </div>
+          <div className="flex gap-1">
+            {(["single", "total"] as const).map((m) => (
+              <button key={m} onClick={() => setChartMode(m)}
+                className="text-xs px-2.5 py-1 rounded-md"
+                style={{
+                  background: chartMode === m ? "#3a3a3a" : "transparent",
+                  color: chartMode === m ? "#eee" : "#888",
+                  border: chartMode === m ? "1px solid #555" : "1px solid transparent",
+                }}>
+                {m === "single" ? "当前" : "总览"}
+              </button>
+            ))}
+          </div>
+        </div>
+        {chartMode === "single"
+          ? <DailySessionChartSvg days={days} weeklyResetDates={weeklyResetDates} color={accountColor} />
+          : allLoading
+            ? <div className="py-6 text-center text-sm" style={{ color: "#888" }}>加载中…</div>
+            : <TotalDailyChartSvg dates={dates} accountSeries={accountSeries} totals={totals} weeklyResetDates={allWeeklyResets} currentAlias={alias} />
+        }
+      </div>
       {confirmId !== null && (
         <ConfirmDialog
           message="确认删除这条记录？"
@@ -563,7 +769,11 @@ function HistoryPanel({ alias }: { alias: string }) {
 }
 
 // ── SprintPanel（多账号共用时间轴）────────────────────────
-function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCost: number | null }) {
+function SprintPanel({ snapshots, avgCost, colors }: {
+  snapshots: UsageSnapshot[];
+  avgCost: number | null;
+  colors: Record<string, string>;
+}) {
   // 同步从 localStorage 初始化，避免 effect 时序覆盖问题
   const [allBlocks, setAllBlocks] = useState<Record<string, Block[]>>(() => {
     const result: Record<string, Block[]> = {};
@@ -714,7 +924,7 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
 
   // 预测卡片数据（时间轴下方用）
   const predictionRows = snapshots.map((snap, si) => {
-    const color = ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+    const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
     const blocks = allBlocks[snap.account_alias] ?? [];
     const weeklyUsed = snap.weekly_pct ?? null;
     // 只有 session_reset_at 在未来（有进行中的块）才计入当前 session 预估消耗
@@ -749,7 +959,7 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
               {/* 标题行占位 */}
               <div style={{ height: HEADER_H, borderBottom: "1px solid #2e2e2e" }} />
               {snapshots.map((snap, si) => {
-                const color = ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+                const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
                 return (
                   <div key={snap.account_alias} style={{
                     height: ROW_H, display: "flex", flexDirection: "column",
@@ -789,7 +999,7 @@ function SprintPanel({ snapshots, avgCost }: { snapshots: UsageSnapshot[]; avgCo
 
               {/* 账号行 */}
               {snapshots.map((snap, si) => {
-                const color = ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+                const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
                 const alias = snap.account_alias;
                 const blocks = allBlocks[alias] ?? [];
                 const sortedBlocks = [...blocks].sort((a, b) => a.wallHour - b.wallHour);

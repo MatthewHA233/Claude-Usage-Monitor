@@ -39,6 +39,12 @@ pub struct AccountSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountColor {
+    pub alias: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recommendation {
     pub recommended_alias: Option<String>,
     pub reason: String,

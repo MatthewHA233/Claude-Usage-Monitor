@@ -1,7 +1,21 @@
-use crate::models::UsageSnapshot;
+use crate::models::{AccountColor, UsageSnapshot};
 use rusqlite::{Connection, Result, params};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+
+/// 根据账号名哈希确定性地从调色板选色（新账号自动分配）
+fn color_for_alias(alias: &str) -> String {
+    const PALETTE: &[&str] = &[
+        "#cc785c", "#4a9eff", "#4ade80", "#f472b6", "#a78bfa",
+        "#fb923c", "#34d399", "#60a5fa", "#f87171", "#facc15",
+        "#38bdf8", "#e879f9", "#a3e635", "#fb7185", "#67e8f9",
+    ];
+    let hash: usize = alias
+        .bytes()
+        .fold(5381usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    PALETTE[hash % PALETTE.len()].to_string()
+}
 
 fn db_path() -> PathBuf {
     dirs::data_local_dir()
@@ -42,6 +56,10 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_snap_alias_time
                 ON usage_snapshots(account_alias, collected_at DESC);
+            CREATE TABLE IF NOT EXISTS account_colors (
+                alias TEXT PRIMARY KEY,
+                color TEXT NOT NULL
+            );
         ")?;
         Ok(())
     }
@@ -119,6 +137,58 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let affected = conn.execute("DELETE FROM usage_snapshots WHERE id = ?1", params![id])?;
         Ok(affected)
+    }
+
+    /// 获取所有账号的颜色配置
+    pub fn get_all_colors(&self) -> Result<Vec<AccountColor>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT alias, color FROM account_colors ORDER BY alias")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AccountColor { alias: row.get(0)?, color: row.get(1)? })
+        })?;
+        rows.collect()
+    }
+
+    /// 设置账号颜色（不存在则插入，存在则更新）
+    pub fn set_color(&self, alias: &str, color: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO account_colors (alias, color) VALUES (?1, ?2)
+             ON CONFLICT(alias) DO UPDATE SET color = excluded.color",
+            params![alias, color],
+        )?;
+        Ok(())
+    }
+
+    /// 为还没有颜色的账号自动分配（基于哈希，幂等）
+    pub fn ensure_colors_for_aliases(&self, aliases: &[String]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        for alias in aliases {
+            let color = color_for_alias(alias);
+            conn.execute(
+                "INSERT OR IGNORE INTO account_colors (alias, color) VALUES (?1, ?2)",
+                params![alias, color],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 获取所有账号的历史记录（每账号最多 limit 条，最新在前）
+    pub fn all_histories_grouped(&self, limit: i64) -> Result<HashMap<String, Vec<UsageSnapshot>>> {
+        let aliases: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT account_alias FROM usage_snapshots ORDER BY account_alias",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let mut result = HashMap::new();
+        for alias in aliases {
+            let records = self.history(&alias, limit, 0)?;
+            result.insert(alias, records);
+        }
+        Ok(result)
     }
 
     /// 获取数据库中所有账号各自最新一条（不依赖 config）

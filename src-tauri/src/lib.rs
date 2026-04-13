@@ -27,6 +27,9 @@ pub fn run() {
             commands::get_analysis,
             commands::get_recommendation,
             commands::delete_snapshot,
+            commands::get_account_colors,
+            commands::set_account_color,
+            commands::get_all_histories,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

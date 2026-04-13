@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
+import type { UsageSnapshot, Recommendation, AccountAnalysis, AccountColor } from "../types";
 
 export function useLatestSnapshots(autoRefreshMs = 0) {
   const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
@@ -72,6 +72,44 @@ export function useAnalysis() {
   }, [fetch]);
 
   return { analysis, loading, refetch: fetch };
+}
+
+export function useAccountColors() {
+  const [colors, setColors] = useState<Record<string, string>>({});
+
+  const fetch = useCallback(async () => {
+    try {
+      const data = await invoke<AccountColor[]>("get_account_colors");
+      setColors(Object.fromEntries(data.map((d) => [d.alias, d.color])));
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void fetch(); }, [fetch]);
+
+  const setColor = useCallback(async (alias: string, color: string) => {
+    await invoke("set_account_color", { alias, color });
+    setColors((prev) => ({ ...prev, [alias]: color }));
+  }, []);
+
+  return { colors, refetch: fetch, setColor };
+}
+
+export function useAllHistories() {
+  const [histories, setHistories] = useState<Record<string, UsageSnapshot[]>>({});
+  const [loading, setLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await invoke<Record<string, UsageSnapshot[]>>("get_all_histories");
+      setHistories(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void fetch(); }, [fetch]);
+
+  return { histories, loading, refetch: fetch };
 }
 
 const PAGE_SIZE = 50;

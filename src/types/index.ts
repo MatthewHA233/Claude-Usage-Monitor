@@ -21,6 +21,11 @@ export interface AccountAnalysis {
   exhaustion_count_24h: number;
 }
 
+export interface AccountColor {
+  alias: string;
+  color: string;
+}
+
 export interface AccountSummary {
   alias: string;
   session_pct: number | null;
