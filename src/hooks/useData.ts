@@ -127,7 +127,10 @@ export function useHistory(alias: string, limit = PAGE_SIZE) {
     try {
       const data = await invoke<UsageSnapshot[]>("get_history", { alias, limit, offset });
       if (append) {
-        setHistory(prev => [...prev, ...data]);
+        setHistory(prev => {
+          const seen = new Set(prev.map(s => s.id).filter(id => id != null));
+          return [...prev, ...data.filter(s => s.id == null || !seen.has(s.id))];
+        });
       } else {
         setHistory(data);
         offsetRef.current = 0;

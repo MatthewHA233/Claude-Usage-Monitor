@@ -30,6 +30,9 @@ pub fn run() {
             commands::get_account_colors,
             commands::set_account_color,
             commands::get_all_histories,
+            commands::inbox_list,
+            commands::inbox_accept,
+            commands::inbox_delete,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

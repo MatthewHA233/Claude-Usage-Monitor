@@ -1,8 +1,11 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
 import { useHistory, useAllHistories, useAccountColors } from "../hooks/useData";
+import { useResetAlarm } from "../hooks/useResetAlarm";
+import InboxBadge from "./InboxPanel";
+import { AlarmBell, AlarmBanner } from "./AlarmBell";
 
 // ── 时间轴常量 ────────────────────────────────────────────
 const SESSION_HOURS = 5;
@@ -41,9 +44,36 @@ function weeklyResetColor(h: number | null) {
   return "#bbb";
 }
 
+// ── 换算率计算（30天全量 phase 数据，按 session 消耗加权）─────
+interface AccountRate { alias: string; rate: number; sessionTotal: number; }
+
+function computeAccountRates(histories: Record<string, UsageSnapshot[]>): AccountRate[] {
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const result: AccountRate[] = [];
+  for (const [alias, records] of Object.entries(histories)) {
+    const recent = records.filter(r => r.collected_at >= cutoff);
+    if (recent.length === 0) continue;
+    const ann = computeTableAnnotations(recent);
+    let totalWeeklyIncrease = 0;
+    let totalSession = 0;
+    for (const phase of ann.weeklyPhases.values()) {
+      if (phase.weeklyIncrease != null && phase.weeklyIncrease > 0 && phase.sessionTotal > 0) {
+        totalWeeklyIncrease += phase.weeklyIncrease;
+        totalSession += phase.sessionTotal;
+      }
+    }
+    if (totalSession > 0 && totalWeeklyIncrease > 0) {
+      result.push({ alias, rate: totalWeeklyIncrease / totalSession * 100, sessionTotal: totalSession });
+    }
+  }
+  return result;
+}
+
 // ── StatusCards ───────────────────────────────────────────
 export default function StatusCards({ snapshots, recommendation, analysis, onRefresh }: Props) {
   const { colors, setColor } = useAccountColors();
+  const { histories } = useAllHistories();
+  const alarm = useResetAlarm(snapshots);
   const snapshotMap = Object.fromEntries(snapshots.map((s) => [s.account_alias, s]));
 
   const orderedAliases = (() => {
@@ -62,6 +92,8 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
     return result;
   })();
 
+  const accountRates = useMemo(() => computeAccountRates(histories), [histories]);
+
   const validCosts = analysis
     .map((a) => a.weekly_cost_per_session_24h)
     .filter((v): v is number => v !== null && v > 0);
@@ -71,11 +103,15 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <AlarmBanner ringingAliases={alarm.ringingAliases} colors={colors} onStop={alarm.stopAll} />
+      <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold" style={{ color: "#ddd" }}>账号状态总览</h2>
-        <button onClick={onRefresh} className="btn-ghost flex items-center gap-1.5 text-xs">
-          <span>↺</span>刷新
-        </button>
+        <div className="flex items-center gap-2 ml-auto">
+          <RateInfoBadge accountRates={accountRates} />
+          <button onClick={onRefresh} className="btn-ghost flex items-center gap-1.5 text-xs">
+            <span>↺</span>刷新
+          </button>
+        </div>
       </div>
 
       {orderedAliases.length === 0 ? (
@@ -98,11 +134,110 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
               allSnapshots={snapshots}
               colors={colors}
               setColor={setColor}
+              alarmEnabled={alarm.isEnabled(alias)}
+              alarmRinging={alarm.ringingAliases.includes(alias)}
+              onToggleAlarm={() => alarm.toggle(alias)}
             />
           );
         })
       )}
     </div>
+  );
+}
+
+// ── RateInfoBadge ─────────────────────────────────────────
+function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
+  const [open, setOpen] = useState(false);
+  const badgeRef = useRef<HTMLDivElement>(null);
+  const popRef  = useRef<HTMLDivElement>(null);
+
+  // 关闭弹窗的点击外部检测（必须在 early return 之前，保证 hooks 顺序固定）
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (!badgeRef.current?.contains(e.target as Node) && !popRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  if (accountRates.length === 0) return null;
+
+  const totalSession = accountRates.reduce((s, a) => s + a.sessionTotal, 0);
+  const weightedAvg = accountRates.reduce((s, a) => s + a.rate * a.sessionTotal, 0) / totalSession;
+
+  // 弹窗定位：badge 下方，超出右侧则右对齐
+  const popStyle = (): React.CSSProperties => {
+    if (!badgeRef.current) return { position: 'fixed', top: 0, left: 0 };
+    const r = badgeRef.current.getBoundingClientRect();
+    const popW = 320;
+    const left = r.right - popW < 8 ? r.left : r.right - popW;
+    return { position: 'fixed', top: r.bottom + 6, left: Math.max(8, left), width: popW, zIndex: 400 };
+  };
+
+  return (
+    <>
+      <div ref={badgeRef} onClick={() => setOpen(v => !v)}
+        style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+          padding: '3px 10px', borderRadius: 20, border: '1px solid #444',
+          background: open ? '#2a2a2a' : '#1e1e1e', userSelect: 'none' }}>
+        <span style={{ fontSize: 11, color: '#bbb' }}>换算率</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
+          {weightedAvg.toFixed(2)}%
+        </span>
+        <span style={{ fontSize: 11, color: '#aaa' }}>Weekly / 100% Session</span>
+        <span style={{ fontSize: 11, color: open ? '#a78bfa' : '#888' }}>▾</span>
+      </div>
+
+      {open && (
+        <div ref={popRef} style={{ ...popStyle(),
+          background: '#161616', border: '1px solid #3a3a3a', borderRadius: 10,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.75)', overflow: 'hidden' }}>
+          {/* 头部 */}
+          <div style={{ padding: '11px 14px', borderBottom: '1px solid #2e2e2e', background: '#1c1c1c' }}>
+            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 4 }}>加权均值（权重 = 近30天 Session 消耗量）</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
+              <span style={{ fontSize: 22, fontWeight: 800, color: '#a78bfa', fontFamily: 'monospace' }}>
+                {weightedAvg.toFixed(2)}%
+              </span>
+              <span style={{ fontSize: 12, color: '#bbb' }}>Weekly / 100% Session</span>
+            </div>
+          </div>
+          {/* 各账号明细 */}
+          <div style={{ padding: '6px 0' }}>
+            {[...accountRates].sort((a, b) => b.rate - a.rate).map(a => {
+              const w = a.sessionTotal / totalSession;
+              return (
+                <div key={a.alias} style={{ padding: '6px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: '#ddd', fontWeight: 600 }}>{a.alias}</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
+                      {a.rate.toFixed(2)}%
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <div style={{ flex: 1, height: 4, background: '#2e2e2e', borderRadius: 2, overflow: 'hidden' }}>
+                      <div style={{ width: `${w * 100}%`, height: '100%', background: '#7c3aed', borderRadius: 2 }} />
+                    </div>
+                    <span style={{ fontSize: 11, color: '#bbb', fontFamily: 'monospace', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                      {a.sessionTotal.toFixed(0)}% · {(w * 100).toFixed(0)}%权
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {/* 公式 */}
+          <div style={{ padding: '8px 14px', borderTop: '1px solid #2e2e2e', background: '#1c1c1c' }}>
+            <span style={{ fontSize: 11, color: '#aaa', fontFamily: 'monospace' }}>
+              均值 = Σ(rate × session消耗) ÷ 总session消耗
+            </span>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -117,9 +252,12 @@ interface CardProps {
   allSnapshots: UsageSnapshot[];
   colors: Record<string, string>;
   setColor: (alias: string, color: string) => Promise<void>;
+  alarmEnabled: boolean;
+  alarmRinging: boolean;
+  onToggleAlarm: () => void;
 }
 
-function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots, colors, setColor }: CardProps) {
+function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots, colors, setColor, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const accountColor = colors[alias] ?? DEFAULT_COLOR;
@@ -181,7 +319,11 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
             >
               <div className="space-y-2.5">
                 <UsageRow label="Session (5h)" pct={snap.session_pct ?? null}
-                  resetHours={sessionHours} resetAt={snap.session_reset_at} colorFn={sessionResetColor} />
+                  resetHours={sessionHours} resetAt={snap.session_reset_at} colorFn={sessionResetColor}
+                  resetExtra={
+                    <AlarmBell enabled={alarmEnabled} ringing={alarmRinging} onToggle={onToggleAlarm} />
+                  }
+                />
                 <UsageRow label="Weekly" pct={snap.weekly_pct ?? null}
                   resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor} />
               </div>
@@ -225,10 +367,11 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
 }
 
 // ── UsageRow ──────────────────────────────────────────────
-function UsageRow({ label, pct, resetHours, resetAt, colorFn }: {
+function UsageRow({ label, pct, resetHours, resetAt, colorFn, resetExtra }: {
   label: string; pct: number | null;
   resetHours: number | null; resetAt: string | null;
   colorFn: (h: number | null) => string;
+  resetExtra?: React.ReactNode;
 }) {
   const rem = remaining(pct);
   const color = colorFn(resetHours);
@@ -243,7 +386,10 @@ function UsageRow({ label, pct, resetHours, resetAt, colorFn }: {
         </div>
       </div>
       <ProgressBar pct={pct} />
-      <div className="text-xs mt-1 font-medium" style={{ color }}>{resetText}</div>
+      <div className="text-xs mt-1 font-medium flex items-center gap-1.5" style={{ color }}>
+        <span>{resetText}</span>
+        {resetExtra}
+      </div>
     </div>
   );
 }
@@ -265,63 +411,464 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 // ── Daily session stats ───────────────────────────────────
 interface DayStats { date: string; consumed: number; }
 
+// session_reset_at / weekly_reset_at 整点±1分钟归一：四舍五入到最近整点
+function normalizeToHour(isoStr: string): string {
+  const d = new Date(isoStr);
+  if (d.getMinutes() >= 30) d.setHours(d.getHours() + 1);
+  d.setMinutes(0, 0, 0);
+  // 用本地时间分量，避免 toISOString() 输出 UTC 导致时区偏差
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}`;
+}
+
+// 按 session_reset_at 整点分组，每组取最新值作为该 session 消耗量
+function groupSessionsByResetHour(records: UsageSnapshot[]): Map<string, UsageSnapshot> {
+  const valid = [...records]
+    .filter(r => r.error == null && r.session_pct != null && r.session_reset_at != null)
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+  const latest = new Map<string, UsageSnapshot>();
+  for (const r of valid) {
+    latest.set(normalizeToHour(r.session_reset_at!), r); // 后覆盖前 = 保留最新
+  }
+  return latest;
+}
+
 function computeDailyStats(records: UsageSnapshot[]): {
   days: DayStats[];
   weeklyResetDates: Set<string>;
 } {
-  const sorted = [...records]
-    .filter(r => r.error == null && r.session_pct != null && r.weekly_pct != null)
+  const sessionLatest = groupSessionsByResetHour(records);
+  if (sessionLatest.size === 0) return { days: [], weeklyResetDates: new Set() };
+
+  // 按时间排序后，按日期累加每个 session 的最新值
+  const sortedSessions = [...sessionLatest.values()]
     .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
 
-  if (sorted.length === 0) return { days: [], weeklyResetDates: new Set() };
+  const dayConsumed = new Map<string, number>();
+  const weeklyResetDates = new Set<string>();
+  let prevWeeklyKey: string | null = null;
 
-  // 按本地日期分组
-  const byDate = new Map<string, UsageSnapshot[]>();
-  for (const r of sorted) {
-    const date = new Date(r.collected_at).toLocaleDateString("en-CA"); // YYYY-MM-DD
-    if (!byDate.has(date)) byDate.set(date, []);
-    byDate.get(date)!.push(r);
+  for (const r of sortedSessions) {
+    const date = new Date(r.collected_at).toLocaleDateString("en-CA");
+    dayConsumed.set(date, (dayConsumed.get(date) ?? 0) + r.session_pct!);
+    // weekly_reset_at 变化 = 新的一周开始
+    const wKey = r.weekly_reset_at ? normalizeToHour(r.weekly_reset_at) : null;
+    if (prevWeeklyKey && wKey && wKey !== prevWeeklyKey) weeklyResetDates.add(date);
+    if (wKey) prevWeeklyKey = wKey;
   }
 
-  // 生成首日到今日的完整日期序列（最多显示 30 天）
+  // 从最早日期到今天构建完整序列，最多显示 30 天
+  const sortedDates = [...dayConsumed.keys()].sort();
   const allDates: string[] = [];
-  const firstDate = [...byDate.keys()].sort()[0];
-  let cur = new Date(firstDate + "T00:00:00");
-  const today = new Date();
-  today.setHours(23, 59, 59, 999);
-  while (cur <= today) {
-    allDates.push(cur.toLocaleDateString("en-CA"));
-    cur.setDate(cur.getDate() + 1);
-  }
+  const cur = new Date(sortedDates[0] + "T00:00:00");
+  const today = new Date(); today.setHours(23, 59, 59, 999);
+  while (cur <= today) { allDates.push(cur.toLocaleDateString("en-CA")); cur.setDate(cur.getDate() + 1); }
   const displayDates = new Set(allDates.slice(-30));
 
-  const weeklyResetDates = new Set<string>();
   const days: DayStats[] = [];
-
-  let prev_s = sorted[0].session_pct!;
-  let prev_w = sorted[0].weekly_pct!;
-
   for (const date of allDates) {
-    const recs = byDate.get(date) ?? [];
-    let daily = 0;
-    for (const r of recs) {
-      const cs = r.session_pct!;
-      const cw = r.weekly_pct!;
-      if (cs >= prev_s) {
-        daily += cs - prev_s;
-      } else if (prev_s - cs >= 2) {
-        daily += cs;
-      }
-      if (prev_w - cw > 10) weeklyResetDates.add(date);
-      prev_s = cs;
-      prev_w = cw;
-    }
     if (displayDates.has(date)) {
-      days.push({ date, consumed: Math.round(daily * 10) / 10 });
+      days.push({ date, consumed: Math.round((dayConsumed.get(date) ?? 0) * 10) / 10 });
+    }
+  }
+  return { days, weeklyResetDates };
+}
+
+// ── Table annotations（历史表格高亮框 + 悬浮详情）──────────
+// spanType: 1=session 完整在本阶段内  2=横跨两段（从前段延续）  3=横跨三段及以上（中间段）
+interface SessionDetail {
+  resetHour: string;
+  startPct: number;     // 本阶段内该 session 首次出现时的 session_pct
+  endPct: number;       // 本阶段内该 session 最后一次的 session_pct
+  contribution: number; // endPct − startPct（本阶段内该 session 实际消耗）
+  spanType: 1 | 2 | 3;
+}
+
+interface WeeklyPhaseDetail {
+  sessions: SessionDetail[];
+  sessionTotal: number;
+  weeklyLevel: number;
+  weeklyIncrease: number | null;
+  weeklyResetHour: string;
+  phaseIndexInWeek: number;
+  weekIndex: number;
+}
+
+interface TableAnnotations {
+  dayFormulas: Map<string, string>;
+  dayDetails: Map<string, SessionDetail[]>;
+  dayOrder: Map<string, number>;
+  weeklyPhases: Map<string, WeeklyPhaseDetail>;
+  getDayKey: (r: UsageSnapshot) => string;
+  getWeeklyKey: (r: UsageSnapshot) => string;
+}
+
+function computeTableAnnotations(records: UsageSnapshot[]): TableAnnotations {
+  // ── Session-latest 用于 Day 分组（Session 列框） ──────────
+  const sessionLatest = groupSessionsByResetHour(records);
+  const sortedLatest = [...sessionLatest.values()]
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+
+  const dayVals = new Map<string, number[]>();
+  const dayDetails = new Map<string, SessionDetail[]>();
+  for (const r of sortedLatest) {
+    const date = new Date(r.collected_at).toLocaleDateString("en-CA");
+    if (!dayVals.has(date)) { dayVals.set(date, []); dayDetails.set(date, []); }
+    dayVals.get(date)!.push(r.session_pct!);
+    // Day 详情只展示最终值，startPct=0, contribution=pct
+    dayDetails.get(date)!.push({
+      resetHour: normalizeToHour(r.session_reset_at!),
+      startPct: 0, endPct: r.session_pct!, contribution: r.session_pct!, spanType: 1,
+    });
+  }
+  const dayFormulas = new Map<string, string>();
+  for (const [date, vals] of dayVals) {
+    const total = Math.round(vals.reduce((a, b) => a + b, 0) * 10) / 10;
+    const parts = vals.map(v => v.toFixed(0) + '%');
+    dayFormulas.set(date, parts.length > 1
+      ? (parts.length <= 5 ? parts.join('+') : `${parts.length}次`) + '=' + total.toFixed(0) + '%'
+      : total.toFixed(0) + '%');
+  }
+  const dayOrder = new Map([...dayVals.keys()].sort().map((d, i) => [d, i]));
+
+  // ── Weekly 阶段 ────────────────────────────────────────────
+  // 分段规则：weekly_pct 整数值首次变化的那条记录是旧段的收尾（归入旧段），
+  // 下一条同值记录才是新段的起点。
+  // 例：31,31,31,32|32,32,...,34|34,34 → 第1段/第2段/当前段
+  // weeklyIncrease = phaseWeeklyLast − phaseWeeklyFirst（最后段为 null）
+
+  const localDate = (isoStr: string): string => {
+    const d = new Date(isoStr);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+
+  const allSorted = [...records]
+    .filter(r => r.weekly_pct != null && r.weekly_reset_at != null)
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+
+  interface PhaseSessionEntry { startPct: number; endPct: number; }
+  const phaseSessionMap = new Map<string, Map<string, PhaseSessionEntry>>();
+  const phaseInsertOrder: string[] = [];
+  const phaseWeeklyFirst = new Map<string, number>();
+  const phaseWeeklyLast  = new Map<string, number>();
+  const weekColorMap = new Map<string, number>();
+  let weekColorCnt = 0;
+  // collected_at → phaseKey（用于表格行查找，不能再用纯函数推导）
+  const recordPhaseMap = new Map<string, string>();
+
+  const globalSessionPct = new Map<string, number>();
+
+  let curPhaseKey: string | null = null;
+  let prevRound: number | null = null;
+  let prevWDay: string | null = null;
+  let phaseSeq = 0;
+
+  const initPhase = (key: string, firstWeeklyPct: number) => {
+    phaseSessionMap.set(key, new Map());
+    phaseInsertOrder.push(key);
+    phaseWeeklyFirst.set(key, firstWeeklyPct);
+  };
+
+  const addToPhase = (phaseKey: string, r: typeof allSorted[0]) => {
+    recordPhaseMap.set(r.collected_at, phaseKey);
+    phaseWeeklyLast.set(phaseKey, r.weekly_pct!);
+    if (r.session_reset_at == null || r.session_pct == null) return;
+    const sHour = normalizeToHour(r.session_reset_at);
+    const sm = phaseSessionMap.get(phaseKey)!;
+    if (!sm.has(sHour)) {
+      sm.set(sHour, { startPct: globalSessionPct.get(sHour) ?? 0, endPct: r.session_pct });
+    } else {
+      sm.get(sHour)!.endPct = r.session_pct;
+    }
+    globalSessionPct.set(sHour, r.session_pct);
+  };
+
+  for (const r of allSorted) {
+    const wDay = localDate(r.weekly_reset_at!);
+    const wRound = Math.round(r.weekly_pct!);
+    if (!weekColorMap.has(wDay)) weekColorMap.set(wDay, weekColorCnt++);
+
+    const weekChanged = prevWDay !== null && wDay !== prevWDay;
+
+    if (curPhaseKey === null || weekChanged) {
+      // 新的一周，直接开新段
+      curPhaseKey = `${wDay}_ph${phaseSeq++}`;
+      initPhase(curPhaseKey, r.weekly_pct!);
+      prevRound = wRound;
+      prevWDay = wDay;
+      addToPhase(curPhaseKey, r);
+    } else if (wRound !== prevRound) {
+      // 整数值首次变化：当前记录作为旧段收尾，然后开新段（当前记录不进新段）
+      addToPhase(curPhaseKey, r);   // 收尾旧段
+      const newKey = `${wDay}_ph${phaseSeq++}`;
+      initPhase(newKey, r.weekly_pct!); // 新段首个值暂设为当前，会被下条覆盖
+      curPhaseKey = newKey;
+      prevRound = wRound;
+      // 注意：当前记录已归入旧段，不再归入新段
+    } else {
+      addToPhase(curPhaseKey, r);
+      prevRound = wRound;
     }
   }
 
-  return { days, weeklyResetDates };
+  // 按周分组
+  const phasesByWeek = new Map<string, string[]>();
+  for (const pKey of phaseInsertOrder) {
+    const wDay = pKey.split('_ph')[0];
+    if (!phasesByWeek.has(wDay)) phasesByWeek.set(wDay, []);
+    phasesByWeek.get(wDay)!.push(pKey);
+  }
+
+  // ── 后处理：≤1 条记录的段并入前一段 ─────────────────────────
+  const phaseRecordCount = new Map<string, number>();
+  for (const pk of recordPhaseMap.values()) {
+    phaseRecordCount.set(pk, (phaseRecordCount.get(pk) ?? 0) + 1);
+  }
+
+  const mergePhaseInto = (from: string, into: string) => {
+    for (const [ca, pk] of recordPhaseMap) {
+      if (pk === from) recordPhaseMap.set(ca, into);
+    }
+    const fromSm = phaseSessionMap.get(from);
+    const intoSm = phaseSessionMap.get(into);
+    if (fromSm && intoSm) {
+      for (const [sHour, entry] of fromSm) {
+        if (intoSm.has(sHour)) intoSm.get(sHour)!.endPct = entry.endPct;
+        else intoSm.set(sHour, entry);
+      }
+    }
+    const fromLast = phaseWeeklyLast.get(from);
+    if (fromLast != null) phaseWeeklyLast.set(into, fromLast);
+  };
+
+  for (const [wDay, phaseKeys] of phasesByWeek) {
+    const toRemove = new Set<string>();
+    let lastValidKey = phaseKeys[0];
+    for (let i = 1; i < phaseKeys.length; i++) {
+      const pKey = phaseKeys[i];
+      if ((phaseRecordCount.get(pKey) ?? 0) <= 1) {
+        mergePhaseInto(pKey, lastValidKey);
+        toRemove.add(pKey);
+      } else {
+        lastValidKey = pKey;
+      }
+    }
+    if (toRemove.size > 0) {
+      phasesByWeek.set(wDay, phaseKeys.filter(k => !toRemove.has(k)));
+    }
+  }
+
+  const weeklyPhases = new Map<string, WeeklyPhaseDetail>();
+  for (const [wDay, phaseKeys] of phasesByWeek) {
+    for (let i = 0; i < phaseKeys.length; i++) {
+      const pKey = phaseKeys[i];
+      const isLast = i === phaseKeys.length - 1;
+      const nextPKey = phaseKeys[i + 1] ?? null;
+      const sessionMap = phaseSessionMap.get(pKey)!;
+      const nextSessionMap = nextPKey ? phaseSessionMap.get(nextPKey) : null;
+
+      const sessions: SessionDetail[] = [];
+      for (const [sHour, entry] of sessionMap) {
+        const contribution = Math.round((entry.endPct - entry.startPct) * 10) / 10;
+        const isCarried = entry.startPct > 2;
+        const continuesNext = nextSessionMap?.has(sHour) ?? false;
+        let spanType: 1 | 2 | 3;
+        if (!isCarried && !continuesNext) spanType = 1;
+        else if (isCarried && continuesNext) spanType = 3;
+        else spanType = 2;
+        if (contribution >= 0) {
+          sessions.push({ resetHour: sHour, startPct: entry.startPct, endPct: entry.endPct, contribution, spanType });
+        }
+      }
+      sessions.sort((a, b) => a.resetHour.localeCompare(b.resetHour));
+
+      const sessionTotal = Math.round(sessions.reduce((s, d) => s + d.contribution, 0) * 10) / 10;
+      // weeklyIncrease = 本段内 weekly 涨幅，最后段（进行中）= null
+      const weeklyIncrease = isLast ? null
+        : Math.round(((phaseWeeklyLast.get(pKey) ?? 0) - (phaseWeeklyFirst.get(pKey) ?? 0)) * 10) / 10;
+
+      weeklyPhases.set(pKey, {
+        sessions, sessionTotal,
+        weeklyLevel: Math.round((phaseWeeklyLast.get(pKey) ?? 0) * 10) / 10,
+        weeklyIncrease,
+        weeklyResetHour: wDay,
+        phaseIndexInWeek: i,
+        weekIndex: weekColorMap.get(wDay) ?? 0,
+      });
+    }
+  }
+
+  const getDayKey = (r: UsageSnapshot) => {
+    if (!r.session_reset_at) return `isolated_${r.id ?? r.collected_at}`;
+    return new Date(r.collected_at).toLocaleDateString("en-CA");
+  };
+  // 用 recordPhaseMap 查找，而非纯函数推导（同值不同段的情况用纯函数无法区分）
+  const getWeeklyKey = (r: UsageSnapshot) => {
+    if (!r.weekly_reset_at || r.weekly_pct == null) return `isolated_${r.id ?? r.collected_at}`;
+    return recordPhaseMap.get(r.collected_at) ?? `isolated_${r.id ?? r.collected_at}`;
+  };
+
+  return { dayFormulas, dayDetails, dayOrder, weeklyPhases, getDayKey, getWeeklyKey };
+}
+
+// ── Session 分组调色板（冷色系，按天循环）─────────────────
+const DAY_GROUP_PALETTE = [
+  { bg: 'rgba(99,102,241,0.13)',  border: 'rgba(99,102,241,0.6)'  },  // indigo
+  { bg: 'rgba(14,165,233,0.13)',  border: 'rgba(14,165,233,0.6)'  },  // sky
+  { bg: 'rgba(16,185,129,0.13)',  border: 'rgba(16,185,129,0.6)'  },  // emerald
+  { bg: 'rgba(217,70,239,0.13)',  border: 'rgba(217,70,239,0.6)'  },  // fuchsia
+  { bg: 'rgba(239,68,68,0.13)',   border: 'rgba(239,68,68,0.6)'   },  // red
+  { bg: 'rgba(59,130,246,0.13)',  border: 'rgba(59,130,246,0.6)'  },  // blue
+];
+
+// ── Weekly 分组调色板（暖色系，按周循环，虚线框区别于 Session）─
+const WEEKLY_GROUP_PALETTE = [
+  { bg: 'rgba(234,179,8,0.12)',   border: 'rgba(234,179,8,0.65)'   },  // yellow
+  { bg: 'rgba(236,72,153,0.12)',  border: 'rgba(236,72,153,0.65)'  },  // pink
+  { bg: 'rgba(249,115,22,0.12)',  border: 'rgba(249,115,22,0.65)'  },  // orange
+  { bg: 'rgba(244,63,94,0.12)',   border: 'rgba(244,63,94,0.65)'   },  // rose
+  { bg: 'rgba(168,85,247,0.12)',  border: 'rgba(168,85,247,0.65)'  },  // violet
+  { bg: 'rgba(20,184,166,0.12)',  border: 'rgba(20,184,166,0.65)'  },  // teal
+];
+
+// ── GroupTooltip（跟随鼠标的悬浮详情面板）──────────────────
+interface TooltipInfo {
+  type: 'day' | 'weekly';
+  key: string;
+  currentSessionHour: string;
+}
+
+function SessionList({ details, currentHour, palette, showSpan = false }: {
+  details: SessionDetail[];
+  currentHour: string;
+  palette: { bg: string; border: string };
+  showSpan?: boolean;
+}) {
+  const color = palette.border.replace(/[\d.]+\)$/, '1)');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {details.map((d, i) => {
+        const isCurrent = d.resetHour === currentHour;
+        const hour = d.resetHour.substring(11);
+        const spanTag = showSpan && d.spanType !== 1
+          ? (d.spanType === 3 ? ' ↕' : d.startPct > 2 ? ' ←' : ' →')
+          : '';
+        const valueLabel = showSpan && d.spanType !== 1
+          ? `${d.startPct.toFixed(0)}→${d.endPct.toFixed(0)}%`
+          : `+${d.contribution.toFixed(0)}%`;
+        return (
+          <div key={i} style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: isCurrent ? '3px 6px' : '0',
+            borderRadius: isCurrent ? 4 : 0,
+            background: isCurrent ? palette.bg : 'transparent',
+            outline: isCurrent ? `1px solid ${palette.border}` : 'none',
+          }}>
+            <span style={{ fontSize: isCurrent ? 13 : 12, color: isCurrent ? '#ddd' : '#aaa', width: 46, flexShrink: 0, fontFamily: 'monospace', fontWeight: isCurrent ? 700 : 400 }}>
+              {hour}:00{spanTag}
+            </span>
+            <div style={{ flex: 1, height: isCurrent ? 6 : 5, background: '#333', borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ width: `${Math.min(100, d.contribution)}%`, height: '100%', borderRadius: 3,
+                background: isCurrent ? color : palette.border.replace(/[\d.]+\)$/, '0.5)') }} />
+            </div>
+            <span style={{ fontSize: isCurrent ? 13 : 12, fontWeight: isCurrent ? 800 : 600,
+              color: isCurrent ? color : '#bbb', fontFamily: 'monospace', width: 58, textAlign: 'right', flexShrink: 0 }}>
+              {valueLabel}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// GroupTooltip 只负责内容渲染，不负责定位（由父组件的 ref+RAF 控制）
+function GroupTooltip({ info, annotations }: {
+  info: TooltipInfo;
+  annotations: TableAnnotations;
+}) {
+  const isDay = info.type === 'day';
+
+  if (isDay) {
+    const details = annotations.dayDetails.get(info.key);
+    if (!details || details.length === 0) return null;
+    const palette = DAY_GROUP_PALETTE[(annotations.dayOrder.get(info.key) ?? 0) % DAY_GROUP_PALETTE.length];
+    const color = palette.border.replace(/[\d.]+\)$/, '1)');
+    const total = Math.round(details.reduce((a, b) => a + b.contribution, 0) * 10) / 10;
+    const dayIdx = annotations.dayOrder.get(info.key) ?? 0;
+    return (
+      <div style={{ width: 260, background: '#141414', border: `1px solid ${palette.border}`, borderRadius: 10,
+        boxShadow: '0 20px 60px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+        <div style={{ background: palette.bg, borderBottom: `1px solid ${palette.border.replace(/[\d.]+\)$/, '0.25)')}`, padding: '9px 13px' }}>
+          <div style={{ fontSize: 11, color: '#aaa', letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 3 }}>Day {dayIdx + 1} · Session 每日消耗</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: '#eee', fontFamily: 'monospace' }}>{info.key}</div>
+        </div>
+        <div style={{ padding: '10px 13px' }}>
+          <SessionList details={details} currentHour={info.currentSessionHour} palette={palette} />
+        </div>
+        <div style={{ borderTop: `1px solid ${palette.border.replace(/[\d.]+\)$/, '0.25)')}`, padding: '8px 13px',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: palette.bg }}>
+          <span style={{ fontSize: 12, color: '#ccc' }}>合计消耗</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
+            <span style={{ fontSize: 19, fontWeight: 800, color, fontFamily: 'monospace', lineHeight: 1 }}>{total.toFixed(0)}</span>
+            <span style={{ fontSize: 12, color: palette.border }}>%</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const phase = annotations.weeklyPhases.get(info.key);
+  if (!phase) return null;
+  const { sessions, sessionTotal, weeklyLevel, weeklyIncrease, weekIndex, phaseIndexInWeek } = phase;
+  const palette = WEEKLY_GROUP_PALETTE[weekIndex % WEEKLY_GROUP_PALETTE.length];
+  const color = palette.border.replace(/[\d.]+\)$/, '1)');
+  const rate = weeklyIncrease != null && sessionTotal > 0
+    ? Math.round(weeklyIncrease / sessionTotal * 1000) / 10
+    : null;
+  return (
+    <div style={{ width: 276, background: '#141414', border: `1px dashed ${palette.border}`, borderRadius: 10,
+      boxShadow: '0 20px 60px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+      <div style={{ background: palette.bg, borderBottom: `1px dashed ${palette.border.replace(/[\d.]+\)$/, '0.3)')}`, padding: '9px 13px' }}>
+        <div style={{ fontSize: 11, color: '#aaa', letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 3 }}>
+          Week {weekIndex + 1} · 第 {phaseIndexInWeek + 1} 段
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: '#eee', fontFamily: 'monospace' }}>
+          Weekly ≈ {weeklyLevel.toFixed(0)}%
+        </div>
+      </div>
+      <div style={{ padding: '10px 13px' }}>
+        <div style={{ fontSize: 11, color: '#bbb', marginBottom: 7, letterSpacing: '0.04em' }}>本段 SESSION 消耗</div>
+        <SessionList details={sessions} currentHour={info.currentSessionHour} palette={palette} showSpan={true} />
+      </div>
+      <div style={{ borderTop: `1px dashed ${palette.border.replace(/[\d.]+\)$/, '0.25)')}`, padding: '9px 13px',
+        display: 'flex', flexDirection: 'column', gap: 6, background: palette.bg }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, color: '#ccc' }}>Session 消耗合计</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color, fontFamily: 'monospace' }}>{sessionTotal.toFixed(0)}%</span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, color: '#ccc' }}>导致 Weekly 增加</span>
+          {weeklyIncrease != null
+            ? <span style={{ fontSize: 14, fontWeight: 700, color: '#f0a500', fontFamily: 'monospace' }}>+{weeklyIncrease.toFixed(1)}%</span>
+            : <span style={{ fontSize: 12, color: '#bbb' }}>当前阶段</span>}
+        </div>
+        {rate != null && (
+          <div style={{ marginTop: 2, padding: '6px 9px', borderRadius: 5,
+            background: palette.border.replace(/[\d.]+\)$/, '0.15)'),
+            border: `1px solid ${palette.border.replace(/[\d.]+\)$/, '0.35)')}` }}>
+            <span style={{ fontSize: 11, color: '#ccc', letterSpacing: '0.04em' }}>换算率  </span>
+            <span style={{ fontSize: 12, fontWeight: 800, color, fontFamily: 'monospace' }}>
+              100% Session → {rate.toFixed(1)}% Weekly
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // 按周切分 days 数组，返回 [{startI, endI, weekIdx}]
@@ -618,11 +1165,16 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
   const { histories, loading: allLoading } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [chartMode, setChartMode] = useState<"single" | "total">("single");
+  const [activeGroup, setActiveGroup] = useState<TooltipInfo | null>(null);
+  // ref 控制悬浮面板 DOM 位置，mousemove 直接写 style 避免 setState 触发重渲染
+  const tooltipElRef = useRef<HTMLDivElement>(null);
+  const rafIdRef = useRef(0);
   const anchorRef = useRef<HTMLDivElement>(null);
 
   const { days, weeklyResetDates } = computeDailyStats(statsRecords);
   const accountColor = colors[alias] ?? DEFAULT_COLOR;
   const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
+  const annotations = useMemo(() => computeTableAnnotations(statsRecords), [statsRecords]);
 
   // 向上查找实际在滚动的祖先（scrollHeight > clientHeight），监听滚动
   useEffect(() => {
@@ -665,6 +1217,9 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
   if (history.length === 0) return <div className="text-center py-8 text-sm" style={{ color: "#999" }}>暂无历史数据</div>;
   return (
     <div ref={anchorRef}>
+      <div className="flex justify-end mb-2">
+        <InboxBadge aliasFilter={alias} onChanged={refetch} colors={colors} />
+      </div>
       {/* 每日消耗图（可切换单账号/总览） */}
       <div className="card p-0 overflow-hidden mb-3">
         <div className="px-4 py-2.5 flex items-center justify-between" style={{ borderBottom: "1px solid #3a3a3a" }}>
@@ -714,40 +1269,137 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
               </tr>
             </thead>
             <tbody>
-              {history.map((snap, i) => (
-                <tr key={snap.id ?? i} style={{ borderBottom: "1px solid #2e2e2e", background: rowWeekBg(snap) }} className="hover:brightness-125">
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#ccc" }}>{formatLocalTime(snap.collected_at)}</td>
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-2 min-w-[90px]">
-                      <span className="font-mono font-semibold w-12"
-                        style={{ color: (snap.session_pct ?? 0) >= 80 ? "#f87171" : (snap.session_pct ?? 0) >= 60 ? "#f0a500" : "#7ab8f5" }}>
-                        {formatPct(snap.session_pct)}
-                      </span>
-                      <ProgressBar pct={snap.session_pct} className="flex-1" />
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.session_reset_at)}</td>
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-2 min-w-[90px]">
-                      <span className="font-mono font-semibold w-12"
-                        style={{ color: (snap.weekly_pct ?? 0) >= 80 ? "#f87171" : (snap.weekly_pct ?? 0) >= 60 ? "#f0a500" : "#4ade80" }}>
-                        {formatPct(snap.weekly_pct)}
-                      </span>
-                      <ProgressBar pct={snap.weekly_pct} className="flex-1" />
-                    </div>
-                  </td>
-                  <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.weekly_reset_at)}</td>
-                  <td className="px-3 py-2 text-right">
-                    <button
-                      onClick={() => snap.id != null && setConfirmId(snap.id)}
-                      style={{ color: "#777", fontSize: 12, background: "none", border: "none", cursor: "pointer", padding: "2px 4px", borderRadius: 4 }}
-                      onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
-                      onMouseLeave={(e) => (e.currentTarget.style.color = "#777")}
-                      title="删除此记录"
-                    >✕</button>
-                  </td>
-                </tr>
-              ))}
+              {history.map((snap, i) => {
+                const dayKey = annotations.getDayKey(snap);
+                const weeklyKey = annotations.getWeeklyKey(snap);
+                const prevSnap = i > 0 ? history[i - 1] : null;
+                const nextSnap = i < history.length - 1 ? history[i + 1] : null;
+                const isDayFirst = !prevSnap || annotations.getDayKey(prevSnap) !== dayKey;
+                const isDayLast = !nextSnap || annotations.getDayKey(nextSnap) !== dayKey;
+                const isWeeklyFirst = !prevSnap || annotations.getWeeklyKey(prevSnap) !== weeklyKey;
+                const isWeeklyLast = !nextSnap || annotations.getWeeklyKey(nextSnap) !== weeklyKey;
+                const hasDayGroup = annotations.dayFormulas.has(dayKey);
+                const hasWeeklyGroup = annotations.weeklyPhases.has(weeklyKey);
+
+                const dayPalette = hasDayGroup
+                  ? DAY_GROUP_PALETTE[(annotations.dayOrder.get(dayKey) ?? 0) % DAY_GROUP_PALETTE.length]
+                  : null;
+                const weeklyPhase = hasWeeklyGroup ? annotations.weeklyPhases.get(weeklyKey)! : null;
+                const weeklyPalette = weeklyPhase
+                  ? WEEKLY_GROUP_PALETTE[weeklyPhase.weekIndex % WEEKLY_GROUP_PALETTE.length]
+                  : null;
+
+                // boxShadow inset 方案：完全不受 border-collapse 影响，上下边界始终可见
+                const isDayHovered = activeGroup?.type === 'day' && activeGroup.key === dayKey;
+                const isWeeklyHovered = activeGroup?.type === 'weekly' && activeGroup.key === weeklyKey;
+
+                const makeDayCellStyle = (
+                  p: { bg: string; border: string } | null,
+                  isFirst: boolean, isLast: boolean,
+                  hovered: boolean,
+                ): React.CSSProperties => p ? {
+                  padding: '5px 10px', cursor: 'default',
+                  background: hovered ? p.border.replace(/[\d.]+\)$/, '0.22)') : p.bg,
+                  boxShadow: [
+                    `inset 2px 0 0 ${p.border}`,
+                    `inset -2px 0 0 ${p.border}`,
+                    isFirst ? `inset 0 2px 0 ${p.border}` : null,
+                    isLast  ? `inset 0 -2px 0 ${p.border}` : null,
+                  ].filter(Boolean).join(', '),
+                  ...(isFirst ? { borderTopLeftRadius: 5, borderTopRightRadius: 5 } : {}),
+                  ...(isLast  ? { borderBottomLeftRadius: 5, borderBottomRightRadius: 5 } : {}),
+                } : { padding: '5px 10px' };
+
+                const makeWeeklyCellStyle = (
+                  p: { bg: string; border: string } | null,
+                  isFirst: boolean, isLast: boolean,
+                  hovered: boolean,
+                ): React.CSSProperties => p ? {
+                  padding: '5px 10px', cursor: 'default',
+                  background: hovered ? p.border.replace(/[\d.]+\)$/, '0.22)') : p.bg,
+                  boxShadow: [
+                    `inset 2px 0 0 ${p.border}`,
+                    `inset -2px 0 0 ${p.border}`,
+                    isFirst ? `inset 0 2px 0 ${p.border}` : null,
+                    isLast  ? `inset 0 -2px 0 ${p.border}` : null,
+                  ].filter(Boolean).join(', '),
+                  ...(isFirst ? { borderTopLeftRadius: 4, borderTopRightRadius: 4 } : {}),
+                  ...(isLast  ? { borderBottomLeftRadius: 4, borderBottomRightRadius: 4 } : {}),
+                } : { padding: '5px 10px' };
+
+                const currentSessionHour = snap.session_reset_at
+                  ? normalizeToHour(snap.session_reset_at) : '';
+
+                const posTooltip = (x: number, y: number) => {
+                  const el = tooltipElRef.current;
+                  if (!el) return;
+                  const w = el.offsetWidth || 276, h = el.offsetHeight || 200;
+                  el.style.left = (x + 16 + w > window.innerWidth - 6 ? x - w - 8 : x + 16) + 'px';
+                  el.style.top  = (y + 16 + h > window.innerHeight - 6 ? y - h - 8 : y + 16) + 'px';
+                };
+
+                const handleDayEnter = hasDayGroup
+                  ? (e: React.MouseEvent) => {
+                      setActiveGroup({ type: 'day', key: dayKey, currentSessionHour });
+                      posTooltip(e.clientX, e.clientY);
+                    }
+                  : undefined;
+                const handleWeeklyEnter = hasWeeklyGroup
+                  ? (e: React.MouseEvent) => {
+                      setActiveGroup({ type: 'weekly', key: weeklyKey, currentSessionHour });
+                      posTooltip(e.clientX, e.clientY);
+                    }
+                  : undefined;
+                const handleMove = (e: React.MouseEvent) => {
+                  cancelAnimationFrame(rafIdRef.current);
+                  const x = e.clientX, y = e.clientY;
+                  rafIdRef.current = requestAnimationFrame(() => posTooltip(x, y));
+                };
+                const handleLeave = () => { cancelAnimationFrame(rafIdRef.current); setActiveGroup(null); };
+
+                return (
+                  <tr key={snap.id ?? i} style={{ borderBottom: "1px solid #2e2e2e", background: rowWeekBg(snap) }} className="hover:brightness-110">
+                    <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#ccc" }}>{formatLocalTime(snap.collected_at)}</td>
+                    <td style={makeDayCellStyle(dayPalette, isDayFirst, isDayLast, isDayHovered)}
+                      onMouseEnter={handleDayEnter}
+                      onMouseMove={hasDayGroup ? handleMove : undefined}
+                      onMouseLeave={hasDayGroup ? handleLeave : undefined}
+                    >
+                      <div className="flex items-center gap-2 min-w-[90px]">
+                        <span className="font-mono font-semibold w-12"
+                          style={{ color: (snap.session_pct ?? 0) >= 80 ? "#f87171" : (snap.session_pct ?? 0) >= 60 ? "#f0a500" : "#7ab8f5" }}>
+                          {formatPct(snap.session_pct)}
+                        </span>
+                        <ProgressBar pct={snap.session_pct} className="flex-1" />
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.session_reset_at)}</td>
+                    <td style={makeWeeklyCellStyle(weeklyPalette, isWeeklyFirst, isWeeklyLast, isWeeklyHovered)}
+                      onMouseEnter={handleWeeklyEnter}
+                      onMouseMove={hasWeeklyGroup ? handleMove : undefined}
+                      onMouseLeave={hasWeeklyGroup ? handleLeave : undefined}
+                    >
+                      <div className="flex items-center gap-2 min-w-[90px]">
+                        <span className="font-mono font-semibold w-12"
+                          style={{ color: (snap.weekly_pct ?? 0) >= 80 ? "#f87171" : (snap.weekly_pct ?? 0) >= 60 ? "#f0a500" : "#4ade80" }}>
+                          {formatPct(snap.weekly_pct)}
+                        </span>
+                        <ProgressBar pct={snap.weekly_pct} className="flex-1" />
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.weekly_reset_at)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        onClick={() => snap.id != null && setConfirmId(snap.id)}
+                        style={{ color: "#777", fontSize: 12, background: "none", border: "none", cursor: "pointer", padding: "2px 4px", borderRadius: 4 }}
+                        onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
+                        onMouseLeave={(e) => (e.currentTarget.style.color = "#777")}
+                        title="删除此记录"
+                      >✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <div className="py-3 text-center">
@@ -763,6 +1415,11 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
             )}
           </div>
         </div>
+      </div>
+      {/* 悬浮面板：始终挂载，ref 直接写 style.left/top，避免 mousemove 触发重渲染 */}
+      <div ref={tooltipElRef} style={{ position: 'fixed', left: 0, top: 0, zIndex: 300, pointerEvents: 'none',
+        visibility: activeGroup ? 'visible' : 'hidden' }}>
+        {activeGroup && <GroupTooltip info={activeGroup} annotations={annotations} />}
       </div>
     </div>
   );

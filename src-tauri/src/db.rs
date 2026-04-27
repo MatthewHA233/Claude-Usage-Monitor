@@ -1,4 +1,4 @@
-use crate::models::{AccountColor, UsageSnapshot};
+use crate::models::{AccountColor, InboxItem, UsageSnapshot};
 use rusqlite::{Connection, Result, params};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -60,6 +60,19 @@ impl Database {
                 alias TEXT PRIMARY KEY,
                 color TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS filtered_inbox (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_alias    TEXT    NOT NULL,
+                collected_at     TEXT    NOT NULL,
+                session_pct      REAL,
+                session_reset_at TEXT,
+                weekly_pct       REAL,
+                weekly_reset_at  TEXT,
+                filter_reason    TEXT    NOT NULL,
+                created_at       TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_inbox_alias_id
+                ON filtered_inbox(account_alias, id DESC);
         ")?;
         Ok(())
     }
@@ -191,6 +204,76 @@ impl Database {
         Ok(result)
     }
 
+    /// 写入收件箱并维持每账号最多 10 条 FIFO
+    pub fn inbox_insert(&self, snap: &UsageSnapshot, reason: &str) -> Result<i64> {
+        const PER_ALIAS_CAP: i64 = 10;
+        let conn = self.conn.lock().unwrap();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO filtered_inbox
+             (account_alias, collected_at, session_pct, session_reset_at,
+              weekly_pct, weekly_reset_at, filter_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                snap.account_alias,
+                snap.collected_at,
+                snap.session_pct,
+                snap.session_reset_at,
+                snap.weekly_pct,
+                snap.weekly_reset_at,
+                reason,
+                created_at,
+            ],
+        )?;
+        let new_id = conn.last_insert_rowid();
+        conn.execute(
+            "DELETE FROM filtered_inbox
+             WHERE account_alias = ?1
+               AND id NOT IN (
+                   SELECT id FROM filtered_inbox
+                   WHERE account_alias = ?1
+                   ORDER BY id DESC
+                   LIMIT ?2
+               )",
+            params![snap.account_alias, PER_ALIAS_CAP],
+        )?;
+        Ok(new_id)
+    }
+
+    pub fn inbox_list(&self) -> Result<Vec<InboxItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_alias, collected_at,
+                    session_pct, session_reset_at,
+                    weekly_pct, weekly_reset_at,
+                    filter_reason, created_at
+             FROM filtered_inbox
+             ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_inbox)?;
+        rows.collect()
+    }
+
+    pub fn inbox_get(&self, id: i64) -> Result<Option<InboxItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_alias, collected_at,
+                    session_pct, session_reset_at,
+                    weekly_pct, weekly_reset_at,
+                    filter_reason, created_at
+             FROM filtered_inbox
+             WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], row_to_inbox)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn inbox_delete(&self, id: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM filtered_inbox WHERE id = ?1", params![id])?;
+        Ok(affected)
+    }
+
     /// 获取数据库中所有账号各自最新一条（不依赖 config）
     pub fn latest_all(&self) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
@@ -219,5 +302,19 @@ fn row_to_snapshot(row: &rusqlite::Row<'_>) -> Result<UsageSnapshot> {
         weekly_pct: row.get(5)?,
         weekly_reset_at: row.get(6)?,
         error: row.get(7)?,
+    })
+}
+
+fn row_to_inbox(row: &rusqlite::Row<'_>) -> Result<InboxItem> {
+    Ok(InboxItem {
+        id: Some(row.get(0)?),
+        account_alias: row.get(1)?,
+        collected_at: row.get(2)?,
+        session_pct: row.get(3)?,
+        session_reset_at: row.get(4)?,
+        weekly_pct: row.get(5)?,
+        weekly_reset_at: row.get(6)?,
+        filter_reason: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }

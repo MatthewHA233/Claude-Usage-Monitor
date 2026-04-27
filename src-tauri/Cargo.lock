@@ -379,8 +379,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "claude-switch"
-version = "1.0.0"
+name = "claude-usage-monitor"
+version = "1.0.2"
 dependencies = [
  "axum",
  "chrono",

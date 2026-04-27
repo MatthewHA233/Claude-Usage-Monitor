@@ -70,18 +70,21 @@ async fn handle_report(
     State(db): State<Arc<Database>>,
     Json(payload): Json<ReportPayload>,
 ) -> (StatusCode, Json<ReportResponse>) {
-    // API 返回 0-1 小数（如 0.47），统一归一化为 0-100 存储
-    fn to_pct(v: Option<f64>) -> Option<f64> {
-        v.map(|x| if x <= 1.0 { x * 100.0 } else { x })
-    }
+    // Claude API 大多数情况返回百分比整数（1, 36, 44…），少数老路径返回 0-1 小数
+    // 与启动迁移 normalize_pct_scale 保持一致：仅当 session 与 weekly 同时 <1.5 时
+    // 视为旧格式整体放大；否则保留原值。避免把 1%（utilization=1）误判成 100%
+    let (session_pct, weekly_pct) = match (payload.session_pct, payload.weekly_pct) {
+        (Some(s), Some(w)) if s < 1.5 && w < 1.5 => (Some(s * 100.0), Some(w * 100.0)),
+        (s, w) => (s, w),
+    };
 
     let snap = UsageSnapshot {
         id: None,
         account_alias: payload.account_alias.clone(),
         collected_at: chrono::Utc::now().to_rfc3339(),
-        session_pct: to_pct(payload.session_pct),
+        session_pct,
         session_reset_at: payload.session_reset_at,
-        weekly_pct: to_pct(payload.weekly_pct),
+        weekly_pct,
         weekly_reset_at: payload.weekly_reset_at,
         error: None,
     };
@@ -100,14 +103,39 @@ async fn handle_report(
                 }),
             );
         }
-        // 2. 上条 weekly 接近 0%，新条突然 ≥95%，视为异常（页面刷新瞬间读到错误值）
+        // 2. weekly 0→100 异常跳变（页面刷新瞬间读到错误值），放入收件箱
         if let (Some(last_w), Some(new_w)) = (last.weekly_pct, snap.weekly_pct) {
             if last_w <= 5.0 && new_w >= 95.0 {
+                let reason = format!(
+                    "异常跳变（weekly {:.0}% → {:.0}%）",
+                    last_w, new_w
+                );
+                let _ = db.inbox_insert(&snap, &reason);
                 return (
                     StatusCode::OK,
                     Json(ReportResponse {
                         ok: true,
-                        message: "异常跳变数据（0→100%），已跳过".to_string(),
+                        message: format!("{}，已放入收件箱待审核", reason),
+                    }),
+                );
+            }
+        }
+        // 3. session 0→100 但 weekly 几乎不变也是异常
+        //    （耗完一个 session 必然对应 weekly 数个百分点的增长）
+        if let (Some(last_s), Some(new_s), Some(last_w), Some(new_w)) =
+            (last.session_pct, snap.session_pct, last.weekly_pct, snap.weekly_pct)
+        {
+            if last_s <= 5.0 && new_s >= 95.0 && (new_w - last_w).abs() < 5.0 {
+                let reason = format!(
+                    "异常跳变（session {:.0}% → {:.0}%，weekly 仅 {:+.1}%）",
+                    last_s, new_s, new_w - last_w
+                );
+                let _ = db.inbox_insert(&snap, &reason);
+                return (
+                    StatusCode::OK,
+                    Json(ReportResponse {
+                        ok: true,
+                        message: format!("{}，已放入收件箱待审核", reason),
                     }),
                 );
             }

@@ -45,6 +45,19 @@ pub struct AccountColor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItem {
+    pub id: Option<i64>,
+    pub account_alias: String,
+    pub collected_at: String,
+    pub session_pct: Option<f64>,
+    pub session_reset_at: Option<String>,
+    pub weekly_pct: Option<f64>,
+    pub weekly_reset_at: Option<String>,
+    pub filter_reason: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recommendation {
     pub recommended_alias: Option<String>,
     pub reason: String,
