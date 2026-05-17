@@ -60,6 +60,7 @@ async function reportToTauri(data) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        provider:         'claude_code',
         account_alias:    alias,
         session_pct:      data.current_session?.utilization ?? null,
         session_reset_at: data.current_session?.resets_at   ?? null,

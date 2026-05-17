@@ -5,10 +5,13 @@
   "description": "显示 Claude 账户邮箱、当前 session 用量和每周用量",
   "permissions": [
     "cookies",
-    "storage"
+    "storage",
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://claude.ai/*",
+    "https://chatgpt.com/*",
     "http://localhost:47892/*"
   ],
   "action": {
@@ -34,6 +37,35 @@
       ],
       "js": [
         "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "codex_quota.js",
+        "codex_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/codex/*"
+      ],
+      "js": [
+        "codex_inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "pricing_detector.js"
       ],
       "run_at": "document_idle"
     }
