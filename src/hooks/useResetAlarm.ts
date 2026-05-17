@@ -3,6 +3,8 @@ import alarmSoundUrl from "../assets/alarm.mp3";
 import type { UsageSnapshot } from "../types";
 
 const STORAGE_KEY = "session_alarm_enabled_aliases";
+const accountKey = (snap: { provider?: string; account_alias: string }) =>
+  `${snap.provider ?? "claude_code"}::${snap.account_alias}`;
 const TRIGGER_WINDOW_MS = 2 * 60 * 1000; // reset 时刻起 2 分钟内可触发
 const MERGE_WINDOW_MS = 60 * 1000;       // ±1 分钟合并
 const TICK_MS = 1000;
@@ -77,23 +79,24 @@ export function useResetAlarm(snapshots: UsageSnapshot[]): AlarmAPI {
       const newAliases: string[] = [];
 
       for (const snap of snaps) {
-        if (!en.has(snap.account_alias)) continue;
+        const identity = accountKey(snap);
+        if (!en.has(identity)) continue;
         const ra = snap.session_reset_at;
         if (!ra) continue;
         const t = new Date(ra).getTime();
         if (Number.isNaN(t)) continue;
         const diff = now - t;
         if (diff < 0 || diff > TRIGGER_WINDOW_MS) continue;
-        const key = `${snap.account_alias}|${ra}`;
+        const key = `${identity}|${ra}`;
         if (consumedRef.current.has(key)) continue;
         if (activeKeysRef.current.includes(key)) continue;
         if (triggerTime == null) {
           triggerTime = t;
           newKeys.push(key);
-          newAliases.push(snap.account_alias);
+          newAliases.push(identity);
         } else if (Math.abs(t - triggerTime) <= MERGE_WINDOW_MS) {
           newKeys.push(key);
-          newAliases.push(snap.account_alias);
+          newAliases.push(identity);
         }
       }
 

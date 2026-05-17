@@ -3,11 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface InboxItem {
   id: number;
+  provider: string;
   account_alias: string;
+  session_total_pct?: number | null;
   collected_at: string;
   session_pct: number | null;
   session_reset_at: string | null;
   weekly_pct: number | null;
+  weekly_total_pct?: number | null;
   weekly_reset_at: string | null;
   filter_reason: string;
   created_at: string;

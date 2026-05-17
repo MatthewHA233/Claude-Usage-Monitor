@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
-import { useHistory, useAllHistories, useAccountColors } from "../hooks/useData";
+import { useHistory, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
 import { useResetAlarm } from "../hooks/useResetAlarm";
 import InboxBadge from "./InboxPanel";
 import { AlarmBell, AlarmBanner } from "./AlarmBell";
@@ -16,7 +16,28 @@ const HEADER_H = 28;    // 时间标题行高（px）
 
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80"];
 
+const accountKey = (snap: Pick<UsageSnapshot, "provider" | "account_alias">) =>
+  `${snap.provider ?? "claude_code"}::${snap.account_alias}`;
+const keyFromParts = (provider: string | undefined, alias: string) => `${provider ?? "claude_code"}::${alias}`;
+const providerFromKey = (key: string) => key.includes("::") ? (key.split("::")[0] || "claude_code") : "claude_code";
+const aliasFromKey = (key: string) => key.split("::").slice(1).join("::") || key;
+const providerLabel = (provider?: string) => provider === "codex" ? "Codex" : "Claude Code";
 const STORAGE_KEY = (alias: string) => `sprint_blocks_${alias}`;
+
+function ProviderIcon({ provider, size = 18 }: { provider?: string; size?: number }) {
+  if (provider === "codex") {
+    return (
+      <svg viewBox="0 0 600 600" width={size} height={size} aria-hidden="true">
+        <path fill="currentColor" d="M557 245.5a150 150 0 0 0-12.8-122.7 151 151 0 0 0-162.8-72.5 151.6 151.6 0 0 0-256.9 54.2 150 150 0 0 0-100 72.5 151 151 0 0 0 18.6 177.5c-13.6 40.8-9 85.6 12.8 122.7 32.8 57 98.6 86.3 162.9 72.5a151.4 151.4 0 0 0 257-54.9A151.4 151.4 0 0 0 557 245.6M331.5 560.7c-26.3 0-51.7-9.1-72-26l3.6-2 119.5-69c6-3.5 9.8-10 9.8-17V278.3l50.5 29.2q.8.4 1 1.3v139.6c-.2 62-50.4 112.2-112.4 112.3M90 457.6a112 112 0 0 1-13.4-75.3l3.6 2 119.5 69c6 3.6 13.5 3.6 19.6 0l146-84.2v58.3a2 2 0 0 1-.8 1.6l-121 69.8A112.5 112.5 0 0 1 90 457.6M58.5 197.4c13.3-23 34.2-40.4 59.2-49.3V290c-.1 7 3.6 13.5 9.7 17l145.3 83.8-50.5 29.2q-.8.5-1.8 0L99.7 350.3a112.6 112.6 0 0 1-41.2-153.5zm415 96.4-146-84.7 50.5-29q.8-.6 1.8 0l120.7 69.7a112.4 112.4 0 0 1-16.9 202.6v-142c-.2-6.9-4-13.2-10.2-16.6m50.2-75.6-3.6-2.1-119.3-69.6c-6-3.5-13.6-3.5-19.6 0l-146 84.2v-58.3q0-1 .7-1.5l120.8-69.7a112.5 112.5 0 0 1 167 116.5zm-316 103.4-50.5-29.1a2 2 0 0 1-1-1.4V151.9a112.5 112.5 0 0 1 184.4-86.4l-3.5 2-119.5 69c-6 3.5-9.8 10-9.8 17zm27.4-59.2 65-37.4 65.2 37.4v75l-65 37.5-65-37.5z" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+      <path fill="currentColor" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 0 1-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />
+    </svg>
+  );
+}
 interface Block { id: number; wallHour: number; startMs: number; }
 // 只取日期部分（"2026-04-09"），避免毫秒级抖动导致误判为新周
 interface Persisted { blocks: Block[]; nextId: number; weeklyResetDate: string; }
@@ -45,54 +66,79 @@ function weeklyResetColor(h: number | null) {
 }
 
 // ── 换算率计算（30天全量 phase 数据，按 session 消耗加权）─────
-interface AccountRate { alias: string; rate: number; sessionTotal: number; }
+interface AccountRate { alias: string; provider: string; rate: number; sessionUnits: number; }
+interface PauseInfo { paused: boolean; paused_at: string | null; }
 
-function computeAccountRates(histories: Record<string, UsageSnapshot[]>): AccountRate[] {
+function computeAccountRates(histories: Record<string, UsageSnapshot[]>, pauseStates: Record<string, PauseInfo>): AccountRate[] {
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const result: AccountRate[] = [];
-  for (const [alias, records] of Object.entries(histories)) {
-    const recent = records.filter(r => r.collected_at >= cutoff);
+  for (const [key, records] of Object.entries(histories)) {
+    const pause = pauseStates[key];
+    const effectiveCutoff = pause?.paused && pause.paused_at && pause.paused_at > cutoff ? pause.paused_at : cutoff;
+    const recent = records.filter(r => r.collected_at >= effectiveCutoff);
     if (recent.length === 0) continue;
     const ann = computeTableAnnotations(recent);
     let totalWeeklyIncrease = 0;
-    let totalSession = 0;
+    let totalSessionUnits = 0;
     for (const phase of ann.weeklyPhases.values()) {
-      if (phase.weeklyIncrease != null && phase.weeklyIncrease > 0 && phase.sessionTotal > 0) {
+      if (phase.weeklyIncrease != null && phase.weeklyIncrease > 0 && phase.sessionUnits > 0) {
         totalWeeklyIncrease += phase.weeklyIncrease;
-        totalSession += phase.sessionTotal;
+        totalSessionUnits += phase.sessionUnits;
       }
     }
-    if (totalSession > 0 && totalWeeklyIncrease > 0) {
-      result.push({ alias, rate: totalWeeklyIncrease / totalSession * 100, sessionTotal: totalSession });
+    if (totalSessionUnits > 0 && totalWeeklyIncrease > 0) {
+      result.push({
+        alias: aliasFromKey(key),
+        provider: providerFromKey(key),
+        rate: totalWeeklyIncrease / totalSessionUnits,
+        sessionUnits: totalSessionUnits,
+      });
     }
   }
   return result;
 }
 
+function computeProviderAvgCosts(accountRates: AccountRate[]): Record<string, number> {
+  const grouped: Record<string, { weighted: number; units: number }> = {};
+  for (const rate of accountRates) {
+    const entry = grouped[rate.provider] ?? { weighted: 0, units: 0 };
+    entry.weighted += rate.rate * rate.sessionUnits;
+    entry.units += rate.sessionUnits;
+    grouped[rate.provider] = entry;
+  }
+  return Object.fromEntries(
+    Object.entries(grouped)
+      .filter(([, value]) => value.units > 0)
+      .map(([provider, value]) => [provider, value.weighted / value.units]),
+  );
+}
+
 // ── StatusCards ───────────────────────────────────────────
 export default function StatusCards({ snapshots, recommendation, analysis, onRefresh }: Props) {
   const { colors, setColor } = useAccountColors();
+  const { pauseStates, setPaused } = useAccountPauseStates();
   const { histories } = useAllHistories();
   const alarm = useResetAlarm(snapshots);
-  const snapshotMap = Object.fromEntries(snapshots.map((s) => [s.account_alias, s]));
+  const snapshotMap = Object.fromEntries(snapshots.map((s) => [accountKey(s), s]));
 
-  const orderedAliases = (() => {
+  const orderedKeys = (() => {
     const seen = new Set<string>();
     const result: string[] = [];
-    if (recommendation?.recommended_alias) {
-      result.push(recommendation.recommended_alias);
-      seen.add(recommendation.recommended_alias);
+    if (recommendation?.recommended_key) {
+      result.push(recommendation.recommended_key);
+      seen.add(recommendation.recommended_key);
     }
-    for (const a of recommendation?.account_summaries.map((s) => s.alias) ?? []) {
-      if (!seen.has(a)) { result.push(a); seen.add(a); }
+    for (const key of recommendation?.account_summaries.map((s) => s.key ?? keyFromParts(s.provider, s.alias)) ?? []) {
+      if (!seen.has(key)) { result.push(key); seen.add(key); }
     }
-    for (const a of snapshots.map((s) => s.account_alias)) {
-      if (!seen.has(a)) { result.push(a); seen.add(a); }
+    for (const key of snapshots.map((s) => accountKey(s))) {
+      if (!seen.has(key)) { result.push(key); seen.add(key); }
     }
     return result;
   })();
 
-  const accountRates = useMemo(() => computeAccountRates(histories), [histories]);
+  const accountRates = useMemo(() => computeAccountRates(histories, pauseStates), [histories, pauseStates]);
+  const providerAvgCosts = useMemo(() => computeProviderAvgCosts(accountRates), [accountRates]);
 
   const validCosts = analysis
     .map((a) => a.weekly_cost_per_session_24h)
@@ -114,29 +160,42 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
         </div>
       </div>
 
-      {orderedAliases.length === 0 ? (
+      {orderedKeys.length === 0 ? (
         <div className="card text-center py-10 text-sm" style={{ color: "#888" }}>
           暂无数据，请在扩展中配置账号并上报
         </div>
       ) : (
-        orderedAliases.map((alias) => {
-          const snap = snapshotMap[alias];
-          const sum = recommendation?.account_summaries.find((s) => s.alias === alias);
+        orderedKeys.map((key) => {
+          const snap = snapshotMap[key];
+          const sum = recommendation?.account_summaries.find((s) => (s.key ?? keyFromParts(s.provider, s.alias)) === key);
+          const alias = snap?.account_alias ?? sum?.alias ?? aliasFromKey(key);
+          const provider = snap?.provider ?? sum?.provider ?? providerFromKey(key);
+          const pause = pauseStates[key];
+          const isPaused = pause?.paused ?? false;
           return (
             <AccountCard
-              key={alias}
+              key={key}
+              accountKey={key}
+              provider={provider}
               alias={alias}
               snap={snap}
               sessionHours={sum?.session_remaining_hours ?? hoursUntil(snap?.session_reset_at ?? null)}
               weeklyHours={sum?.weekly_remaining_hours ?? hoursUntil(snap?.weekly_reset_at ?? null)}
-              isRecommended={recommendation?.recommended_alias === alias}
-              avgCost={avgCost}
+              isRecommended={recommendation?.recommended_key === key && !isPaused}
+              isPaused={isPaused}
+              pausedAt={pause?.paused_at ?? null}
+              onTogglePaused={async () => {
+                await setPaused(provider, alias, !isPaused);
+                onRefresh();
+              }}
+              avgCost={providerAvgCosts[provider] ?? avgCost}
+              avgCostsByProvider={providerAvgCosts}
               allSnapshots={snapshots}
               colors={colors}
               setColor={setColor}
-              alarmEnabled={alarm.isEnabled(alias)}
-              alarmRinging={alarm.ringingAliases.includes(alias)}
-              onToggleAlarm={() => alarm.toggle(alias)}
+              alarmEnabled={alarm.isEnabled(key)}
+              alarmRinging={alarm.ringingAliases.includes(key)}
+              onToggleAlarm={() => alarm.toggle(key)}
             />
           );
         })
@@ -165,8 +224,24 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
 
   if (accountRates.length === 0) return null;
 
-  const totalSession = accountRates.reduce((s, a) => s + a.sessionTotal, 0);
-  const weightedAvg = accountRates.reduce((s, a) => s + a.rate * a.sessionTotal, 0) / totalSession;
+  const providerOrder = ["codex", "claude_code"];
+  const providerSummaries = Array.from(
+    accountRates.reduce((map, rate) => {
+      const current = map.get(rate.provider) ?? { provider: rate.provider, weighted: 0, units: 0, accounts: [] as AccountRate[] };
+      current.weighted += rate.rate * rate.sessionUnits;
+      current.units += rate.sessionUnits;
+      current.accounts.push(rate);
+      map.set(rate.provider, current);
+      return map;
+    }, new Map<string, { provider: string; weighted: number; units: number; accounts: AccountRate[] }>())
+      .values()
+  )
+    .map((summary) => ({ ...summary, avg: summary.weighted / summary.units }))
+    .sort((a, b) => {
+      const ai = providerOrder.indexOf(a.provider);
+      const bi = providerOrder.indexOf(b.provider);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
 
   // 弹窗定位：badge 下方，超出右侧则右对齐
   const popStyle = (): React.CSSProperties => {
@@ -184,10 +259,17 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
           padding: '3px 10px', borderRadius: 20, border: '1px solid #444',
           background: open ? '#2a2a2a' : '#1e1e1e', userSelect: 'none' }}>
         <span style={{ fontSize: 11, color: '#bbb' }}>换算率</span>
-        <span style={{ fontSize: 13, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
-          {weightedAvg.toFixed(2)}%
-        </span>
-        <span style={{ fontSize: 11, color: '#aaa' }}>Weekly / 100% Session</span>
+        {providerSummaries.map((summary) => (
+          <span key={summary.provider} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ color: '#cfcfcf', display: 'inline-flex' }}>
+              <ProviderIcon provider={summary.provider} size={12} />
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
+              {summary.avg.toFixed(2)}%
+            </span>
+          </span>
+        ))}
+        <span style={{ fontSize: 11, color: '#aaa' }}>Weekly / Session</span>
         <span style={{ fontSize: 11, color: open ? '#a78bfa' : '#888' }}>▾</span>
       </div>
 
@@ -197,42 +279,61 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
           boxShadow: '0 16px 48px rgba(0,0,0,0.75)', overflow: 'hidden' }}>
           {/* 头部 */}
           <div style={{ padding: '11px 14px', borderBottom: '1px solid #2e2e2e', background: '#1c1c1c' }}>
-            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 4 }}>加权均值（权重 = 近30天 Session 消耗量）</div>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
-              <span style={{ fontSize: 22, fontWeight: 800, color: '#a78bfa', fontFamily: 'monospace' }}>
-                {weightedAvg.toFixed(2)}%
-              </span>
-              <span style={{ fontSize: 12, color: '#bbb' }}>Weekly / 100% Session</span>
+            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 6 }}>分类型加权均值（权重 = 近30天 Session 消耗量）</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+              {providerSummaries.map((summary) => (
+                <div key={summary.provider} style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                  <span style={{ color: '#ddd', display: 'inline-flex', transform: 'translateY(2px)' }}>
+                    <ProviderIcon provider={summary.provider} size={16} />
+                  </span>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: '#a78bfa', fontFamily: 'monospace' }}>
+                    {summary.avg.toFixed(2)}%
+                  </span>
+                </div>
+              ))}
+              <span style={{ fontSize: 12, color: '#bbb' }}>Weekly / Session</span>
             </div>
           </div>
           {/* 各账号明细 */}
           <div style={{ padding: '6px 0' }}>
-            {[...accountRates].sort((a, b) => b.rate - a.rate).map(a => {
-              const w = a.sessionTotal / totalSession;
-              return (
-                <div key={a.alias} style={{ padding: '6px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 13, color: '#ddd', fontWeight: 600 }}>{a.alias}</span>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
-                      {a.rate.toFixed(2)}%
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <div style={{ flex: 1, height: 4, background: '#2e2e2e', borderRadius: 2, overflow: 'hidden' }}>
-                      <div style={{ width: `${w * 100}%`, height: '100%', background: '#7c3aed', borderRadius: 2 }} />
-                    </div>
-                    <span style={{ fontSize: 11, color: '#bbb', fontFamily: 'monospace', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                      {a.sessionTotal.toFixed(0)}% · {(w * 100).toFixed(0)}%权
-                    </span>
-                  </div>
+            {providerSummaries.map((summary) => (
+              <div key={summary.provider}>
+                <div style={{ padding: '7px 14px 3px', display: 'flex', alignItems: 'center', gap: 6, color: '#aaa', fontSize: 11, textTransform: 'uppercase' }}>
+                  <ProviderIcon provider={summary.provider} size={12} />
+                  {providerLabel(summary.provider)}
                 </div>
-              );
-            })}
-          </div>
+                {[...summary.accounts].sort((a, b) => b.rate - a.rate).map(a => {
+                  const w = a.sessionUnits / summary.units;
+                  const key = keyFromParts(a.provider, a.alias);
+                  return (
+                    <div key={key} style={{ padding: '6px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 13, color: '#ddd', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <ProviderIcon provider={a.provider} size={13} />
+                          {a.alias}
+                        </span>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: '#a78bfa', fontFamily: 'monospace' }}>
+                          {a.rate.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        <div style={{ flex: 1, height: 4, background: '#2e2e2e', borderRadius: 2, overflow: 'hidden' }}>
+                          <div style={{ width: `${w * 100}%`, height: '100%', background: '#7c3aed', borderRadius: 2 }} />
+                        </div>
+                        <span style={{ fontSize: 11, color: '#bbb', fontFamily: 'monospace', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                          {a.sessionUnits.toFixed(1)} 次 · {(w * 100).toFixed(0)}%权
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+                  </div>
           {/* 公式 */}
           <div style={{ padding: '8px 14px', borderTop: '1px solid #2e2e2e', background: '#1c1c1c' }}>
             <span style={{ fontSize: 11, color: '#aaa', fontFamily: 'monospace' }}>
-              均值 = Σ(rate × session消耗) ÷ 总session消耗
+              单类均值 = Σ(rate × session消耗) ÷ 同类session消耗
             </span>
           </div>
         </div>
@@ -243,34 +344,44 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
 
 // ── AccountCard ───────────────────────────────────────────
 interface CardProps {
+  accountKey: string;
+  provider: string;
   alias: string;
   snap: UsageSnapshot | undefined;
   sessionHours: number | null;
   weeklyHours: number | null;
   isRecommended: boolean;
   avgCost: number | null;
+  avgCostsByProvider: Record<string, number>;
   allSnapshots: UsageSnapshot[];
   colors: Record<string, string>;
   setColor: (alias: string, color: string) => Promise<void>;
+  isPaused: boolean;
+  pausedAt: string | null;
+  onTogglePaused: () => Promise<void>;
   alarmEnabled: boolean;
   alarmRinging: boolean;
   onToggleAlarm: () => void;
 }
 
-function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots, colors, setColor, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
+function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, pausedAt, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
-  const accountColor = colors[alias] ?? DEFAULT_COLOR;
+  const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
 
   const weeklyPct = snap?.weekly_pct ?? null;
-  const weeklyRemaining = weeklyPct != null ? 100 - weeklyPct : null;
+  const weeklyTotal = snap?.weekly_total_pct ?? 100;
+  const weeklyRemaining = weeklyPct != null ? weeklyTotal - weeklyPct : null;
   const sessionsLeft = avgCost != null && weeklyRemaining != null
     ? Math.ceil(weeklyRemaining / avgCost) : null;
   const resetDays = weeklyHours != null ? weeklyHours / 24 : null;
 
   return (
     <>
-      <div className="card" style={isRecommended ? { outline: `1px solid ${accountColor}88` } : {}}>
+      <div className="card" style={{
+        ...(isRecommended ? { outline: `1px solid ${accountColor}88` } : {}),
+        opacity: isPaused ? 0.62 : 1,
+      }}>
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
@@ -285,22 +396,48 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
                 position: "relative",
               }}
             >
-              {alias[0]?.toUpperCase() ?? "?"}
+              <ProviderIcon provider={provider} size={18} />
               <input
                 ref={colorInputRef}
                 type="color"
                 value={accountColor}
-                onChange={(e) => void setColor(alias, e.target.value)}
+                onChange={(e) => void setColor(identityKey, e.target.value)}
                 style={{ position: "absolute", opacity: 0, width: 0, height: 0, pointerEvents: "none" }}
               />
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
+              <div className="flex flex-col leading-tight">
+                <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
+                <span className="text-[10px] uppercase" style={{ color: "#888" }}>{providerLabel(provider)}</span>
+              </div>
               {isRecommended && <span className="plan-badge" style={{ fontSize: 10 }}>推荐</span>}
             </div>
           </div>
-          {snap && <span className="text-xs" style={{ color: "#888" }}>{formatLocalTime(snap.collected_at)}</span>}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                void onTogglePaused();
+              }}
+              title={isPaused ? "恢复推荐和 30 天总览统计" : "暂时停用：不进入推荐，并从 30 天总览中截断旧数据"}
+              className="text-xs px-2 py-1 rounded-md"
+              style={{
+                background: isPaused ? "#1f3a2c" : "#2c2c2c",
+                color: isPaused ? "#86efac" : "#bbb",
+                border: `1px solid ${isPaused ? "#2d5a44" : "#444"}`,
+              }}
+            >
+              {isPaused ? "恢复" : "暂停"}
+            </button>
+            {snap && <span className="text-xs" style={{ color: "#888" }}>{formatLocalTime(snap.collected_at)}</span>}
+          </div>
         </div>
+
+        {isPaused && (
+          <div className="text-xs px-2 py-1 rounded mb-2" style={{ background: "#202020", color: "#999", border: "1px solid #333" }}>
+            暂停于 {formatLocalTime(pausedAt)}
+          </div>
+        )}
 
         {snap?.error && (
           <div className="text-xs px-2 py-1 rounded mb-2" style={{ background: "#3d1a1a", color: "#f87171" }}>
@@ -318,13 +455,13 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
               onClick={() => setModal("history")}
             >
               <div className="space-y-2.5">
-                <UsageRow label="Session (5h)" pct={snap.session_pct ?? null}
+                <UsageRow label="Session (5h)" pct={snap.session_pct ?? null} total={snap.session_total_pct ?? 100}
                   resetHours={sessionHours} resetAt={snap.session_reset_at} colorFn={sessionResetColor}
                   resetExtra={
                     <AlarmBell enabled={alarmEnabled} ringing={alarmRinging} onToggle={onToggleAlarm} />
                   }
                 />
-                <UsageRow label="Weekly" pct={snap.weekly_pct ?? null}
+                <UsageRow label="Weekly" pct={snap.weekly_pct ?? null} total={snap.weekly_total_pct ?? 100}
                   resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor} />
               </div>
             </div>
@@ -349,17 +486,18 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
       </div>
 
       {modal === "history" && (
-        <Modal title={`历史记录 · ${alias}`} onClose={() => setModal(null)}>
+        <Modal title={`历史记录 · ${providerLabel(provider)} · ${alias}`} onClose={() => setModal(null)}>
           <HistoryPanel
+            provider={provider}
             alias={alias}
-            allAliases={allSnapshots.map((s) => s.account_alias)}
+            allAliases={allSnapshots.map((s) => accountKey(s))}
             colors={colors}
           />
         </Modal>
       )}
       {modal === "sprint" && (
         <Modal title="规划时间轴" onClose={() => setModal(null)}>
-          <SprintPanel snapshots={allSnapshots} avgCost={avgCost} colors={colors} />
+          <SprintPanel snapshots={allSnapshots} avgCost={avgCost} avgCostsByProvider={avgCostsByProvider} colors={colors} />
         </Modal>
       )}
     </>
@@ -367,13 +505,14 @@ function AccountCard({ alias, snap, sessionHours, weeklyHours, isRecommended, av
 }
 
 // ── UsageRow ──────────────────────────────────────────────
-function UsageRow({ label, pct, resetHours, resetAt, colorFn, resetExtra }: {
-  label: string; pct: number | null;
+function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra }: {
+  label: string; pct: number | null; total?: number | null;
   resetHours: number | null; resetAt: string | null;
   colorFn: (h: number | null) => string;
   resetExtra?: React.ReactNode;
 }) {
-  const rem = remaining(pct);
+  const totalPct = total ?? 100;
+  const rem = remaining(pct, totalPct);
   const color = colorFn(resetHours);
   const resetText = resetHours !== null ? `${formatHours(resetHours)}后重置` : formatLocalTime(resetAt);
   return (
@@ -381,11 +520,11 @@ function UsageRow({ label, pct, resetHours, resetAt, colorFn, resetExtra }: {
       <div className="flex items-center justify-between text-xs mb-1">
         <span style={{ color: "#aaa" }}>{label}</span>
         <div className="flex items-center gap-2">
-          <span className="font-semibold font-mono" style={{ color: "#fff" }}>{formatPct(pct)}</span>
+          <span className="font-semibold font-mono" style={{ color: "#fff" }}>{formatPct(pct)} / {totalPct.toFixed(0)}%</span>
           <span style={{ color: "#bbb" }}>余 {formatPct(rem)}</span>
         </div>
       </div>
-      <ProgressBar pct={pct} />
+      <ProgressBar pct={pct} total={totalPct} />
       <div className="text-xs mt-1 font-medium flex items-center gap-1.5" style={{ color }}>
         <span>{resetText}</span>
         {resetExtra}
@@ -440,24 +579,57 @@ function computeDailyStats(records: UsageSnapshot[]): {
   days: DayStats[];
   weeklyResetDates: Set<string>;
 } {
-  const sessionLatest = groupSessionsByResetHour(records);
-  if (sessionLatest.size === 0) return { days: [], weeklyResetDates: new Set() };
-
-  // 按时间排序后，按日期累加每个 session 的最新值
-  const sortedSessions = [...sessionLatest.values()]
+  const valid = [...records]
+    .filter(r => r.error == null && r.session_pct != null && r.session_reset_at != null)
     .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+  if (valid.length === 0) return { days: [], weeklyResetDates: new Set() };
+
+  const dailySessionLatest = new Map<string, Map<string, UsageSnapshot>>();
+  const dailySessionFirstSeen = new Map<string, Map<string, string>>();
+  for (const r of valid) {
+    const date = new Date(r.collected_at).toLocaleDateString("en-CA");
+    const sKey = normalizeToHour(r.session_reset_at!);
+    if (!dailySessionLatest.has(date)) dailySessionLatest.set(date, new Map());
+    if (!dailySessionFirstSeen.has(date)) dailySessionFirstSeen.set(date, new Map());
+    dailySessionLatest.get(date)!.set(sKey, r);
+    if (!dailySessionFirstSeen.get(date)!.has(sKey)) {
+      dailySessionFirstSeen.get(date)!.set(sKey, r.collected_at);
+    }
+  }
 
   const dayConsumed = new Map<string, number>();
   const weeklyResetDates = new Set<string>();
   let prevWeeklyKey: string | null = null;
+  let prevDate: string | null = null;
+  let prevLastSessionKey: string | null = null;
 
-  for (const r of sortedSessions) {
-    const date = new Date(r.collected_at).toLocaleDateString("en-CA");
-    dayConsumed.set(date, (dayConsumed.get(date) ?? 0) + r.session_pct!);
-    // weekly_reset_at 变化 = 新的一周开始
-    const wKey = r.weekly_reset_at ? normalizeToHour(r.weekly_reset_at) : null;
+  for (const date of [...dailySessionLatest.keys()].sort()) {
+    const latestBySession = dailySessionLatest.get(date)!;
+    const firstSeen = dailySessionFirstSeen.get(date)!;
+    const sessionKeys = [...latestBySession.keys()]
+      .sort((a, b) => (firstSeen.get(a) ?? "").localeCompare(firstSeen.get(b) ?? ""));
+    const firstSessionKey = sessionKeys[0] ?? null;
+
+    let total = 0;
+    for (const sKey of sessionKeys) {
+      const latest = latestBySession.get(sKey)!;
+      let consumed = latest.session_pct!;
+      if (sKey === firstSessionKey && prevDate && prevLastSessionKey === sKey) {
+        const prevLatest = dailySessionLatest.get(prevDate)?.get(sKey);
+        if (prevLatest?.session_pct != null) {
+          consumed = Math.max(0, latest.session_pct! - prevLatest.session_pct);
+        }
+      }
+      total += consumed;
+    }
+    dayConsumed.set(date, total);
+
+    const lastSession = latestBySession.get(sessionKeys[sessionKeys.length - 1]);
+    const wKey = lastSession?.weekly_reset_at ? normalizeToHour(lastSession.weekly_reset_at) : null;
     if (prevWeeklyKey && wKey && wKey !== prevWeeklyKey) weeklyResetDates.add(date);
     if (wKey) prevWeeklyKey = wKey;
+    prevDate = date;
+    prevLastSessionKey = sessionKeys[sessionKeys.length - 1] ?? null;
   }
 
   // 从最早日期到今天构建完整序列，最多显示 30 天
@@ -490,6 +662,7 @@ interface SessionDetail {
 interface WeeklyPhaseDetail {
   sessions: SessionDetail[];
   sessionTotal: number;
+  sessionUnits: number;
   weeklyLevel: number;
   weeklyIncrease: number | null;
   weeklyResetHour: string;
@@ -686,12 +859,17 @@ function computeTableAnnotations(records: UsageSnapshot[]): TableAnnotations {
       sessions.sort((a, b) => a.resetHour.localeCompare(b.resetHour));
 
       const sessionTotal = Math.round(sessions.reduce((s, d) => s + d.contribution, 0) * 10) / 10;
+      const phaseRecords = allSorted.filter((r) => recordPhaseMap.get(r.collected_at) === pKey);
+      const sessionTotalPct = phaseRecords
+        .map((r) => r.session_total_pct ?? 100)
+        .find((total) => total > 0) ?? 100;
+      const sessionUnits = Math.round((sessionTotal / sessionTotalPct) * 1000) / 1000;
       // weeklyIncrease = 本段内 weekly 涨幅，最后段（进行中）= null
       const weeklyIncrease = isLast ? null
         : Math.round(((phaseWeeklyLast.get(pKey) ?? 0) - (phaseWeeklyFirst.get(pKey) ?? 0)) * 10) / 10;
 
       weeklyPhases.set(pKey, {
-        sessions, sessionTotal,
+        sessions, sessionTotal, sessionUnits,
         weeklyLevel: Math.round((phaseWeeklyLast.get(pKey) ?? 0) * 10) / 10,
         weeklyIncrease,
         weeklyResetHour: wDay,
@@ -965,26 +1143,26 @@ function computeAllDailyStats(
   colors: Record<string, string>
 ): {
   dates: string[];
-  accountSeries: Array<{ alias: string; color: string; values: number[] }>;
+  accountSeries: Array<{ key: string; provider: string; alias: string; color: string; values: number[] }>;
   totals: number[];
   weeklyResetDates: Set<string>;
 } {
-  const aliases = Object.keys(histories);
-  if (aliases.length === 0) return { dates: [], accountSeries: [], totals: [], weeklyResetDates: new Set() };
+  const keys = Object.keys(histories);
+  if (keys.length === 0) return { dates: [], accountSeries: [], totals: [], weeklyResetDates: new Set() };
 
   // 先算每个账号的每日数据，找到全局最早日期
   const perAccount: Array<{
-    alias: string;
+    key: string;
     byDate: Map<string, number>;
     weeklyResetDates: Set<string>;
   }> = [];
 
   let globalEarliest: string | null = null;
 
-  for (const alias of aliases) {
-    const { days, weeklyResetDates } = computeDailyStats(histories[alias]);
+  for (const key of keys) {
+    const { days, weeklyResetDates } = computeDailyStats(histories[key]);
     const byDate = new Map(days.map(d => [d.date, d.consumed]));
-    perAccount.push({ alias, byDate, weeklyResetDates });
+    perAccount.push({ key, byDate, weeklyResetDates });
     if (days.length > 0) {
       const first = days[0].date;
       if (globalEarliest === null || first < globalEarliest) globalEarliest = first;
@@ -1004,13 +1182,16 @@ function computeAllDailyStats(
   }
 
   const allWeeklyResetDates = new Set<string>();
-  const accountSeries: Array<{ alias: string; color: string; values: number[] }> = [];
+  const accountSeries: Array<{ key: string; provider: string; alias: string; color: string; values: number[] }> = [];
 
-  for (const { alias, byDate, weeklyResetDates } of perAccount) {
+  for (const { key, byDate, weeklyResetDates } of perAccount) {
+    const alias = aliasFromKey(key);
     for (const d of weeklyResetDates) allWeeklyResetDates.add(d);
     accountSeries.push({
+      key,
+      provider: providerFromKey(key),
       alias,
-      color: colors[alias] ?? DEFAULT_COLOR,
+      color: colors[key] ?? colors[alias] ?? DEFAULT_COLOR,
       values: dates.map(date => byDate.get(date) ?? 0),
     });
   }
@@ -1023,21 +1204,24 @@ function computeAllDailyStats(
 }
 
 // ── TotalDailyChartSvg（堆叠彩带面积图） ─────────────────
-function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, currentAlias }: {
+function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, currentKey }: {
   dates: string[];
-  accountSeries: Array<{ alias: string; color: string; values: number[] }>;
+  accountSeries: Array<{ key: string; provider: string; alias: string; color: string; values: number[] }>;
   totals: number[];
   weeklyResetDates: Set<string>;
-  currentAlias: string;
+  currentKey: string;
 }) {
   if (dates.length < 2 || accountSeries.length === 0)
     return <div className="py-6 text-center text-sm" style={{ color: "#888" }}>数据不足</div>;
 
   // 当前账号在最底层，其他随意叠上去
   const sorted = [
-    ...accountSeries.filter(s => s.alias === currentAlias),
-    ...accountSeries.filter(s => s.alias !== currentAlias),
+    ...accountSeries.filter(s => s.key === currentKey),
+    ...accountSeries.filter(s => s.key !== currentKey),
   ];
+  const groupedLegend = ["claude_code", "codex", ...Array.from(new Set(sorted.map(s => s.provider))).filter(p => p !== "claude_code" && p !== "codex")]
+    .map(provider => ({ provider, items: sorted.filter(s => s.provider === provider) }))
+    .filter(group => group.items.length > 0);
 
   const VW = 600, VH = 160;
   const PAD = { top: 22, right: 12, bottom: 22, left: 42 };
@@ -1084,7 +1268,7 @@ function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, cu
           );
         })}
         {/* 堆叠彩带：从底层到顶层依次绘制 */}
-        {sorted.map(({ alias, color }, j) => {
+        {sorted.map(({ key, color }, j) => {
           const topStack = stacks[j];
           const prevStack = j > 0 ? stacks[j - 1] : null;
           // 顶部路径（左→右）
@@ -1094,7 +1278,7 @@ function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, cu
             ? [...prevStack].reverse().map((v, ri) => `L${xOf(n - 1 - ri).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ") + " Z"
             : ` L${xOf(n - 1).toFixed(1)},${bottom.toFixed(1)} L${xOf(0).toFixed(1)},${bottom.toFixed(1)} Z`;
           return (
-            <g key={alias}>
+            <g key={key}>
               <path d={topPath + " " + botPath} fill={color} opacity={0.55} />
               {/* 彩带顶边线 */}
               <path d={topPath} fill="none" stroke={color} strokeWidth={1.2} strokeLinejoin="round" opacity={0.9} />
@@ -1122,12 +1306,19 @@ function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, cu
       </svg>
       {/* 图例（底层→顶层顺序） */}
       <div className="flex flex-wrap gap-3 px-1 pb-1" style={{ marginTop: -2 }}>
-        {sorted.map(({ alias, color }) => (
-          <div key={alias} className="flex items-center gap-1.5">
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: color, opacity: 0.8 }} />
-            <span style={{ fontSize: 10, color: "#aaa" }}>
-              {alias.split("@")[0]}{alias === currentAlias ? " (当前)" : ""}
+        {groupedLegend.map(({ provider, items }) => (
+          <div key={provider} className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center justify-center" style={{ width: 14, height: 14, color: "#ddd" }}>
+              <ProviderIcon provider={provider} size={13} />
             </span>
+            {items.map(({ key, alias, color }) => (
+              <div key={key} className="flex items-center gap-1.5">
+                <div style={{ width: 10, height: 10, borderRadius: 2, background: color, opacity: 0.8 }} />
+                <span style={{ fontSize: 10, color: "#aaa" }}>
+                  {alias.split("@")[0]}{key === currentKey ? " (当前)" : ""}
+                </span>
+              </div>
+            ))}
           </div>
         ))}
       </div>
@@ -1155,13 +1346,14 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
 }
 
 // ── HistoryPanel ──────────────────────────────────────────
-function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
+function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
+  provider: string;
   alias: string;
   allAliases: string[];
   colors: Record<string, string>;
 }) {
-  const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(alias);
-  const { history: statsRecords } = useHistory(alias, 1000);
+  const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(provider, alias);
+  const { history: statsRecords } = useHistory(provider, alias, 1000);
   const { histories, loading: allLoading } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [chartMode, setChartMode] = useState<"single" | "total">("single");
@@ -1172,7 +1364,8 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
   const anchorRef = useRef<HTMLDivElement>(null);
 
   const { days, weeklyResetDates } = computeDailyStats(statsRecords);
-  const accountColor = colors[alias] ?? DEFAULT_COLOR;
+  const identityKey = keyFromParts(provider, alias);
+  const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
   const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
   const annotations = useMemo(() => computeTableAnnotations(statsRecords), [statsRecords]);
 
@@ -1245,7 +1438,7 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
           ? <DailySessionChartSvg days={days} weeklyResetDates={weeklyResetDates} color={accountColor} />
           : allLoading
             ? <div className="py-6 text-center text-sm" style={{ color: "#888" }}>加载中…</div>
-            : <TotalDailyChartSvg dates={dates} accountSeries={accountSeries} totals={totals} weeklyResetDates={allWeeklyResets} currentAlias={alias} />
+            : <TotalDailyChartSvg dates={dates} accountSeries={accountSeries} totals={totals} weeklyResetDates={allWeeklyResets} currentKey={identityKey} />
         }
       </div>
       {confirmId !== null && (
@@ -1426,47 +1619,48 @@ function HistoryPanel({ alias, allAliases: _allAliases, colors }: {
 }
 
 // ── SprintPanel（多账号共用时间轴）────────────────────────
-function SprintPanel({ snapshots, avgCost, colors }: {
+function SprintPanel({ snapshots, avgCost, avgCostsByProvider, colors }: {
   snapshots: UsageSnapshot[];
   avgCost: number | null;
+  avgCostsByProvider: Record<string, number>;
   colors: Record<string, string>;
 }) {
   // 同步从 localStorage 初始化，避免 effect 时序覆盖问题
   const [allBlocks, setAllBlocks] = useState<Record<string, Block[]>>(() => {
     const result: Record<string, Block[]> = {};
     for (const snap of snapshots) {
-      const alias = snap.account_alias;
+      const key = accountKey(snap);
       const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
       try {
-        const raw = localStorage.getItem(STORAGE_KEY(alias));
+        const raw = localStorage.getItem(STORAGE_KEY(key));
         if (raw) {
           const saved: Persisted = JSON.parse(raw);
           if (saved.weeklyResetDate === weeklyResetDate) {
-            result[alias] = saved.blocks;
+            result[key] = saved.blocks;
             continue;
           }
         }
       } catch { /* ignore */ }
-      result[alias] = [];
+      result[key] = [];
     }
     return result;
   });
   const [allNextId, setAllNextId] = useState<Record<string, number>>(() => {
     const result: Record<string, number> = {};
     for (const snap of snapshots) {
-      const alias = snap.account_alias;
+      const key = accountKey(snap);
       const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
       try {
-        const raw = localStorage.getItem(STORAGE_KEY(alias));
+        const raw = localStorage.getItem(STORAGE_KEY(key));
         if (raw) {
           const saved: Persisted = JSON.parse(raw);
           if (saved.weeklyResetDate === weeklyResetDate) {
-            result[alias] = saved.nextId;
+            result[key] = saved.nextId;
             continue;
           }
         }
       } catch { /* ignore */ }
-      result[alias] = 0;
+      result[key] = 0;
     }
     return result;
   });
@@ -1474,11 +1668,11 @@ function SprintPanel({ snapshots, avgCost, colors }: {
   // 持久化（blocks 变化时保存，初始值已从 localStorage 读取，不存在覆盖问题）
   useEffect(() => {
     for (const snap of snapshots) {
-      const alias = snap.account_alias;
+      const key = accountKey(snap);
       const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
-      const blocks = allBlocks[alias] ?? [];
-      const nextId = allNextId[alias] ?? 0;
-      localStorage.setItem(STORAGE_KEY(alias), JSON.stringify({ blocks, nextId, weeklyResetDate }));
+      const blocks = allBlocks[key] ?? [];
+      const nextId = allNextId[key] ?? 0;
+      localStorage.setItem(STORAGE_KEY(key), JSON.stringify({ blocks, nextId, weeklyResetDate }));
     }
   }, [allBlocks, allNextId, snapshots]);
 
@@ -1489,11 +1683,11 @@ function SprintPanel({ snapshots, avgCost, colors }: {
       setAllBlocks((prev) => {
         let changed = false;
         const next: Record<string, Block[]> = {};
-        for (const alias of Object.keys(prev)) {
+        for (const key of Object.keys(prev)) {
           // 1. 过期：startMs 已过的块清除（无 startMs 的旧数据也清除）
-          let filtered = (prev[alias] ?? []).filter((b) => b.startMs != null && b.startMs > now);
+          let filtered = (prev[key] ?? []).filter((b) => b.startMs != null && b.startMs > now);
           // 2. 碰撞：与进行中 session 重叠的规划块清除
-          const snap = snapshots.find((s) => s.account_alias === alias);
+          const snap = snapshots.find((s) => accountKey(s) === key);
           if (snap?.session_reset_at) {
             const sessionEndMs = new Date(snap.session_reset_at).getTime();
             if (sessionEndMs > now) {
@@ -1501,8 +1695,8 @@ function SprintPanel({ snapshots, avgCost, colors }: {
               filtered = filtered.filter((b) => b.startMs >= sessionEndMs);
             }
           }
-          if (filtered.length !== (prev[alias] ?? []).length) changed = true;
-          next[alias] = filtered;
+          if (filtered.length !== (prev[key] ?? []).length) changed = true;
+          next[key] = filtered;
         }
         return changed ? next : prev;
       });
@@ -1529,31 +1723,31 @@ function SprintPanel({ snapshots, avgCost, colors }: {
   const timelineHours = Math.ceil(maxResetHours) + 2;
   const timelineWidth = timelineHours * PX_PER_HOUR;
 
-  const addBlock = useCallback((alias: string, wallHour: number) => {
+  const addBlock = useCallback((key: string, wallHour: number) => {
     setAllBlocks((prev) => {
-      const existing = prev[alias] ?? [];
+      const existing = prev[key] ?? [];
       const overlaps = existing.some(
         (b) => wallHour < b.wallHour + SESSION_HOURS && wallHour + SESSION_HOURS > b.wallHour
       );
       if (overlaps) return prev;
-      const id = (allNextId[alias] ?? 0);
+      const id = (allNextId[key] ?? 0);
       // startMs：当天 0 点 + wallHour 小时（wallHour 可 >23 跨天）
       const today = new Date(); today.setHours(0, 0, 0, 0);
       const startMs = today.getTime() + wallHour * 3_600_000;
-      setAllNextId((p) => ({ ...p, [alias]: id + 1 }));
-      return { ...prev, [alias]: [...existing, { id, wallHour, startMs }] };
+      setAllNextId((p) => ({ ...p, [key]: id + 1 }));
+      return { ...prev, [key]: [...existing, { id, wallHour, startMs }] };
     });
   }, [allNextId]);
 
-  const removeBlock = useCallback((alias: string, id: number) => {
+  const removeBlock = useCallback((key: string, id: number) => {
     setAllBlocks((prev) => ({
       ...prev,
-      [alias]: (prev[alias] ?? []).filter((b) => b.id !== id),
+      [key]: (prev[key] ?? []).filter((b) => b.id !== id),
     }));
   }, []);
 
   const clearAll = useCallback(() => {
-    setAllBlocks(Object.fromEntries(snapshots.map((s) => [s.account_alias, []])));
+    setAllBlocks(Object.fromEntries(snapshots.map((s) => [accountKey(s), []])));
   }, [snapshots]);
 
   // ── 整点刻度 & 日期分隔 ───────────────────────────────────
@@ -1581,19 +1775,24 @@ function SprintPanel({ snapshots, avgCost, colors }: {
 
   // 预测卡片数据（时间轴下方用）
   const predictionRows = snapshots.map((snap, si) => {
-    const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
-    const blocks = allBlocks[snap.account_alias] ?? [];
+    const key = accountKey(snap);
+    const provider = snap.provider ?? "claude_code";
+    const accountAvgCost = avgCostsByProvider[provider] ?? avgCost;
+    const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+    const blocks = allBlocks[key] ?? [];
     const weeklyUsed = snap.weekly_pct ?? null;
+    const weeklyTotal = snap.weekly_total_pct ?? 100;
+    const sessionTotal = snap.session_total_pct ?? 100;
     // 只有 session_reset_at 在未来（有进行中的块）才计入当前 session 预估消耗
     const sessionRemainingHours = snap.session_reset_at
       ? (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000 : null;
     const hasActiveSession = sessionRemainingHours != null && sessionRemainingHours > 0;
-    const sessionRemainingPct = hasActiveSession && snap.session_pct != null ? 100 - snap.session_pct : null;
-    const currCost = avgCost != null && sessionRemainingPct != null
-      ? (sessionRemainingPct / 100) * avgCost : null;
-    const placed = (currCost ?? 0) + blocks.length * (avgCost ?? 0);
-    const projected = weeklyUsed != null ? Math.min(100, weeklyUsed + placed) : null;
-    return { snap, color, weeklyUsed, placed, projected };
+    const sessionRemainingPct = hasActiveSession && snap.session_pct != null ? Math.max(0, sessionTotal - snap.session_pct) : null;
+    const currCost = accountAvgCost != null && sessionRemainingPct != null
+      ? (sessionRemainingPct / sessionTotal) * accountAvgCost : null;
+    const placed = (currCost ?? 0) + blocks.length * (accountAvgCost ?? 0);
+    const projected = weeklyUsed != null ? Math.min(weeklyTotal, weeklyUsed + placed) : null;
+    return { key, snap, color, weeklyUsed, weeklyTotal, placed, projected };
   });
 
   return (
@@ -1611,19 +1810,22 @@ function SprintPanel({ snapshots, avgCost, colors }: {
 
         <div className="overflow-x-auto" style={{ paddingBottom: 4 }}>
           <div style={{ display: "flex", minWidth: LABEL_W + timelineWidth }}>
-            {/* 标签列（不滚动） */}
-            <div style={{ width: LABEL_W, flexShrink: 0 }}>
-              {/* 标题行占位 */}
-              <div style={{ height: HEADER_H, borderBottom: "1px solid #2e2e2e" }} />
-              {snapshots.map((snap, si) => {
-                const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+              {/* 标签列（不滚动） */}
+              <div style={{ width: LABEL_W, flexShrink: 0 }}>
+                {/* 标题行占位 */}
+                <div style={{ height: HEADER_H, borderBottom: "1px solid #2e2e2e" }} />
+                {snapshots.map((snap, si) => {
+                const key = accountKey(snap);
+                const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
                 return (
-                  <div key={snap.account_alias} style={{
+                  <div key={key} style={{
                     height: ROW_H, display: "flex", flexDirection: "column",
                     justifyContent: "center", paddingLeft: 12,
                     borderBottom: "1px solid #2e2e2e",
                   }}>
-                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, marginBottom: 4 }} />
+                    <div className="flex items-center gap-1" style={{ color, marginBottom: 4 }}>
+                      <ProviderIcon provider={snap.provider} size={12} />
+                    </div>
                     <span style={{ fontSize: 10, color: "#ccc", lineHeight: 1.2, maxWidth: LABEL_W - 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {snap.account_alias.split("@")[0]}
                     </span>
@@ -1656,9 +1858,9 @@ function SprintPanel({ snapshots, avgCost, colors }: {
 
               {/* 账号行 */}
               {snapshots.map((snap, si) => {
-                const color = colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
-                const alias = snap.account_alias;
-                const blocks = allBlocks[alias] ?? [];
+                const key = accountKey(snap);
+                const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+                const blocks = allBlocks[key] ?? [];
                 const sortedBlocks = [...blocks].sort((a, b) => a.wallHour - b.wallHour);
                 const sessionRemainingHours = snap.session_reset_at
                   ? Math.max(0, (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000) : null;
@@ -1672,11 +1874,11 @@ function SprintPanel({ snapshots, avgCost, colors }: {
                   const nwh = now2.getHours() + now2.getMinutes() / 60 + now2.getSeconds() / 3600;
                   const wallHour = Math.max(Math.ceil(nwh), Math.floor(nwh + clickOffsetHour));
                   if (wallHour - nwh + SESSION_HOURS > timelineHours) return;
-                  addBlock(alias, wallHour);
+                  addBlock(key, wallHour);
                 };
 
                 return (
-                  <div key={alias} onClick={handleRowClick}
+                  <div key={key} onClick={handleRowClick}
                     style={{
                       position: "relative", height: ROW_H, cursor: "crosshair",
                       background: si % 2 === 0 ? "#1e1e1e" : "#1a1a1a",
@@ -1746,7 +1948,7 @@ function SprintPanel({ snapshots, avgCost, colors }: {
                           userSelect: "none",
                         }}>
                           <span style={{ fontSize: 11, color: overDeadline ? "#f87171" : color, fontWeight: 700 }}>S{idx + 1}</span>
-                          <button onClick={(e) => { e.stopPropagation(); removeBlock(alias, b.id); }}
+                          <button onClick={(e) => { e.stopPropagation(); removeBlock(key, b.id); }}
                             style={{ position: "absolute", top: 1, right: 3, fontSize: 10, color: "#aaa", background: "none", border: "none", cursor: "pointer" }}>✕</button>
                         </div>
                       );
@@ -1765,18 +1967,25 @@ function SprintPanel({ snapshots, avgCost, colors }: {
           <span className="text-sm font-semibold" style={{ color: "#ddd" }}>周额度预测</span>
         </div>
         <div className="divide-y" style={{ borderColor: "#2e2e2e" }}>
-          {predictionRows.map(({ snap, color, weeklyUsed, placed, projected }) => (
-            <div key={snap.account_alias} className="px-4 py-3 flex items-center gap-3">
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, flexShrink: 0 }} />
+          {predictionRows.map(({ key, snap, color, weeklyUsed, weeklyTotal, placed, projected }) => {
+            const usedWidth = weeklyUsed != null ? Math.min(100, (weeklyUsed / weeklyTotal) * 100) : 0;
+            const placedWidth = weeklyUsed != null && placed > 0
+              ? Math.min(100 - usedWidth, (Math.min(placed, weeklyTotal - weeklyUsed) / weeklyTotal) * 100)
+              : 0;
+            return (
+            <div key={key} className="px-4 py-3 flex items-center gap-3">
+              <span className="inline-flex items-center justify-center" style={{ width: 14, height: 14, color, flexShrink: 0 }}>
+                <ProviderIcon provider={snap.provider} size={14} />
+              </span>
               <span className="text-xs" style={{ color: "#bbb", width: 100, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {snap.account_alias}
               </span>
               <div style={{ flex: 1, position: "relative", height: 8, background: "#444", borderRadius: 4, overflow: "hidden" }}>
                 {weeklyUsed != null && (
-                  <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${weeklyUsed}%`, background: color, opacity: 0.9 }} />
+                  <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${usedWidth}%`, background: color, opacity: 0.9 }} />
                 )}
                 {weeklyUsed != null && placed > 0 && (
-                  <div style={{ position: "absolute", left: `${weeklyUsed}%`, top: 0, bottom: 0, width: `${Math.min(placed, 100 - weeklyUsed)}%`, background: color, opacity: 0.4 }} />
+                  <div style={{ position: "absolute", left: `${usedWidth}%`, top: 0, bottom: 0, width: `${placedWidth}%`, background: color, opacity: 0.4 }} />
                 )}
               </div>
               <span className="text-xs font-mono" style={{ color: "#999", width: 36, textAlign: "right", flexShrink: 0 }}>
@@ -1788,7 +1997,8 @@ function SprintPanel({ snapshots, avgCost, colors }: {
                 </span>
               )}
             </div>
-          ))}
+          );
+          })}
         </div>
       </div>
     </div>

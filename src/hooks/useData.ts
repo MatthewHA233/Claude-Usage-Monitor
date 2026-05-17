@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { UsageSnapshot, Recommendation, AccountAnalysis, AccountColor } from "../types";
+import type { UsageSnapshot, Recommendation, AccountAnalysis, AccountColor, AccountPauseState } from "../types";
 
 export function useLatestSnapshots(autoRefreshMs = 0) {
   const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
@@ -94,6 +94,31 @@ export function useAccountColors() {
   return { colors, refetch: fetch, setColor };
 }
 
+export function useAccountPauseStates() {
+  const [pauseStates, setPauseStates] = useState<Record<string, AccountPauseState>>({});
+
+  const fetch = useCallback(async () => {
+    try {
+      const data = await invoke<AccountPauseState[]>("get_account_pause_states");
+      setPauseStates(Object.fromEntries(data.map((d) => [d.account_key, d])));
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void fetch(); }, [fetch]);
+
+  const setPaused = useCallback(async (provider: string, alias: string, paused: boolean) => {
+    const key = `${provider}::${alias}`;
+    const pausedAt = paused ? new Date().toISOString() : null;
+    await invoke("set_account_paused", { provider, alias, paused });
+    setPauseStates((prev) => ({
+      ...prev,
+      [key]: { provider, account_alias: alias, account_key: key, paused, paused_at: pausedAt },
+    }));
+  }, []);
+
+  return { pauseStates, refetch: fetch, setPaused };
+}
+
 export function useAllHistories() {
   const [histories, setHistories] = useState<Record<string, UsageSnapshot[]>>({});
   const [loading, setLoading] = useState(false);
@@ -114,7 +139,7 @@ export function useAllHistories() {
 
 const PAGE_SIZE = 50;
 
-export function useHistory(alias: string, limit = PAGE_SIZE) {
+export function useHistory(provider: string, alias: string, limit = PAGE_SIZE) {
   const [history, setHistory] = useState<UsageSnapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -125,7 +150,7 @@ export function useHistory(alias: string, limit = PAGE_SIZE) {
     if (!alias) return;
     if (append) setLoadingMore(true); else setLoading(true);
     try {
-      const data = await invoke<UsageSnapshot[]>("get_history", { alias, limit, offset });
+      const data = await invoke<UsageSnapshot[]>("get_history", { provider, alias, limit, offset });
       if (append) {
         setHistory(prev => {
           const seen = new Set(prev.map(s => s.id).filter(id => id != null));
@@ -142,7 +167,7 @@ export function useHistory(alias: string, limit = PAGE_SIZE) {
     } finally {
       if (append) setLoadingMore(false); else setLoading(false);
     }
-  }, [alias, limit]);
+  }, [provider, alias, limit]);
 
   const loadMore = useCallback(() => {
     if (!loadingMore && hasMore) {

@@ -1,10 +1,13 @@
 export interface UsageSnapshot {
   id?: number;
+  provider: "claude_code" | "codex" | string;
   account_alias: string;
   collected_at: string; // ISO UTC
   session_pct: number | null;
+  session_total_pct?: number | null;
   session_reset_at: string | null;
   weekly_pct: number | null;
+  weekly_total_pct?: number | null;
   weekly_reset_at: string | null;
   error: string | null;
 }
@@ -26,16 +29,29 @@ export interface AccountColor {
   color: string;
 }
 
+export interface AccountPauseState {
+  provider: "claude_code" | "codex" | string;
+  account_alias: string;
+  account_key: string;
+  paused: boolean;
+  paused_at: string | null;
+}
+
 export interface AccountSummary {
+  provider: "claude_code" | "codex" | string;
+  key: string;
   alias: string;
   session_pct: number | null;
+  session_total_pct?: number | null;
   session_remaining_hours: number | null;
   weekly_pct: number | null;
+  weekly_total_pct?: number | null;
   weekly_remaining_hours: number | null;
   status: "available" | "exhausted" | "unknown";
 }
 
 export interface Recommendation {
+  recommended_key: string | null;
   recommended_alias: string | null;
   reason: string;
   estimated_remaining_hours: number | null;
