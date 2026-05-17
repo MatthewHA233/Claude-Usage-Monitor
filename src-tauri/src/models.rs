@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     pub id: Option<i64>,
+    pub provider: String,
     pub account_alias: String,
     pub collected_at: String,
     pub session_pct: Option<f64>,
+    pub session_total_pct: Option<f64>,
     pub session_reset_at: Option<String>,
     pub weekly_pct: Option<f64>,
+    pub weekly_total_pct: Option<f64>,
     pub weekly_reset_at: Option<String>,
     pub error: Option<String>,
 }
@@ -30,10 +33,14 @@ pub struct AccountAnalysis {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSummary {
+    pub provider: String,
+    pub key: String,
     pub alias: String,
     pub session_pct: Option<f64>,
+    pub session_total_pct: Option<f64>,
     pub session_remaining_hours: Option<f64>,
     pub weekly_pct: Option<f64>,
+    pub weekly_total_pct: Option<f64>,
     pub weekly_remaining_hours: Option<f64>,
     pub status: String,
 }
@@ -45,13 +52,25 @@ pub struct AccountColor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountPauseState {
+    pub provider: String,
+    pub account_alias: String,
+    pub account_key: String,
+    pub paused: bool,
+    pub paused_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: Option<i64>,
+    pub provider: String,
     pub account_alias: String,
     pub collected_at: String,
     pub session_pct: Option<f64>,
+    pub session_total_pct: Option<f64>,
     pub session_reset_at: Option<String>,
     pub weekly_pct: Option<f64>,
+    pub weekly_total_pct: Option<f64>,
     pub weekly_reset_at: Option<String>,
     pub filter_reason: String,
     pub created_at: String,
@@ -59,6 +78,7 @@ pub struct InboxItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recommendation {
+    pub recommended_key: Option<String>,
     pub recommended_alias: Option<String>,
     pub reason: String,
     pub estimated_remaining_hours: Option<f64>,

@@ -1,6 +1,6 @@
-use crate::models::{AccountColor, InboxItem, UsageSnapshot};
+use crate::models::{AccountColor, AccountPauseState, InboxItem, UsageSnapshot};
 use rusqlite::{Connection, Result, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -46,34 +46,113 @@ impl Database {
         conn.execute_batch("
             CREATE TABLE IF NOT EXISTS usage_snapshots (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider         TEXT    NOT NULL DEFAULT 'claude_code',
                 account_alias    TEXT    NOT NULL,
                 collected_at     TEXT    NOT NULL,
                 session_pct      REAL,
+                session_total_pct REAL DEFAULT 100,
                 session_reset_at TEXT,
                 weekly_pct       REAL,
+                weekly_total_pct REAL DEFAULT 100,
                 weekly_reset_at  TEXT,
                 error            TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_snap_alias_time
-                ON usage_snapshots(account_alias, collected_at DESC);
+                ON usage_snapshots(provider, account_alias, collected_at DESC);
             CREATE TABLE IF NOT EXISTS account_colors (
                 alias TEXT PRIMARY KEY,
                 color TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS account_pause_states (
+                account_key   TEXT PRIMARY KEY,
+                provider      TEXT    NOT NULL,
+                account_alias TEXT    NOT NULL,
+                paused        INTEGER NOT NULL DEFAULT 0,
+                paused_at     TEXT
+            );
             CREATE TABLE IF NOT EXISTS filtered_inbox (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider         TEXT    NOT NULL DEFAULT 'claude_code',
                 account_alias    TEXT    NOT NULL,
                 collected_at     TEXT    NOT NULL,
                 session_pct      REAL,
+                session_total_pct REAL DEFAULT 100,
                 session_reset_at TEXT,
                 weekly_pct       REAL,
+                weekly_total_pct REAL DEFAULT 100,
                 weekly_reset_at  TEXT,
                 filter_reason    TEXT    NOT NULL,
                 created_at       TEXT    NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_inbox_alias_id
-                ON filtered_inbox(account_alias, id DESC);
+                ON filtered_inbox(provider, account_alias, id DESC);
         ")?;
+        drop(conn);
+        self.add_column_if_missing("usage_snapshots", "provider", "TEXT NOT NULL DEFAULT 'claude_code'")?;
+        self.add_column_if_missing("usage_snapshots", "session_total_pct", "REAL DEFAULT 100")?;
+        self.add_column_if_missing("usage_snapshots", "weekly_total_pct", "REAL DEFAULT 100")?;
+        self.add_column_if_missing("filtered_inbox", "provider", "TEXT NOT NULL DEFAULT 'claude_code'")?;
+        self.add_column_if_missing("filtered_inbox", "session_total_pct", "REAL DEFAULT 100")?;
+        self.add_column_if_missing("filtered_inbox", "weekly_total_pct", "REAL DEFAULT 100")?;
+        Ok(())
+    }
+
+    pub fn get_pause_states(&self) -> Result<Vec<AccountPauseState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT provider, account_alias, account_key, paused, paused_at
+             FROM account_pause_states
+             ORDER BY provider, account_alias",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AccountPauseState {
+                provider: row.get(0)?,
+                account_alias: row.get(1)?,
+                account_key: row.get(2)?,
+                paused: row.get::<_, i64>(3)? != 0,
+                paused_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn set_account_paused(&self, provider: &str, alias: &str, paused: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let account_key = format!("{provider}::{alias}");
+        let paused_at = paused.then(|| chrono::Utc::now().to_rfc3339());
+        conn.execute(
+            "INSERT INTO account_pause_states
+             (account_key, provider, account_alias, paused, paused_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_key) DO UPDATE SET
+                provider = excluded.provider,
+                account_alias = excluded.account_alias,
+                paused = excluded.paused,
+                paused_at = excluded.paused_at",
+            params![account_key, provider, alias, if paused { 1 } else { 0 }, paused_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn paused_account_keys(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT account_key FROM account_pause_states WHERE paused != 0",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    fn add_column_if_missing(&self, table: &str, column: &str, definition: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for existing in columns {
+            if existing? == column {
+                return Ok(());
+            }
+        }
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
         Ok(())
     }
 
@@ -94,18 +173,18 @@ impl Database {
     }
 
     /// 获取某账号最新一条快照（用于去重判断）
-    pub fn last_snapshot(&self, alias: &str) -> Result<Option<UsageSnapshot>> {
+    pub fn last_snapshot(&self, provider: &str, alias: &str) -> Result<Option<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, account_alias, collected_at,
-                    session_pct, session_reset_at,
-                    weekly_pct, weekly_reset_at, error
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at, error
              FROM usage_snapshots
-             WHERE account_alias = ?1
+             WHERE provider = ?1 AND account_alias = ?2
              ORDER BY collected_at DESC
              LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![alias], row_to_snapshot)?;
+        let mut rows = stmt.query_map(params![provider, alias], row_to_snapshot)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -113,15 +192,18 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO usage_snapshots
-             (account_alias, collected_at, session_pct, session_reset_at,
-              weekly_pct, weekly_reset_at, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (provider, account_alias, collected_at, session_pct, session_total_pct, session_reset_at,
+              weekly_pct, weekly_total_pct, weekly_reset_at, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
+                snap.provider,
                 snap.account_alias,
                 snap.collected_at,
                 snap.session_pct,
+                snap.session_total_pct.unwrap_or(100.0),
                 snap.session_reset_at,
                 snap.weekly_pct,
+                snap.weekly_total_pct.unwrap_or(100.0),
                 snap.weekly_reset_at,
                 snap.error,
             ],
@@ -130,18 +212,18 @@ impl Database {
     }
 
     /// 获取某账号的历史记录，最新在前，支持分页
-    pub fn history(&self, alias: &str, limit: i64, offset: i64) -> Result<Vec<UsageSnapshot>> {
+    pub fn history(&self, provider: &str, alias: &str, limit: i64, offset: i64) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, account_alias, collected_at,
-                    session_pct, session_reset_at,
-                    weekly_pct, weekly_reset_at, error
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at, error
              FROM usage_snapshots
-             WHERE account_alias = ?1
+             WHERE provider = ?1 AND account_alias = ?2
              ORDER BY collected_at DESC
-             LIMIT ?2 OFFSET ?3",
+             LIMIT ?3 OFFSET ?4",
         )?;
-        let rows = stmt.query_map(params![alias, limit, offset], row_to_snapshot)?;
+        let rows = stmt.query_map(params![provider, alias, limit, offset], row_to_snapshot)?;
         rows.collect()
     }
 
@@ -177,7 +259,13 @@ impl Database {
     pub fn ensure_colors_for_aliases(&self, aliases: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         for alias in aliases {
-            let color = color_for_alias(alias);
+            let base_alias = alias.split_once("::").map(|(_, name)| name).unwrap_or(alias);
+            let inherited = conn.query_row(
+                "SELECT color FROM account_colors WHERE alias = ?1",
+                params![base_alias],
+                |row| row.get::<_, String>(0),
+            ).ok();
+            let color = inherited.unwrap_or_else(|| color_for_alias(alias));
             conn.execute(
                 "INSERT OR IGNORE INTO account_colors (alias, color) VALUES (?1, ?2)",
                 params![alias, color],
@@ -188,18 +276,18 @@ impl Database {
 
     /// 获取所有账号的历史记录（每账号最多 limit 条，最新在前）
     pub fn all_histories_grouped(&self, limit: i64) -> Result<HashMap<String, Vec<UsageSnapshot>>> {
-        let aliases: Vec<String> = {
+        let accounts: Vec<(String, String)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn.prepare(
-                "SELECT DISTINCT account_alias FROM usage_snapshots ORDER BY account_alias",
+                "SELECT DISTINCT provider, account_alias FROM usage_snapshots ORDER BY provider, account_alias",
             )?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             rows.collect::<Result<Vec<_>>>()?
         };
         let mut result = HashMap::new();
-        for alias in aliases {
-            let records = self.history(&alias, limit, 0)?;
-            result.insert(alias, records);
+        for (provider, alias) in accounts {
+            let records = self.history(&provider, &alias, limit, 0)?;
+            result.insert(format!("{provider}::{alias}"), records);
         }
         Ok(result)
     }
@@ -211,15 +299,18 @@ impl Database {
         let created_at = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO filtered_inbox
-             (account_alias, collected_at, session_pct, session_reset_at,
-              weekly_pct, weekly_reset_at, filter_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (provider, account_alias, collected_at, session_pct, session_total_pct, session_reset_at,
+              weekly_pct, weekly_total_pct, weekly_reset_at, filter_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
+                snap.provider,
                 snap.account_alias,
                 snap.collected_at,
                 snap.session_pct,
+                snap.session_total_pct.unwrap_or(100.0),
                 snap.session_reset_at,
                 snap.weekly_pct,
+                snap.weekly_total_pct.unwrap_or(100.0),
                 snap.weekly_reset_at,
                 reason,
                 created_at,
@@ -228,14 +319,14 @@ impl Database {
         let new_id = conn.last_insert_rowid();
         conn.execute(
             "DELETE FROM filtered_inbox
-             WHERE account_alias = ?1
+             WHERE provider = ?1 AND account_alias = ?2
                AND id NOT IN (
                    SELECT id FROM filtered_inbox
-                   WHERE account_alias = ?1
+                   WHERE provider = ?1 AND account_alias = ?2
                    ORDER BY id DESC
-                   LIMIT ?2
+                   LIMIT ?3
                )",
-            params![snap.account_alias, PER_ALIAS_CAP],
+            params![snap.provider, snap.account_alias, PER_ALIAS_CAP],
         )?;
         Ok(new_id)
     }
@@ -243,9 +334,9 @@ impl Database {
     pub fn inbox_list(&self) -> Result<Vec<InboxItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, account_alias, collected_at,
-                    session_pct, session_reset_at,
-                    weekly_pct, weekly_reset_at,
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at,
                     filter_reason, created_at
              FROM filtered_inbox
              ORDER BY id DESC",
@@ -257,9 +348,9 @@ impl Database {
     pub fn inbox_get(&self, id: i64) -> Result<Option<InboxItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, account_alias, collected_at,
-                    session_pct, session_reset_at,
-                    weekly_pct, weekly_reset_at,
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at,
                     filter_reason, created_at
              FROM filtered_inbox
              WHERE id = ?1",
@@ -278,14 +369,14 @@ impl Database {
     pub fn latest_all(&self) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, account_alias, collected_at,
-                    session_pct, session_reset_at,
-                    weekly_pct, weekly_reset_at, error
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at, error
              FROM usage_snapshots
              WHERE id IN (
-                 SELECT MAX(id) FROM usage_snapshots GROUP BY account_alias
+                 SELECT MAX(id) FROM usage_snapshots GROUP BY provider, account_alias
              )
-             ORDER BY account_alias",
+             ORDER BY provider, account_alias",
         )?;
         let rows = stmt.query_map([], row_to_snapshot)?;
         rows.collect()
@@ -295,26 +386,32 @@ impl Database {
 fn row_to_snapshot(row: &rusqlite::Row<'_>) -> Result<UsageSnapshot> {
     Ok(UsageSnapshot {
         id: Some(row.get(0)?),
-        account_alias: row.get(1)?,
-        collected_at: row.get(2)?,
-        session_pct: row.get(3)?,
-        session_reset_at: row.get(4)?,
-        weekly_pct: row.get(5)?,
-        weekly_reset_at: row.get(6)?,
-        error: row.get(7)?,
+        provider: row.get(1)?,
+        account_alias: row.get(2)?,
+        collected_at: row.get(3)?,
+        session_pct: row.get(4)?,
+        session_total_pct: row.get(5)?,
+        session_reset_at: row.get(6)?,
+        weekly_pct: row.get(7)?,
+        weekly_total_pct: row.get(8)?,
+        weekly_reset_at: row.get(9)?,
+        error: row.get(10)?,
     })
 }
 
 fn row_to_inbox(row: &rusqlite::Row<'_>) -> Result<InboxItem> {
     Ok(InboxItem {
         id: Some(row.get(0)?),
-        account_alias: row.get(1)?,
-        collected_at: row.get(2)?,
-        session_pct: row.get(3)?,
-        session_reset_at: row.get(4)?,
-        weekly_pct: row.get(5)?,
-        weekly_reset_at: row.get(6)?,
-        filter_reason: row.get(7)?,
-        created_at: row.get(8)?,
+        provider: row.get(1)?,
+        account_alias: row.get(2)?,
+        collected_at: row.get(3)?,
+        session_pct: row.get(4)?,
+        session_total_pct: row.get(5)?,
+        session_reset_at: row.get(6)?,
+        weekly_pct: row.get(7)?,
+        weekly_total_pct: row.get(8)?,
+        weekly_reset_at: row.get(9)?,
+        filter_reason: row.get(10)?,
+        created_at: row.get(11)?,
     })
 }

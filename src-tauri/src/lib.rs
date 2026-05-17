@@ -6,6 +6,9 @@ mod models;
 mod recommender;
 mod state;
 
+#[cfg(test)]
+mod recommender_tests;
+
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,6 +32,8 @@ pub fn run() {
             commands::delete_snapshot,
             commands::get_account_colors,
             commands::set_account_color,
+            commands::get_account_pause_states,
+            commands::set_account_paused,
             commands::get_all_histories,
             commands::inbox_list,
             commands::inbox_accept,

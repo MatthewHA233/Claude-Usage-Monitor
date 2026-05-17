@@ -21,9 +21,12 @@ pub const PORT: u16 = 47892;
 pub struct ReportPayload {
     /// 账号别名（扩展配置里填的，或自动从页面读取的 email）
     pub account_alias: String,
+    pub provider: Option<String>,
     pub session_pct: Option<f64>,
+    pub session_total_pct: Option<f64>,
     pub session_reset_at: Option<String>,
     pub weekly_pct: Option<f64>,
+    pub weekly_total_pct: Option<f64>,
     pub weekly_reset_at: Option<String>,
 }
 
@@ -78,22 +81,46 @@ async fn handle_report(
         (s, w) => (s, w),
     };
 
+    let Some(provider) = payload.provider.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ReportResponse {
+                ok: false,
+                message: "缺少 provider，已拒收旧格式上报".to_string(),
+            }),
+        );
+    };
+    if provider != "claude_code" && provider != "codex" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ReportResponse {
+                ok: false,
+                message: format!("未知 provider: {provider}"),
+            }),
+        );
+    }
+
     let snap = UsageSnapshot {
         id: None,
+        provider: provider.to_string(),
         account_alias: payload.account_alias.clone(),
         collected_at: chrono::Utc::now().to_rfc3339(),
         session_pct,
+        session_total_pct: payload.session_total_pct.or(Some(100.0)),
         session_reset_at: payload.session_reset_at,
         weekly_pct,
+        weekly_total_pct: payload.weekly_total_pct.or(Some(100.0)),
         weekly_reset_at: payload.weekly_reset_at,
         error: None,
     };
 
     // 去重 & 异常跳变过滤
-    if let Ok(Some(last)) = db.last_snapshot(&snap.account_alias) {
+    if let Ok(Some(last)) = db.last_snapshot(&snap.provider, &snap.account_alias) {
         // 1. 完全相同则跳过
         if last.session_pct == snap.session_pct
+            && last.session_total_pct == snap.session_total_pct
             && last.weekly_pct == snap.weekly_pct
+            && last.weekly_total_pct == snap.weekly_total_pct
         {
             return (
                 StatusCode::OK,

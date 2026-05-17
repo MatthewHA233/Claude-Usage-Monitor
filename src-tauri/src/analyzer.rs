@@ -9,7 +9,10 @@ pub fn analyze_all(db: &Database, aliases: &[String]) -> Vec<AccountAnalysis> {
 }
 
 fn analyze_account(db: &Database, alias: &str) -> AccountAnalysis {
-    let records = match db.history(alias, 500, 0) {
+    let (provider, account_alias) = alias
+        .split_once("::")
+        .unwrap_or(("claude_code", alias));
+    let records = match db.history(provider, account_alias, 500, 0) {
         Ok(r) => r,
         Err(_) => return empty_analysis(alias),
     };

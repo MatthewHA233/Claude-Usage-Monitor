@@ -8,6 +8,7 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
 
     if summaries.is_empty() {
         return Recommendation {
+            recommended_key: None,
             recommended_alias: None,
             reason: "暂无账号数据，请确认扩展已上报".to_string(),
             estimated_remaining_hours: None,
@@ -21,8 +22,9 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
     // 预警：本周剩余 >40% 但 <24h 后就重置（会浪费额度）
     for s in &summaries {
         if let (Some(weekly_pct), Some(weekly_hours)) = (s.weekly_pct, s.weekly_remaining_hours) {
-            let weekly_remaining = 100.0 - weekly_pct;
-            if weekly_remaining > 40.0 && weekly_hours < 24.0 {
+            let weekly_total = s.weekly_total_pct.unwrap_or(100.0);
+            let weekly_remaining = weekly_total - weekly_pct;
+            if weekly_remaining > weekly_total * 0.4 && weekly_hours < 24.0 {
                 warnings.push(format!(
                     "账号 {} 本周剩余 {:.0}% Weekly，但 {:.1}h 后重置，存在浪费风险",
                     s.alias, weekly_remaining, weekly_hours
@@ -35,9 +37,11 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
     let available: Vec<&AccountSummary> = summaries
         .iter()
         .filter(|s| {
+            let session_total = s.session_total_pct.unwrap_or(100.0);
+            let weekly_total = s.weekly_total_pct.unwrap_or(100.0);
             s.status != "unknown"
-                && s.session_pct.unwrap_or(100.0) < 99.0
-                && s.weekly_pct.unwrap_or(100.0) < 99.0
+                && s.session_pct.unwrap_or(session_total) < session_total - 1.0
+                && s.weekly_pct.unwrap_or(weekly_total) < weekly_total - 1.0
         })
         .collect();
 
@@ -45,6 +49,7 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
         // 检查是否都耗尽了
         let all_exhausted = summaries.iter().all(|s| s.status == "exhausted");
         return Recommendation {
+            recommended_key: None,
             recommended_alias: None,
             reason: if all_exhausted {
                 "所有账号额度已耗尽，请等待重置".to_string()
@@ -69,6 +74,7 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
         Some(s) => s,
         None => {
             return Recommendation {
+                recommended_key: None,
                 recommended_alias: None,
                 reason: "无法计算推荐".to_string(),
                 estimated_remaining_hours: None,
@@ -78,12 +84,15 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
         }
     };
 
-    let session_remaining = recommended.session_pct.map(|p| 100.0 - p).unwrap_or(100.0);
-    let weekly_remaining = recommended.weekly_pct.map(|p| 100.0 - p).unwrap_or(100.0);
+    let session_total = recommended.session_total_pct.unwrap_or(100.0);
+    let weekly_total = recommended.weekly_total_pct.unwrap_or(100.0);
+    let session_remaining = recommended.session_pct.map(|p| session_total - p).unwrap_or(session_total);
+    let weekly_remaining = recommended.weekly_pct.map(|p| weekly_total - p).unwrap_or(weekly_total);
 
     let reason = build_reason(recommended, session_remaining, weekly_remaining);
 
     Recommendation {
+        recommended_key: Some(recommended.key.clone()),
         recommended_alias: Some(recommended.alias.clone()),
         reason,
         estimated_remaining_hours: recommended.session_remaining_hours,
@@ -113,8 +122,14 @@ fn build_summary(snap: &UsageSnapshot) -> AccountSummary {
 
     let status = if snap.error.is_some() {
         "unknown".to_string()
-    } else if snap.session_pct.map(|p| p >= 99.0).unwrap_or(false)
-        || snap.weekly_pct.map(|p| p >= 99.0).unwrap_or(false)
+    } else if snap
+        .session_pct
+        .map(|p| p >= snap.session_total_pct.unwrap_or(100.0) - 1.0)
+        .unwrap_or(false)
+        || snap
+            .weekly_pct
+            .map(|p| p >= snap.weekly_total_pct.unwrap_or(100.0) - 1.0)
+            .unwrap_or(false)
     {
         "exhausted".to_string()
     } else {
@@ -122,10 +137,14 @@ fn build_summary(snap: &UsageSnapshot) -> AccountSummary {
     };
 
     AccountSummary {
+        provider: snap.provider.clone(),
+        key: format!("{}::{}", snap.provider, snap.account_alias),
         alias: snap.account_alias.clone(),
         session_pct: snap.session_pct,
+        session_total_pct: snap.session_total_pct.or(Some(100.0)),
         session_remaining_hours,
         weekly_pct: snap.weekly_pct,
+        weekly_total_pct: snap.weekly_total_pct.or(Some(100.0)),
         weekly_remaining_hours,
         status,
     }
