@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 const COLLECT_INTERVAL_SECONDS: u64 = 60;
 const CLAUDE_COLLECT_MIN_SECONDS: u64 = 300;
+const SESSION_RESET_SIGNIFICANT_SECONDS: i64 = 4 * 60 * 60;
+const WEEKLY_RESET_SIGNIFICANT_SECONDS: i64 = 12 * 60 * 60;
 
 static LAST_CLAUDE_COLLECT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
@@ -90,17 +92,49 @@ fn save_snapshot(db: &Database, snapshot: UsageSnapshot) {
     if let Ok(Some(last)) = db.last_snapshot(&snapshot.provider, &snapshot.account_alias) {
         if last.session_pct == snapshot.session_pct
             && last.session_total_pct == snapshot.session_total_pct
-            && last.session_reset_at == snapshot.session_reset_at
             && last.weekly_pct == snapshot.weekly_pct
             && last.weekly_total_pct == snapshot.weekly_total_pct
-            && last.weekly_reset_at == snapshot.weekly_reset_at
             && last.error == snapshot.error
+            && !reset_shift_is_significant(
+                last.session_reset_at.as_deref(),
+                snapshot.session_reset_at.as_deref(),
+                SESSION_RESET_SIGNIFICANT_SECONDS,
+            )
+            && !reset_shift_is_significant(
+                last.weekly_reset_at.as_deref(),
+                snapshot.weekly_reset_at.as_deref(),
+                WEEKLY_RESET_SIGNIFICANT_SECONDS,
+            )
         {
             return;
         }
     }
     if let Err(error) = db.insert_snapshot(&snapshot) {
         eprintln!("[local-usage] failed to insert snapshot: {error}");
+    }
+}
+
+fn reset_shift_is_significant(
+    previous: Option<&str>,
+    current: Option<&str>,
+    threshold_seconds: i64,
+) -> bool {
+    match (previous, current) {
+        (None, None) => false,
+        (Some(previous), Some(current)) => {
+            if previous == current {
+                return false;
+            }
+            let previous = DateTime::parse_from_rfc3339(previous).ok();
+            let current = DateTime::parse_from_rfc3339(current).ok();
+            match (previous, current) {
+                (Some(previous), Some(current)) => {
+                    (current.timestamp() - previous.timestamp()).abs() >= threshold_seconds
+                }
+                _ => true,
+            }
+        }
+        _ => true,
     }
 }
 

@@ -42,6 +42,7 @@ impl Database {
         };
         db.migrate()?;
         db.normalize_pct_scale()?;
+        db.dedupe_consecutive_snapshots()?;
         Ok(db)
     }
 
@@ -407,6 +408,66 @@ impl Database {
               AND weekly_pct  IS NOT NULL
               AND session_pct < 1.5
               AND weekly_pct  < 1.5;
+        ",
+        )?;
+        Ok(())
+    }
+
+    /// OAuth APIs can jitter reset_at while the visible usage is unchanged.
+    /// Keep true reset-window shifts, but remove adjacent rows caused by small reset_at drift.
+    fn dedupe_consecutive_snapshots(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "
+            WITH ordered AS (
+                SELECT
+                    id,
+                    session_pct,
+                    session_total_pct,
+                    weekly_pct,
+                    weekly_total_pct,
+                    session_reset_at,
+                    weekly_reset_at,
+                    error,
+                    LAG(session_pct) OVER w AS newer_session_pct,
+                    LAG(session_total_pct) OVER w AS newer_session_total_pct,
+                    LAG(weekly_pct) OVER w AS newer_weekly_pct,
+                    LAG(weekly_total_pct) OVER w AS newer_weekly_total_pct,
+                    LAG(session_reset_at) OVER w AS newer_session_reset_at,
+                    LAG(weekly_reset_at) OVER w AS newer_weekly_reset_at,
+                    LAG(error) OVER w AS newer_error
+                FROM usage_snapshots
+                WINDOW w AS (
+                    PARTITION BY provider, account_alias
+                    ORDER BY collected_at DESC, id DESC
+                )
+            )
+            DELETE FROM usage_snapshots
+            WHERE id IN (
+                SELECT id
+                FROM ordered
+                WHERE session_pct IS newer_session_pct
+                  AND session_total_pct IS newer_session_total_pct
+                  AND weekly_pct IS newer_weekly_pct
+                  AND weekly_total_pct IS newer_weekly_total_pct
+                  AND error IS newer_error
+                  AND (
+                      session_reset_at IS newer_session_reset_at
+                      OR (
+                          session_reset_at IS NOT NULL
+                          AND newer_session_reset_at IS NOT NULL
+                          AND ABS((julianday(session_reset_at) - julianday(newer_session_reset_at)) * 86400) < 14400
+                      )
+                  )
+                  AND (
+                      weekly_reset_at IS newer_weekly_reset_at
+                      OR (
+                          weekly_reset_at IS NOT NULL
+                          AND newer_weekly_reset_at IS NOT NULL
+                          AND ABS((julianday(weekly_reset_at) - julianday(newer_weekly_reset_at)) * 86400) < 43200
+                      )
+                  )
+            );
         ",
         )?;
         Ok(())
