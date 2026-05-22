@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import type { UsageSnapshot, Recommendation, AccountAnalysis } from "../types";
+import type { UsageSnapshot, Recommendation, AccountAnalysis, LocalUsageStatus } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
 import { useHistory, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
@@ -47,6 +47,7 @@ interface Props {
   snapshots: UsageSnapshot[];
   recommendation: Recommendation | null;
   analysis: AccountAnalysis[];
+  localUsageStatuses: LocalUsageStatus[];
   onRefresh: () => void;
 }
 
@@ -114,7 +115,7 @@ function computeProviderAvgCosts(accountRates: AccountRate[]): Record<string, nu
 }
 
 // ── StatusCards ───────────────────────────────────────────
-export default function StatusCards({ snapshots, recommendation, analysis, onRefresh }: Props) {
+export default function StatusCards({ snapshots, recommendation, analysis, localUsageStatuses, onRefresh }: Props) {
   const { colors, setColor } = useAccountColors();
   const { pauseStates, setPaused } = useAccountPauseStates();
   const { histories } = useAllHistories();
@@ -170,6 +171,9 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
           const sum = recommendation?.account_summaries.find((s) => (s.key ?? keyFromParts(s.provider, s.alias)) === key);
           const alias = snap?.account_alias ?? sum?.alias ?? aliasFromKey(key);
           const provider = snap?.provider ?? sum?.provider ?? providerFromKey(key);
+          const cliLoggedIn = localUsageStatuses.some((status) =>
+            status.ok && status.provider === provider && status.account_alias === alias
+          );
           const pause = pauseStates[key];
           const isPaused = pause?.paused ?? false;
           return (
@@ -183,6 +187,7 @@ export default function StatusCards({ snapshots, recommendation, analysis, onRef
               weeklyHours={sum?.weekly_remaining_hours ?? hoursUntil(snap?.weekly_reset_at ?? null)}
               isRecommended={recommendation?.recommended_key === key && !isPaused}
               isPaused={isPaused}
+              cliLoggedIn={cliLoggedIn}
               pausedAt={pause?.paused_at ?? null}
               onTogglePaused={async () => {
                 await setPaused(provider, alias, !isPaused);
@@ -357,6 +362,7 @@ interface CardProps {
   colors: Record<string, string>;
   setColor: (alias: string, color: string) => Promise<void>;
   isPaused: boolean;
+  cliLoggedIn: boolean;
   pausedAt: string | null;
   onTogglePaused: () => Promise<void>;
   alarmEnabled: boolean;
@@ -364,7 +370,30 @@ interface CardProps {
   onToggleAlarm: () => void;
 }
 
-function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, pausedAt, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
+function CliLoggedInBadge() {
+  return (
+    <span
+      title="本机 CLI 已登录，当前额度可自动采集"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        height: 20,
+        padding: "0 7px",
+        borderRadius: 999,
+        border: "1px solid #245c44",
+        background: "#123326",
+        color: "#86efac",
+        fontSize: 10,
+        fontWeight: 700,
+        whiteSpace: "nowrap",
+      }}
+    >
+      CLI已登录
+    </span>
+  );
+}
+
+function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pausedAt, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
@@ -405,13 +434,14 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
                 style={{ position: "absolute", opacity: 0, width: 0, height: 0, pointerEvents: "none" }}
               />
             </div>
-            <div className="flex items-center gap-2">
-              <div className="flex flex-col leading-tight">
-                <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
-                <span className="text-[10px] uppercase" style={{ color: "#888" }}>{providerLabel(provider)}</span>
+              <div className="flex items-center gap-2">
+                <div className="flex flex-col leading-tight">
+                  <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
+                  <span className="text-[10px] uppercase" style={{ color: "#888" }}>{providerLabel(provider)}</span>
+                </div>
+                {cliLoggedIn && <CliLoggedInBadge />}
+                {isRecommended && <span className="plan-badge" style={{ fontSize: 10 }}>推荐</span>}
               </div>
-              {isRecommended && <span className="plan-badge" style={{ fontSize: 10 }}>推荐</span>}
-            </div>
           </div>
           <div className="flex items-center gap-2">
             <button

@@ -1,4 +1,7 @@
-use crate::models::{AccountAnalysis, AccountColor, AccountPauseState, InboxItem, Recommendation, UsageSnapshot};
+use crate::models::{
+    AccountAnalysis, AccountColor, AccountPauseState, InboxItem, LocalUsageStatus, Recommendation,
+    TokenUsageReport, UsageSnapshot,
+};
 use crate::state::AppState;
 use std::collections::HashMap;
 use tauri::State;
@@ -9,15 +12,27 @@ pub fn get_latest_snapshots(state: State<AppState>) -> Vec<UsageSnapshot> {
 }
 
 #[tauri::command]
-pub fn get_history(provider: Option<String>, alias: String, limit: i64, offset: i64, state: State<AppState>) -> Vec<UsageSnapshot> {
+pub fn get_history(
+    provider: Option<String>,
+    alias: String,
+    limit: i64,
+    offset: i64,
+    state: State<AppState>,
+) -> Vec<UsageSnapshot> {
     let provider = provider.unwrap_or_else(|| "claude_code".to_string());
-    state.db.history(&provider, &alias, limit, offset).unwrap_or_default()
+    state
+        .db
+        .history(&provider, &alias, limit, offset)
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 pub fn get_analysis(state: State<AppState>) -> Vec<AccountAnalysis> {
     let snapshots = state.db.latest_all().unwrap_or_default();
-    let aliases: Vec<String> = snapshots.iter().map(|s| format!("{}::{}", s.provider, s.account_alias)).collect();
+    let aliases: Vec<String> = snapshots
+        .iter()
+        .map(|s| format!("{}::{}", s.provider, s.account_alias))
+        .collect();
     crate::analyzer::analyze_all(&state.db, &aliases)
 }
 
@@ -34,20 +49,34 @@ pub fn get_recommendation(state: State<AppState>) -> Recommendation {
 
 #[tauri::command]
 pub fn delete_snapshot(id: i64, state: State<AppState>) -> Result<(), String> {
-    state.db.delete_snapshot(id).map(|_| ()).map_err(|e| e.to_string())
+    state
+        .db
+        .delete_snapshot(id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_account_colors(state: State<AppState>) -> Vec<AccountColor> {
     let snapshots = state.db.latest_all().unwrap_or_default();
-    let aliases: Vec<String> = snapshots.iter().map(|s| format!("{}::{}", s.provider, s.account_alias)).collect();
+    let aliases: Vec<String> = snapshots
+        .iter()
+        .map(|s| format!("{}::{}", s.provider, s.account_alias))
+        .collect();
     let _ = state.db.ensure_colors_for_aliases(&aliases);
     state.db.get_all_colors().unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn set_account_color(alias: String, color: String, state: State<AppState>) -> Result<(), String> {
-    state.db.set_color(&alias, &color).map_err(|e| e.to_string())
+pub fn set_account_color(
+    alias: String,
+    color: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_color(&alias, &color)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -56,8 +85,21 @@ pub fn get_account_pause_states(state: State<AppState>) -> Vec<AccountPauseState
 }
 
 #[tauri::command]
-pub fn set_account_paused(provider: String, alias: String, paused: bool, state: State<AppState>) -> Result<(), String> {
-    state.db.set_account_paused(&provider, &alias, paused).map_err(|e| e.to_string())
+pub fn get_local_usage_statuses(state: State<AppState>) -> Vec<LocalUsageStatus> {
+    state.db.local_usage_statuses().unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn set_account_paused(
+    provider: String,
+    alias: String,
+    paused: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_account_paused(&provider, &alias, paused)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -97,5 +139,40 @@ pub fn inbox_accept(id: i64, state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn inbox_delete(id: i64, state: State<AppState>) -> Result<(), String> {
-    state.db.inbox_delete(id).map(|_| ()).map_err(|e| e.to_string())
+    state
+        .db
+        .inbox_delete(id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_token_usage_report(
+    since_days: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<TokenUsageReport, String> {
+    let days = since_days.unwrap_or(14);
+    let db = std::sync::Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::token_usage::load_report(&db, days))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_cached_token_usage_report(
+    since_days: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<TokenUsageReport, String> {
+    let days = since_days.unwrap_or(14);
+    let db = std::sync::Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || crate::token_usage::load_cached_report(&db, days))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_local_usage(state: State<'_, AppState>) -> Result<(), String> {
+    let db = std::sync::Arc::clone(&state.db);
+    crate::local_usage::collect_once(db).await;
+    Ok(())
 }

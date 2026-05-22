@@ -2,9 +2,11 @@ mod analyzer;
 mod commands;
 mod db;
 mod http_server;
+mod local_usage;
 mod models;
 mod recommender;
 mod state;
+mod token_usage;
 
 #[cfg(test)]
 mod recommender_tests;
@@ -15,12 +17,16 @@ use state::AppState;
 pub fn run() {
     let app_state = AppState::new().expect("初始化 AppState 失败");
     let db_for_http = std::sync::Arc::clone(&app_state.db);
+    let db_for_local_usage = std::sync::Arc::clone(&app_state.db);
 
     tauri::Builder::default()
         .manage(app_state)
         .setup(|_app| {
             tauri::async_runtime::spawn(async move {
                 http_server::start(db_for_http).await;
+            });
+            tauri::async_runtime::spawn(async move {
+                local_usage::run_background_collector(db_for_local_usage).await;
             });
             Ok(())
         })
@@ -33,11 +39,15 @@ pub fn run() {
             commands::get_account_colors,
             commands::set_account_color,
             commands::get_account_pause_states,
+            commands::get_local_usage_statuses,
             commands::set_account_paused,
             commands::get_all_histories,
             commands::inbox_list,
             commands::inbox_accept,
             commands::inbox_delete,
+            commands::get_token_usage_report,
+            commands::get_cached_token_usage_report,
+            commands::refresh_local_usage,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

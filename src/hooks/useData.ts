@@ -1,6 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { UsageSnapshot, Recommendation, AccountAnalysis, AccountColor, AccountPauseState } from "../types";
+import type {
+  UsageSnapshot,
+  Recommendation,
+  AccountAnalysis,
+  AccountColor,
+  AccountPauseState,
+  LocalUsageStatus,
+  TokenUsageReport,
+} from "../types";
 
 export function useLatestSnapshots(autoRefreshMs = 0) {
   const [snapshots, setSnapshots] = useState<UsageSnapshot[]>([]);
@@ -119,6 +127,28 @@ export function useAccountPauseStates() {
   return { pauseStates, refetch: fetch, setPaused };
 }
 
+export function useLocalUsageStatuses(autoRefreshMs = 0) {
+  const [statuses, setStatuses] = useState<LocalUsageStatus[]>([]);
+
+  const fetch = useCallback(async () => {
+    try {
+      const data = await invoke<LocalUsageStatus[]>("get_local_usage_statuses");
+      setStatuses(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    void fetch();
+    if (autoRefreshMs > 0) {
+      const timer = setInterval(() => void fetch(), autoRefreshMs);
+      return () => clearInterval(timer);
+    }
+    return undefined;
+  }, [fetch, autoRefreshMs]);
+
+  return { statuses, refetch: fetch };
+}
+
 export function useAllHistories() {
   const [histories, setHistories] = useState<Record<string, UsageSnapshot[]>>({});
   const [loading, setLoading] = useState(false);
@@ -185,4 +215,45 @@ export function useHistory(provider: string, alias: string, limit = PAGE_SIZE) {
   }, [refetch]);
 
   return { history, loading, loadingMore, hasMore, loadMore, refetch };
+}
+
+export function useTokenUsageReport(sinceDays = 14, autoFetch = false) {
+  const [report, setReport] = useState<TokenUsageReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadCached = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await invoke<TokenUsageReport>("get_cached_token_usage_report", { sinceDays });
+      setReport(data);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [sinceDays]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await invoke<TokenUsageReport>("get_token_usage_report", { sinceDays });
+      setReport(data);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [sinceDays]);
+
+  useEffect(() => {
+    void loadCached();
+  }, [loadCached]);
+
+  useEffect(() => {
+    if (autoFetch) {
+      void refresh();
+    }
+  }, [autoFetch, refresh]);
+
+  return { report, loading, error, refetch: refresh, loadCached };
 }

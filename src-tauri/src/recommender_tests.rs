@@ -3,7 +3,13 @@ mod tests {
     use crate::models::UsageSnapshot;
     use crate::recommender::recommend;
 
-    fn snapshot(alias: &str, session_pct: f64, session_total_pct: f64, weekly_pct: f64, weekly_total_pct: f64) -> UsageSnapshot {
+    fn snapshot(
+        alias: &str,
+        session_pct: f64,
+        session_total_pct: f64,
+        weekly_pct: f64,
+        weekly_total_pct: f64,
+    ) -> UsageSnapshot {
         UsageSnapshot {
             id: None,
             account_alias: alias.to_string(),

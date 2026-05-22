@@ -5,13 +5,14 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 pub fn analyze_all(db: &Database, aliases: &[String]) -> Vec<AccountAnalysis> {
-    aliases.iter().map(|alias| analyze_account(db, alias)).collect()
+    aliases
+        .iter()
+        .map(|alias| analyze_account(db, alias))
+        .collect()
 }
 
 fn analyze_account(db: &Database, alias: &str) -> AccountAnalysis {
-    let (provider, account_alias) = alias
-        .split_once("::")
-        .unwrap_or(("claude_code", alias));
+    let (provider, account_alias) = alias.split_once("::").unwrap_or(("claude_code", alias));
     let records = match db.history(provider, account_alias, 500, 0) {
         Ok(r) => r,
         Err(_) => return empty_analysis(alias),
@@ -39,7 +40,8 @@ fn analyze_account(db: &Database, alias: &str) -> AccountAnalysis {
     // --- Weekly 周期末平均消耗% ---
     let avg_weekly_final_pct = calc_avg_weekly_final(&valid);
 
-    let (weekly_cost_per_session_24h, exhaustion_count_24h) = calc_weekly_cost_per_session_24h(&valid);
+    let (weekly_cost_per_session_24h, exhaustion_count_24h) =
+        calc_weekly_cost_per_session_24h(&valid);
 
     AccountAnalysis {
         alias: alias.to_string(),
@@ -76,7 +78,11 @@ fn weighted_avg(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     }
     let n = vals.len() as f64;
     let total_weight: f64 = (1..=vals.len()).map(|i| n - i as f64 + 1.0).sum();
-    let weighted_sum: f64 = vals.iter().enumerate().map(|(i, v)| v * (n - i as f64)).sum();
+    let weighted_sum: f64 = vals
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * (n - i as f64))
+        .sum();
     Some(weighted_sum / total_weight)
 }
 
@@ -98,7 +104,10 @@ fn calc_session_rate(records: &[UsageSnapshot]) -> Option<f64> {
             if pts.len() < 2 {
                 return None;
             }
-            let max_pct = pts.iter().map(|(_, p)| *p).fold(f64::NEG_INFINITY, f64::max);
+            let max_pct = pts
+                .iter()
+                .map(|(_, p)| *p)
+                .fold(f64::NEG_INFINITY, f64::max);
             let min_ts = pts.iter().map(|(t, _)| *t).min()?;
             let max_ts = pts.iter().map(|(t, _)| *t).max()?;
             let hours = (max_ts - min_ts).num_seconds() as f64 / 3600.0;

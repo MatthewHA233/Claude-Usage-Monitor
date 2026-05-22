@@ -37,6 +37,14 @@ export interface AccountPauseState {
   paused_at: string | null;
 }
 
+export interface LocalUsageStatus {
+  provider: "claude_code" | "codex" | string;
+  account_alias: string | null;
+  ok: boolean;
+  message: string;
+  updated_at: string;
+}
+
 export interface AccountSummary {
   provider: "claude_code" | "codex" | string;
   key: string;
@@ -57,4 +65,45 @@ export interface Recommendation {
   estimated_remaining_hours: number | null;
   warnings: string[];
   account_summaries: AccountSummary[];
+}
+
+export interface TokenUsageModelBreakdown {
+  model: string;
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+}
+
+export interface TokenUsageDay {
+  date: string;
+  provider: "claude_code" | "codex" | string;
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+  models: TokenUsageModelBreakdown[];
+}
+
+export interface TokenUsageSummary {
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_usd: number | null;
+}
+
+export interface TokenUsageReport {
+  since: string;
+  until: string;
+  days: TokenUsageDay[];
+  summary: TokenUsageSummary;
+  scanned_files: number;
+  parsed_files: number;
+  errors: string[];
 }

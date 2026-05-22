@@ -61,6 +61,15 @@ pub struct AccountPauseState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalUsageStatus {
+    pub provider: String,
+    pub account_alias: Option<String>,
+    pub ok: bool,
+    pub message: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: Option<i64>,
     pub provider: String,
@@ -84,4 +93,58 @@ pub struct Recommendation {
     pub estimated_remaining_hours: Option<f64>,
     pub warnings: Vec<String>,
     pub account_summaries: Vec<AccountSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageModelBreakdown {
+    pub model: String,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageDay {
+    pub date: String,
+    pub provider: String,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_usd: Option<f64>,
+    pub models: Vec<TokenUsageModelBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageSummary {
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageReport {
+    pub since: String,
+    pub until: String,
+    pub days: Vec<TokenUsageDay>,
+    pub summary: TokenUsageSummary,
+    pub scanned_files: usize,
+    pub parsed_files: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenUsageFileCache {
+    pub path: String,
+    pub provider: String,
+    pub modified_unix: i64,
+    pub size: i64,
+    pub days_json: String,
 }

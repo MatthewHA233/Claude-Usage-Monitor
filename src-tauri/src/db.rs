@@ -1,5 +1,8 @@
-use crate::models::{AccountColor, AccountPauseState, InboxItem, UsageSnapshot};
-use rusqlite::{Connection, Result, params};
+use crate::models::{
+    AccountColor, AccountPauseState, InboxItem, LocalUsageStatus, TokenUsageDay,
+    TokenUsageFileCache, UsageSnapshot,
+};
+use rusqlite::{params, Connection, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -7,13 +10,12 @@ use std::sync::Mutex;
 /// 根据账号名哈希确定性地从调色板选色（新账号自动分配）
 fn color_for_alias(alias: &str) -> String {
     const PALETTE: &[&str] = &[
-        "#cc785c", "#4a9eff", "#4ade80", "#f472b6", "#a78bfa",
-        "#fb923c", "#34d399", "#60a5fa", "#f87171", "#facc15",
-        "#38bdf8", "#e879f9", "#a3e635", "#fb7185", "#67e8f9",
+        "#cc785c", "#4a9eff", "#4ade80", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#60a5fa",
+        "#f87171", "#facc15", "#38bdf8", "#e879f9", "#a3e635", "#fb7185", "#67e8f9",
     ];
-    let hash: usize = alias
-        .bytes()
-        .fold(5381usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    let hash: usize = alias.bytes().fold(5381usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
     PALETTE[hash % PALETTE.len()].to_string()
 }
 
@@ -35,7 +37,9 @@ impl Database {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(&path)?;
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.migrate()?;
         db.normalize_pct_scale()?;
         Ok(db)
@@ -43,7 +47,8 @@ impl Database {
 
     fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS usage_snapshots (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 provider         TEXT    NOT NULL DEFAULT 'claude_code',
@@ -86,15 +91,241 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_inbox_alias_id
                 ON filtered_inbox(provider, account_alias, id DESC);
-        ")?;
+            CREATE TABLE IF NOT EXISTS token_usage_files (
+                path          TEXT PRIMARY KEY,
+                provider      TEXT    NOT NULL,
+                modified_unix INTEGER NOT NULL,
+                size          INTEGER NOT NULL,
+                days_json     TEXT    NOT NULL,
+                scanned_at    TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_usage_files_provider
+                ON token_usage_files(provider);
+            CREATE TABLE IF NOT EXISTS token_usage_days (
+                provider      TEXT    NOT NULL,
+                date          TEXT    NOT NULL,
+                input_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens  INTEGER NOT NULL DEFAULT 0,
+                cost_usd      REAL,
+                models_json   TEXT    NOT NULL,
+                updated_at    TEXT    NOT NULL,
+                PRIMARY KEY (provider, date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_usage_days_date
+                ON token_usage_days(date DESC);
+            CREATE TABLE IF NOT EXISTS local_usage_status (
+                provider      TEXT PRIMARY KEY,
+                account_alias TEXT,
+                ok            INTEGER NOT NULL,
+                message       TEXT    NOT NULL,
+                updated_at    TEXT    NOT NULL
+            );
+            UPDATE usage_snapshots
+            SET session_total_pct = 1000
+            WHERE provider = 'codex' AND session_total_pct = 100;
+            UPDATE usage_snapshots
+            SET weekly_total_pct = 1000
+            WHERE provider = 'codex' AND weekly_total_pct = 100;
+        ",
+        )?;
         drop(conn);
-        self.add_column_if_missing("usage_snapshots", "provider", "TEXT NOT NULL DEFAULT 'claude_code'")?;
+        self.add_column_if_missing(
+            "usage_snapshots",
+            "provider",
+            "TEXT NOT NULL DEFAULT 'claude_code'",
+        )?;
         self.add_column_if_missing("usage_snapshots", "session_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("usage_snapshots", "weekly_total_pct", "REAL DEFAULT 100")?;
-        self.add_column_if_missing("filtered_inbox", "provider", "TEXT NOT NULL DEFAULT 'claude_code'")?;
+        self.add_column_if_missing(
+            "filtered_inbox",
+            "provider",
+            "TEXT NOT NULL DEFAULT 'claude_code'",
+        )?;
         self.add_column_if_missing("filtered_inbox", "session_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("filtered_inbox", "weekly_total_pct", "REAL DEFAULT 100")?;
+        self.add_column_if_missing("local_usage_status", "account_alias", "TEXT")?;
         Ok(())
+    }
+
+    pub fn set_local_usage_status(
+        &self,
+        provider: &str,
+        account_alias: Option<&str>,
+        ok: bool,
+        message: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO local_usage_status (provider, account_alias, ok, message, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider) DO UPDATE SET
+                account_alias = excluded.account_alias,
+                ok = excluded.ok,
+                message = excluded.message,
+                updated_at = excluded.updated_at",
+            params![
+                provider,
+                account_alias,
+                if ok { 1 } else { 0 },
+                message,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn local_usage_statuses(&self) -> Result<Vec<LocalUsageStatus>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT provider, account_alias, ok, message, updated_at
+             FROM local_usage_status
+             ORDER BY provider",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let ok_int: i64 = row.get(2)?;
+            Ok(LocalUsageStatus {
+                provider: row.get(0)?,
+                account_alias: row.get(1)?,
+                ok: ok_int != 0,
+                message: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn token_file_cache(&self, path: &str) -> Result<Option<TokenUsageFileCache>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, provider, modified_unix, size, days_json
+             FROM token_usage_files
+             WHERE path = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![path], |row| {
+            Ok(TokenUsageFileCache {
+                path: row.get(0)?,
+                provider: row.get(1)?,
+                modified_unix: row.get(2)?,
+                size: row.get(3)?,
+                days_json: row.get(4)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn upsert_token_file_cache(&self, cache: &TokenUsageFileCache) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO token_usage_files
+             (path, provider, modified_unix, size, days_json, scanned_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path) DO UPDATE SET
+                provider = excluded.provider,
+                modified_unix = excluded.modified_unix,
+                size = excluded.size,
+                days_json = excluded.days_json,
+                scanned_at = excluded.scanned_at",
+            params![
+                cache.path,
+                cache.provider,
+                cache.modified_unix,
+                cache.size,
+                cache.days_json,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn token_file_caches(&self) -> Result<Vec<TokenUsageFileCache>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, provider, modified_unix, size, days_json
+             FROM token_usage_files",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TokenUsageFileCache {
+                path: row.get(0)?,
+                provider: row.get(1)?,
+                modified_unix: row.get(2)?,
+                size: row.get(3)?,
+                days_json: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_token_usage_day(&self, day: &TokenUsageDay) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let models_json = serde_json::to_string(&day.models)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        conn.execute(
+            "INSERT INTO token_usage_days
+             (provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+              output_tokens, total_tokens, cost_usd, models_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(provider, date) DO UPDATE SET
+                input_tokens = excluded.input_tokens,
+                cache_read_tokens = excluded.cache_read_tokens,
+                cache_creation_tokens = excluded.cache_creation_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                cost_usd = excluded.cost_usd,
+                models_json = excluded.models_json,
+                updated_at = excluded.updated_at",
+            params![
+                day.provider,
+                day.date,
+                day.input_tokens,
+                day.cache_read_tokens,
+                day.cache_creation_tokens,
+                day.output_tokens,
+                day.total_tokens,
+                day.cost_usd,
+                models_json,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_token_usage_days_between(&self, since: &str, until: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM token_usage_days WHERE date >= ?1 AND date <= ?2",
+            params![since, until],
+        )?;
+        Ok(())
+    }
+
+    pub fn token_usage_days(&self, since: &str, until: &str) -> Result<Vec<TokenUsageDay>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+                    output_tokens, total_tokens, cost_usd, models_json
+             FROM token_usage_days
+             WHERE date >= ?1 AND date <= ?2
+             ORDER BY date DESC, provider",
+        )?;
+        let rows = stmt.query_map(params![since, until], |row| {
+            let models_json: String = row.get(8)?;
+            let models = serde_json::from_str(&models_json).unwrap_or_default();
+            Ok(TokenUsageDay {
+                provider: row.get(0)?,
+                date: row.get(1)?,
+                input_tokens: row.get(2)?,
+                cache_read_tokens: row.get(3)?,
+                cache_creation_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                total_tokens: row.get(6)?,
+                cost_usd: row.get(7)?,
+                models,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn get_pause_states(&self) -> Result<Vec<AccountPauseState>> {
@@ -129,16 +360,21 @@ impl Database {
                 account_alias = excluded.account_alias,
                 paused = excluded.paused,
                 paused_at = excluded.paused_at",
-            params![account_key, provider, alias, if paused { 1 } else { 0 }, paused_at],
+            params![
+                account_key,
+                provider,
+                alias,
+                if paused { 1 } else { 0 },
+                paused_at
+            ],
         )?;
         Ok(())
     }
 
     pub fn paused_account_keys(&self) -> Result<HashSet<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT account_key FROM account_pause_states WHERE paused != 0",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT account_key FROM account_pause_states WHERE paused != 0")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
@@ -152,7 +388,9 @@ impl Database {
                 return Ok(());
             }
         }
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+        ))?;
         Ok(())
     }
 
@@ -160,7 +398,8 @@ impl Database {
     /// 判断条件：session_pct 和 weekly_pct 都 < 1.5（真实百分比不可能两个都 <1.5%）
     fn normalize_pct_scale(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             UPDATE usage_snapshots
             SET session_pct = session_pct * 100,
                 weekly_pct  = weekly_pct  * 100
@@ -168,7 +407,8 @@ impl Database {
               AND weekly_pct  IS NOT NULL
               AND session_pct < 1.5
               AND weekly_pct  < 1.5;
-        ")?;
+        ",
+        )?;
         Ok(())
     }
 
@@ -212,7 +452,13 @@ impl Database {
     }
 
     /// 获取某账号的历史记录，最新在前，支持分页
-    pub fn history(&self, provider: &str, alias: &str, limit: i64, offset: i64) -> Result<Vec<UsageSnapshot>> {
+    pub fn history(
+        &self,
+        provider: &str,
+        alias: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, provider, account_alias, collected_at,
@@ -239,7 +485,10 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT alias, color FROM account_colors ORDER BY alias")?;
         let rows = stmt.query_map([], |row| {
-            Ok(AccountColor { alias: row.get(0)?, color: row.get(1)? })
+            Ok(AccountColor {
+                alias: row.get(0)?,
+                color: row.get(1)?,
+            })
         })?;
         rows.collect()
     }
@@ -259,12 +508,17 @@ impl Database {
     pub fn ensure_colors_for_aliases(&self, aliases: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         for alias in aliases {
-            let base_alias = alias.split_once("::").map(|(_, name)| name).unwrap_or(alias);
-            let inherited = conn.query_row(
-                "SELECT color FROM account_colors WHERE alias = ?1",
-                params![base_alias],
-                |row| row.get::<_, String>(0),
-            ).ok();
+            let base_alias = alias
+                .split_once("::")
+                .map(|(_, name)| name)
+                .unwrap_or(alias);
+            let inherited = conn
+                .query_row(
+                    "SELECT color FROM account_colors WHERE alias = ?1",
+                    params![base_alias],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
             let color = inherited.unwrap_or_else(|| color_for_alias(alias));
             conn.execute(
                 "INSERT OR IGNORE INTO account_colors (alias, color) VALUES (?1, ?2)",
@@ -281,7 +535,8 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT DISTINCT provider, account_alias FROM usage_snapshots ORDER BY provider, account_alias",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             rows.collect::<Result<Vec<_>>>()?
         };
         let mut result = HashMap::new();

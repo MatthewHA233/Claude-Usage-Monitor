@@ -86,8 +86,14 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
 
     let session_total = recommended.session_total_pct.unwrap_or(100.0);
     let weekly_total = recommended.weekly_total_pct.unwrap_or(100.0);
-    let session_remaining = recommended.session_pct.map(|p| session_total - p).unwrap_or(session_total);
-    let weekly_remaining = recommended.weekly_pct.map(|p| weekly_total - p).unwrap_or(weekly_total);
+    let session_remaining = recommended
+        .session_pct
+        .map(|p| session_total - p)
+        .unwrap_or(session_total);
+    let weekly_remaining = recommended
+        .weekly_pct
+        .map(|p| weekly_total - p)
+        .unwrap_or(weekly_total);
 
     let reason = build_reason(recommended, session_remaining, weekly_remaining);
 
@@ -161,8 +167,14 @@ fn build_reason(s: &AccountSummary, session_remaining: f64, weekly_remaining: f6
         }
     };
 
-    let weekly_h = s.weekly_remaining_hours.map(|h| fmt_hours(h)).unwrap_or_else(|| "未知".to_string());
-    let session_h = s.session_remaining_hours.map(|h| fmt_hours(h)).unwrap_or_else(|| "未知".to_string());
+    let weekly_h = s
+        .weekly_remaining_hours
+        .map(|h| fmt_hours(h))
+        .unwrap_or_else(|| "未知".to_string());
+    let session_h = s
+        .session_remaining_hours
+        .map(|h| fmt_hours(h))
+        .unwrap_or_else(|| "未知".to_string());
 
     format!(
         "{} 周额度{}后重置（剩余 {:.0}%），Session 剩余 {:.0}%（{}后重置）",

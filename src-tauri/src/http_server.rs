@@ -1,11 +1,11 @@
 /// 本地 HTTP 服务器，供 Chrome 扩展上报用量数据
 /// 监听 localhost:47892
 use axum::{
-    Router,
     extract::State,
     http::{Method, StatusCode},
     response::Json,
     routing::{get, post},
+    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -50,6 +50,7 @@ pub async fn start(db: Arc<Database>) {
     let app = Router::new()
         .route("/report", post(handle_report))
         .route("/status", get(handle_status))
+        .route("/local-refresh", post(handle_local_refresh))
         .route("/ping", get(|| async { "pong" }))
         .with_state(db)
         .layer(cors);
@@ -133,10 +134,7 @@ async fn handle_report(
         // 2. weekly 0→100 异常跳变（页面刷新瞬间读到错误值），放入收件箱
         if let (Some(last_w), Some(new_w)) = (last.weekly_pct, snap.weekly_pct) {
             if last_w <= 5.0 && new_w >= 95.0 {
-                let reason = format!(
-                    "异常跳变（weekly {:.0}% → {:.0}%）",
-                    last_w, new_w
-                );
+                let reason = format!("异常跳变（weekly {:.0}% → {:.0}%）", last_w, new_w);
                 let _ = db.inbox_insert(&snap, &reason);
                 return (
                     StatusCode::OK,
@@ -149,13 +147,18 @@ async fn handle_report(
         }
         // 3. session 0→100 但 weekly 几乎不变也是异常
         //    （耗完一个 session 必然对应 weekly 数个百分点的增长）
-        if let (Some(last_s), Some(new_s), Some(last_w), Some(new_w)) =
-            (last.session_pct, snap.session_pct, last.weekly_pct, snap.weekly_pct)
-        {
+        if let (Some(last_s), Some(new_s), Some(last_w), Some(new_w)) = (
+            last.session_pct,
+            snap.session_pct,
+            last.weekly_pct,
+            snap.weekly_pct,
+        ) {
             if last_s <= 5.0 && new_s >= 95.0 && (new_w - last_w).abs() < 5.0 {
                 let reason = format!(
                     "异常跳变（session {:.0}% → {:.0}%，weekly 仅 {:+.1}%）",
-                    last_s, new_s, new_w - last_w
+                    last_s,
+                    new_s,
+                    new_w - last_w
                 );
                 let _ = db.inbox_insert(&snap, &reason);
                 return (
@@ -187,10 +190,16 @@ async fn handle_report(
     }
 }
 
-async fn handle_status(
-    State(db): State<Arc<Database>>,
-) -> Json<StatusResponse> {
+async fn handle_status(State(db): State<Arc<Database>>) -> Json<StatusResponse> {
     // 读取所有账号最新快照（不依赖 config，直接查 DB 里有记录的账号）
     let snapshots = db.latest_all().unwrap_or_default();
     Json(StatusResponse { snapshots })
+}
+
+async fn handle_local_refresh(State(db): State<Arc<Database>>) -> Json<ReportResponse> {
+    crate::local_usage::collect_once(db).await;
+    Json(ReportResponse {
+        ok: true,
+        message: "已触发本机采集".to_string(),
+    })
 }
