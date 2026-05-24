@@ -75,7 +75,7 @@ interface ActiveSession {
   samples: Sample[];
 }
 
-type RaceStatus = "active" | "completed" | "expired";
+type RaceStatus = "active" | "completed" | "expired" | "lost";
 
 interface RaceSegment {
   index: number;
@@ -489,6 +489,16 @@ function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, Activ
       }
     }
 
+    if (nextRace.status === "active") {
+      const raceResetMs = new Date(race.resetAt).getTime();
+      const sessionChanged = session != null && session.resetKey !== race.resetKey;
+      const resetPassedWithoutSession = session == null && Number.isFinite(raceResetMs) && nowMs >= raceResetMs;
+      if (sessionChanged || resetPassedWithoutSession) {
+        nextRace.status = "lost";
+        changed = true;
+      }
+    }
+
     if (nextRace.status === "active" && nowMs >= deadlineMs) {
       nextRace.status = "expired";
       changed = true;
@@ -534,6 +544,12 @@ function raceElapsedSeconds(race: UsageRace, nowMs: number) {
   if (race.status === "completed") {
     const lastCompleted = [...race.segments].reverse().find((segment) => segment.elapsedSeconds != null);
     if (lastCompleted?.elapsedSeconds != null) return lastCompleted.elapsedSeconds;
+  }
+  if (race.status === "expired") return race.durationSeconds;
+  if (race.status === "lost") {
+    const startedMs = new Date(race.startedAt).getTime();
+    const resetMs = new Date(race.resetAt).getTime();
+    if (Number.isFinite(resetMs)) return Math.max(0, (resetMs - startedMs) / 1000);
   }
   const startedMs = new Date(race.startedAt).getTime();
   return Math.max(0, (nowMs - startedMs) / 1000);
@@ -1307,6 +1323,17 @@ function FocusedRaceView({
   const segmentTargetSubtext = `每个小目标 ${formatDetailedHms(currentSegmentTarget)}`;
   const totalTargetSubtext = `总共 ${formatDetailedHms(race.durationSeconds)}`;
 
+  if (race.status === "completed" || race.status === "lost") {
+    return (
+      <RaceSettlementView
+        race={race}
+        session={session}
+        nowMs={liveNowMs}
+        onBack={onBack}
+      />
+    );
+  }
+
   return (
     <div
       className="card p-0 overflow-hidden"
@@ -1389,6 +1416,204 @@ function FocusedRaceView({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RaceSettlementView({
+  race,
+  session,
+  nowMs,
+  onBack,
+}: {
+  race: UsageRace;
+  session: ActiveSession | undefined;
+  nowMs: number;
+  onBack: () => void;
+}) {
+  const isWin = race.status === "completed";
+  const color = session?.color ?? providerColor(race.provider);
+  const consumed = raceConsumedDelta(race, session);
+  const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
+  const elapsed = raceElapsedSeconds(race, nowMs);
+  const targetRaw = rawFromNorm(race.targetDeltaPct, race.totalPct);
+  const consumedRaw = rawFromNorm(consumed, race.totalPct);
+  const progress = race.targetDeltaPct > 0 ? consumed / race.targetDeltaPct * 100 : 0;
+  const toneColor = isWin ? RECORD_OK_COLOR : TIMER_OVER_COLOR;
+  const title = isWin ? "目标完成" : "战败";
+  const subtitle = isWin
+    ? "小目标竞赛已经达成，记录已写入历史。"
+    : "session 已刷新，计时器仍在进行的竞赛未能完成。";
+  const statusText = isWin ? "胜利结算" : "失败结算";
+
+  return (
+    <div
+      className="card p-0 overflow-hidden"
+      style={{ minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column", position: "relative" }}
+    >
+      <RaceSettlementEffect status={race.status} color={toneColor} />
+
+      <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: "1px solid #3a3a3a", position: "relative", zIndex: 2 }}>
+        <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
+          <button
+            type="button"
+            title="返回主页"
+            onClick={onBack}
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db", flexShrink: 0 }}
+          >
+            <ArrowLeft size={15} />
+          </button>
+          <ProviderBadge provider={race.provider} color={color} />
+          <div style={{ minWidth: 0 }}>
+            <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+              <span className="text-sm font-semibold truncate" style={{ color: "#f3f4f6" }}>{race.alias}</span>
+              <StatusBadge status={race.status} />
+            </div>
+            <div className="text-[11px]" style={{ color: "#858585" }}>
+              {providerLabel(race.provider)} · {formatLocalTime(race.startedAt)} 开始
+            </div>
+          </div>
+        </div>
+        <span className="text-[11px] font-semibold" style={{ color: toneColor, flexShrink: 0 }}>{statusText}</span>
+      </div>
+
+      <div
+        className="p-4 sm:p-5"
+        style={{
+          flex: 1,
+          display: "grid",
+          gridTemplateRows: "auto auto minmax(0, 1fr)",
+          gap: 16,
+          position: "relative",
+          zIndex: 2,
+        }}
+      >
+        <div className="text-center" style={{ padding: "14px 0 4px" }}>
+          <div
+            className="inline-flex items-center justify-center"
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 999,
+              border: `1px solid ${toneColor}66`,
+              background: isWin ? "#17291d" : "#2b1d1d",
+              color: toneColor,
+              boxShadow: `0 0 38px ${toneColor}28`,
+            }}
+          >
+            {isWin ? <Trophy size={34} /> : <X size={34} />}
+          </div>
+          <div className="mt-3 text-2xl font-bold" style={{ color: "#f3f4f6", letterSpacing: 0 }}>{title}</div>
+          <div className="mt-1 text-xs" style={{ color: "#a3a3a3" }}>{subtitle}</div>
+        </div>
+
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))" }}>
+          <SettlementMetric label="已用额度" value={`${formatWhole(consumed)} / ${formatWholePct(race.targetDeltaPct)}`} color={toneColor} />
+          <SettlementMetric label="映射额度" value={`${formatWhole(consumedRaw)} / ${formatWhole(targetRaw)}`} color={color} />
+          <SettlementMetric label="用时" value={formatDetailedHms(elapsed)} color={toneColor} />
+          <SettlementMetric label="小目标" value={`${completedCount} / ${race.segments.length}`} color={color} />
+        </div>
+
+        <div style={{ minHeight: 0 }}>
+          <div className="flex items-center justify-between gap-3 text-xs mb-2">
+            <span style={{ color: "#d4d4d4" }}>结算进度</span>
+            <span className="font-mono" style={{ color: toneColor }}>{formatWhole(Math.min(progress, 100))}%</span>
+          </div>
+          <ProgressBar pct={progress} total={100} />
+          <div className="mt-3" style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
+            <SegmentList race={race} compact={false} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettlementMetric({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div
+      style={{
+        borderRadius: 8,
+        border: "1px solid #383838",
+        background: "#202020",
+        padding: "10px 12px",
+        minWidth: 0,
+      }}
+    >
+      <div className="text-[11px]" style={{ color: "#858585" }}>{label}</div>
+      <div className="font-mono text-sm font-semibold truncate" style={{ color, marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
+function RaceSettlementEffect({ status, color }: { status: RaceStatus; color: string }) {
+  const isWin = status === "completed";
+  const pieces = Array.from({ length: isWin ? 34 : 18 }, (_, index) => index);
+  const colors = isWin
+    ? ["#c084fc", "#a78bfa", "#e879f9", "#4ade80", "#f6c177"]
+    : ["#f87171", "#fb7185", "#7f1d1d", "#d4d4d4"];
+
+  return (
+    <div aria-hidden="true" style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", zIndex: 1 }}>
+      <style>
+        {`
+          @keyframes quota-race-confetti-fall {
+            0% { transform: translate3d(0, -26px, 0) rotate(0deg); opacity: 0; }
+            12% { opacity: 1; }
+            100% { transform: translate3d(var(--drift), calc(100vh - 120px), 0) rotate(520deg); opacity: 0; }
+          }
+          @keyframes quota-race-victory-pulse {
+            0%, 100% { opacity: 0.18; transform: scale(0.96); }
+            50% { opacity: 0.34; transform: scale(1.04); }
+          }
+          @keyframes quota-race-defeat-fall {
+            0% { transform: translate3d(0, -34px, 0) rotate(0deg); opacity: 0; }
+            18% { opacity: 0.88; }
+            100% { transform: translate3d(var(--drift), calc(100vh - 100px), 0) rotate(-120deg); opacity: 0; }
+          }
+          @keyframes quota-race-defeat-pulse {
+            0%, 100% { opacity: 0.16; }
+            50% { opacity: 0.3; }
+          }
+        `}
+      </style>
+      <div
+        style={{
+          position: "absolute",
+          inset: "16% 18%",
+          borderRadius: 999,
+          background: `radial-gradient(circle, ${color}38 0%, transparent 62%)`,
+          animation: `${isWin ? "quota-race-victory-pulse" : "quota-race-defeat-pulse"} ${isWin ? 2.2 : 1.4}s ease-in-out infinite`,
+        }}
+      />
+      {pieces.map((piece) => {
+        const left = (piece * 29 + (isWin ? 7 : 13)) % 100;
+        const width = isWin ? 6 + (piece % 3) * 2 : 3 + (piece % 2) * 2;
+        const height = isWin ? 14 + (piece % 4) * 3 : 22 + (piece % 4) * 4;
+        const delay = piece * (isWin ? 0.055 : 0.08);
+        const duration = isWin ? 2.2 + (piece % 5) * 0.22 : 1.45 + (piece % 4) * 0.18;
+        const drift = `${((piece % 9) - 4) * (isWin ? 15 : 8)}px`;
+        return (
+          <span
+            key={piece}
+            style={{
+              position: "absolute",
+              top: -34,
+              left: `${left}%`,
+              width,
+              height,
+              borderRadius: isWin ? 2 : 999,
+              background: colors[piece % colors.length],
+              opacity: 0,
+              transformOrigin: "center",
+              ["--drift" as string]: drift,
+              animation: `${isWin ? "quota-race-confetti-fall" : "quota-race-defeat-fall"} ${duration}s linear ${delay}s ${isWin ? 2 : 3}`,
+              boxShadow: isWin ? "none" : "0 0 12px rgba(248, 113, 113, 0.28)",
+            }}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -2111,7 +2336,9 @@ function StatusBadge({ status }: { status: RaceStatus }) {
     ? { color: "#9ae6a1", border: "#2f6b38", background: "#1d2b20", label: "完成" }
     : status === "expired"
       ? { color: "#fca5a5", border: "#6b2f2f", background: "#2b1d1d", label: "结束" }
-      : { color: "#f6c177", border: "#6b522c", background: "#2b261d", label: "进行" };
+      : status === "lost"
+        ? { color: "#fb7185", border: "#7f2f2f", background: "#2b1d1d", label: "战败" }
+        : { color: "#f6c177", border: "#6b522c", background: "#2b261d", label: "进行" };
   return (
     <span
       className="text-[10px] font-semibold"
