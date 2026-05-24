@@ -44,6 +44,8 @@ pub fn run() {
             commands::get_plugin_usage_statuses,
             commands::set_account_paused,
             commands::get_all_histories,
+            commands::get_quota_races,
+            commands::save_quota_races,
             commands::inbox_list,
             commands::inbox_accept,
             commands::inbox_delete,

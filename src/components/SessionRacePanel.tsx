@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
   Bell,
@@ -268,9 +269,18 @@ function durationStringFromSeconds(totalSeconds: number) {
 }
 
 function loadRaces(): UsageRace[] {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(QUOTA_RACES_STORAGE_KEY);
-    if (!raw) return [];
+    return parseRacesJson(raw);
+  } catch {
+    return [];
+  }
+}
+
+function parseRacesJson(raw: string | null | undefined): UsageRace[] {
+  if (!raw) return [];
+  try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter(isRaceLike) : [];
   } catch {
@@ -285,6 +295,33 @@ function isRaceLike(value: unknown): value is UsageRace {
     typeof race.accountKey === "string" &&
     typeof race.startedAt === "string" &&
     Array.isArray(race.segments);
+}
+
+function raceFreshnessMs(race: UsageRace) {
+  const timestamps = [
+    race.createdAt,
+    race.startedAt,
+    race.resetAt,
+    ...race.segments.map((segment) => segment.completedAt),
+    ...raceBreaks(race).map((item) => new Date(raceBreakEndMs(item)).toISOString()),
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => new Date(value).getTime())
+    .filter(Number.isFinite);
+  return timestamps.length > 0 ? Math.max(...timestamps) : 0;
+}
+
+function mergeRaces(...raceLists: UsageRace[][]) {
+  const byId = new Map<string, UsageRace>();
+  for (const race of raceLists.flat()) {
+    const existing = byId.get(race.id);
+    if (!existing || raceFreshnessMs(race) >= raceFreshnessMs(existing)) {
+      byId.set(race.id, race);
+    }
+  }
+  return [...byId.values()]
+    .sort((a, b) => raceFreshnessMs(b) - raceFreshnessMs(a))
+    .slice(0, MAX_SAVED_RACES);
 }
 
 function buildSamples(records: UsageSnapshot[], latest: UsageSnapshot, resetKey: string, fallbackTotal: number, nowMs: number) {
@@ -822,6 +859,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const breakNotificationsReadyRef = useRef(false);
   const [nowMs, setNowMs] = useState(Date.now());
   const [races, setRaces] = useState<UsageRace[]>(() => loadRaces());
+  const [quotaRaceDbReady, setQuotaRaceDbReady] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
   const [focusedRaceId, setFocusedRaceId] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
@@ -833,6 +871,28 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDbRaces = async () => {
+      try {
+        const raw = await invoke<string | null>("get_quota_races");
+        if (cancelled) return;
+        const dbRaces = parseRacesJson(raw);
+        if (dbRaces.length > 0) {
+          setRaces((current) => mergeRaces(dbRaces, current));
+        }
+      } catch {
+        // localStorage remains a migration fallback if the backend is temporarily unavailable.
+      } finally {
+        if (!cancelled) setQuotaRaceDbReady(true);
+      }
+    };
+    void loadDbRaces();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -883,9 +943,14 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   }, [selectedKey]);
 
   useEffect(() => {
-    localStorage.setItem(QUOTA_RACES_STORAGE_KEY, JSON.stringify(races.slice(0, MAX_SAVED_RACES)));
+    const nextRaces = races.slice(0, MAX_SAVED_RACES);
+    const racesJson = JSON.stringify(nextRaces);
+    localStorage.setItem(QUOTA_RACES_STORAGE_KEY, racesJson);
+    if (quotaRaceDbReady) {
+      void invoke("save_quota_races", { racesJson }).catch(() => undefined);
+    }
     notifyQuotaRacesUpdated();
-  }, [races]);
+  }, [quotaRaceDbReady, races]);
 
   useEffect(() => {
     setFocusedQuotaRaceId(focusedRaceId);

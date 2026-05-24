@@ -2,7 +2,7 @@ use crate::models::{
     AccountColor, AccountPauseState, InboxItem, LocalUsageStatus, TokenUsageDay,
     TokenUsageFileCache, UsageSnapshot,
 };
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -186,6 +186,11 @@ impl Database {
                 message       TEXT    NOT NULL,
                 updated_at    TEXT    NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS quota_race_state (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
         ",
         )?;
         drop(conn);
@@ -204,6 +209,29 @@ impl Database {
         self.add_column_if_missing("filtered_inbox", "session_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("filtered_inbox", "weekly_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("local_usage_status", "account_alias", "TEXT")?;
+        Ok(())
+    }
+
+    pub fn get_quota_races_json(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM quota_race_state WHERE key = 'quota_races_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    pub fn set_quota_races_json(&self, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO quota_race_state (key, value, updated_at)
+             VALUES ('quota_races_v1', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![value, chrono::Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 

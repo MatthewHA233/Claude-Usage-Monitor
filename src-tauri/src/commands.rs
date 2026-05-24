@@ -113,6 +113,24 @@ pub fn get_all_histories(state: State<AppState>) -> HashMap<String, Vec<UsageSna
 }
 
 #[tauri::command]
+pub fn get_quota_races(state: State<AppState>) -> Option<String> {
+    state.db.get_quota_races_json().unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn save_quota_races(races_json: String, state: State<AppState>) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&races_json).map_err(|e| format!("竞赛记录 JSON 无效: {e}"))?;
+    if !parsed.is_array() {
+        return Err("竞赛记录必须是数组".to_string());
+    }
+    state
+        .db
+        .set_quota_races_json(&races_json)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn inbox_list(state: State<AppState>) -> Vec<InboxItem> {
     state.db.inbox_list().unwrap_or_default()
 }
