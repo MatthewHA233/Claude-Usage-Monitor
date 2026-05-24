@@ -16,7 +16,6 @@ import TokenUsagePanel from "./components/TokenUsagePanel";
 import SessionRacePanel from "./components/SessionRacePanel";
 import {
   setFocusedQuotaRaceId,
-  setHighlightedQuotaRaceSegment,
   setSelectedQuotaRaceAccountKey,
 } from "./utils/quotaRaceStorage";
 import {
@@ -29,6 +28,8 @@ import {
 type AppTab = "accounts" | "race" | "tokens";
 const TAB_STORAGE_KEY = "claude_usage_monitor_active_tab";
 const SEGMENT_TOAST_DURATION_MS = 6200;
+const TOAST_OK_COLOR = "#4ade80";
+const TOAST_OVER_COLOR = "#f87171";
 
 interface SegmentToast extends QuotaSegmentCompletedDetail {
   toastId: string;
@@ -122,7 +123,6 @@ export default function App() {
 
   const openSegmentToast = useCallback((toast: SegmentToast) => {
     setSelectedQuotaRaceAccountKey(toast.accountKey);
-    setHighlightedQuotaRaceSegment(toast.raceId, toast.segmentIndex);
     setFocusedQuotaRaceId(toast.raceId);
     setTab("race");
     setSegmentToasts((previous) => previous.filter((item) => item.toastId !== toast.toastId));
@@ -237,9 +237,15 @@ function SegmentToastItem({
   onOpen: () => void;
 }) {
   const dismissTimerRef = useRef<number | null>(null);
-  const consumedRaw = toast.actualDeltaPct * toast.totalPct / 100;
-  const targetRaw = toast.raceTargetDeltaPct * toast.totalPct / 100;
   const providerColor = toastProviderColor(toast.provider);
+  const segmentElapsedSeconds = toast.segmentElapsedSeconds ?? toast.elapsedSeconds;
+  const cumulativeElapsedSeconds = toast.elapsedSeconds;
+  const segmentTimeColor = toast.segmentTargetSeconds != null && segmentElapsedSeconds > toast.segmentTargetSeconds
+    ? TOAST_OVER_COLOR
+    : TOAST_OK_COLOR;
+  const cumulativeTimeColor = toast.cumulativeTargetSeconds != null && cumulativeElapsedSeconds > toast.cumulativeTargetSeconds
+    ? TOAST_OVER_COLOR
+    : TOAST_OK_COLOR;
 
   const clearDismissTimer = useCallback(() => {
     if (dismissTimerRef.current != null) {
@@ -310,11 +316,13 @@ function SegmentToastItem({
           <div className="text-sm font-semibold truncate mt-0.5" style={{ color: "#f3f4f6" }}>
             你已经完成 {shortToastAlias(toast.alias)} 的第 {toast.segmentIndex} 个小目标
           </div>
-          <div className="grid gap-1 mt-2 text-[11px]" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", color: "#a7f3d0" }}>
+          <div className="grid gap-1.5 mt-2" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+            <ToastTimeMetric label="用时" value={formatToastDuration(segmentElapsedSeconds)} color={segmentTimeColor} />
+            <ToastTimeMetric label="累计" value={formatToastDuration(cumulativeElapsedSeconds)} color={cumulativeTimeColor} align="right" />
+          </div>
+          <div className="flex items-center justify-between gap-2 mt-1 text-[10px]" style={{ color: "#a7f3d0" }}>
             <span>本次 +{formatToastPct(toast.targetDeltaPct)}</span>
-            <span className="text-right">累计 {formatToastPct(toast.actualDeltaPct)}</span>
-            <span>用时 {formatToastDuration(toast.elapsedSeconds)}</span>
-            <span className="text-right">映射 {formatToastWhole(consumedRaw)} / {formatToastWhole(targetRaw)}</span>
+            <span>累计 {formatToastPct(toast.actualDeltaPct)}</span>
           </div>
         </div>
         <button
@@ -332,6 +340,32 @@ function SegmentToastItem({
       </div>
       <div style={{ height: 2, background: "linear-gradient(90deg, #4ade80, transparent)" }} />
     </div>
+  );
+}
+
+function ToastTimeMetric({
+  label,
+  value,
+  color,
+  align = "left",
+}: {
+  label: string;
+  value: string;
+  color: string;
+  align?: "left" | "right";
+}) {
+  return (
+    <span
+      className="inline-flex items-baseline gap-1 font-mono"
+      style={{
+        justifyContent: align === "right" ? "flex-end" : "flex-start",
+        color,
+        minWidth: 0,
+      }}
+    >
+      <span style={{ color: "#8f9b93", fontSize: 11 }}>{label}</span>
+      <span className="font-semibold truncate" style={{ fontSize: 12 }}>{value}</span>
+    </span>
   );
 }
 

@@ -20,7 +20,6 @@ import { useAccountColors, useAllHistories } from "../hooks/useData";
 import ProgressBar from "./ProgressBar";
 import { formatLocalTime } from "../utils/format";
 import {
-  loadHighlightedQuotaRaceSegment,
   notifyQuotaRacesUpdated,
   QUOTA_RACE_FOCUSED_STORAGE_KEY,
   QUOTA_RACE_UPDATED_EVENT,
@@ -647,6 +646,7 @@ function completedSegmentNotice(
   session: ActiveSession | undefined,
 ): QuotaSegmentCompletedDetail {
   const consumed = raceConsumedDelta(race, session);
+  const timing = segmentTiming(race, segment);
   return {
     raceId: race.id,
     provider: race.provider,
@@ -659,6 +659,9 @@ function completedSegmentNotice(
     actualDeltaPct: segment.actualDeltaPct ?? Math.min(consumed, segment.cumulativeDeltaPct),
     raceTargetDeltaPct: race.targetDeltaPct,
     totalPct: race.totalPct,
+    segmentElapsedSeconds: timing.elapsedSeconds ?? segment.elapsedSeconds ?? 0,
+    segmentTargetSeconds: timing.targetSeconds,
+    cumulativeTargetSeconds: timing.cumulativeTargetSeconds,
     elapsedSeconds: segment.elapsedSeconds ?? 0,
     completedAt: segment.completedAt ?? new Date().toISOString(),
   };
@@ -699,7 +702,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
   const [focusedRaceId, setFocusedRaceId] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
-  const [highlightSegment, setHighlightSegment] = useState(() => loadHighlightedQuotaRaceSegment());
   const [showHistoryView, setShowHistoryView] = useState(false);
   const [deleteRaceId, setDeleteRaceId] = useState<string | null>(null);
   const [draftSeedKey, setDraftSeedKey] = useState<string | null>(null);
@@ -714,7 +716,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     const syncRaceNavigationState = () => {
       setSelectedKey(localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
       setFocusedRaceId(localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
-      setHighlightSegment(loadHighlightedQuotaRaceSegment());
     };
     window.addEventListener(QUOTA_RACE_UPDATED_EVENT, syncRaceNavigationState);
     window.addEventListener("storage", syncRaceNavigationState);
@@ -939,14 +940,12 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   }, [focusedRace, focusedRaceId]);
 
   if (focusedRace) {
-    const highlightedSegmentIndex = highlightSegment?.raceId === focusedRace.id ? highlightSegment.segmentIndex : null;
     return (
       <section>
         <FocusedRaceView
           race={focusedRace}
           session={sessionsByKey.get(focusedRace.accountKey)}
           nowMs={nowMs}
-          highlightSegmentIndex={highlightedSegmentIndex}
           onBack={() => setFocusedRaceId(null)}
           onStop={() => stopRace(focusedRace.id)}
         />
@@ -1712,14 +1711,12 @@ function FocusedRaceView({
   race,
   session,
   nowMs,
-  highlightSegmentIndex,
   onBack,
   onStop,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
-  highlightSegmentIndex: number | null;
   onBack: () => void;
   onStop: () => void;
 }) {
@@ -1767,7 +1764,6 @@ function FocusedRaceView({
         race={race}
         session={session}
         nowMs={liveNowMs}
-        highlightSegmentIndex={highlightSegmentIndex}
         onBack={onBack}
       />
     );
@@ -1852,7 +1848,12 @@ function FocusedRaceView({
         <div style={{ flex: 1, minHeight: 0 }}>
           <div className="text-xs font-medium mb-2" style={{ color: "#d4d4d4" }}>自动记录</div>
           <div style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
-            <SegmentList race={race} compact={false} nowMs={liveNowMs} highlightIndex={highlightSegmentIndex} />
+            <SegmentList
+              race={race}
+              compact={false}
+              nowMs={liveNowMs}
+              currentDeltaPct={consumed}
+            />
           </div>
         </div>
       </div>
@@ -1875,13 +1876,11 @@ function RaceSettlementView({
   race,
   session,
   nowMs,
-  highlightSegmentIndex,
   onBack,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
-  highlightSegmentIndex: number | null;
   onBack: () => void;
 }) {
   const isWin = race.status === "completed";
@@ -1973,7 +1972,7 @@ function RaceSettlementView({
           </div>
           <ProgressBar pct={progress} total={100} />
           <div className="mt-3" style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
-            <SegmentList race={race} compact={false} highlightIndex={highlightSegmentIndex} />
+            <SegmentList race={race} compact={false} />
           </div>
         </div>
       </div>
@@ -2398,22 +2397,23 @@ function SegmentList({
   race,
   compact,
   nowMs,
-  highlightIndex = null,
+  currentDeltaPct = null,
 }: {
   race: UsageRace;
   compact: boolean;
   nowMs?: number;
-  highlightIndex?: number | null;
+  currentDeltaPct?: number | null;
 }) {
-  const highlightedRef = useRef<HTMLDivElement | null>(null);
-  const visibleCount = highlightIndex != null ? Math.max(16, highlightIndex) : 16;
-  const visibleSegments = compact ? race.segments : race.segments.slice(0, visibleCount);
   const currentOpen = openSegment(race);
+  const latestCompletedIndex = [...race.segments].reverse().find((segment) => segment.completedAt != null)?.index ?? null;
+  const latestCompletedRef = useRef<HTMLDivElement | null>(null);
+  const visibleCount = Math.max(16, latestCompletedIndex ?? 0);
+  const visibleSegments = compact ? race.segments : race.segments.slice(0, visibleCount);
 
   useEffect(() => {
-    if (highlightIndex == null) return;
-    highlightedRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [highlightIndex, race.id]);
+    if (latestCompletedIndex == null) return;
+    latestCompletedRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [latestCompletedIndex, race.id]);
 
   return (
     <div className="space-y-1.5">
@@ -2423,21 +2423,30 @@ function SegmentList({
         const segmentTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isSegmentOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
         const totalTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isTotalOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
         const isCurrent = currentOpen?.index === segment.index && race.status === "active";
-        const isHighlighted = highlightIndex === segment.index;
+        const isLatestCompleted = segment.index === latestCompletedIndex;
+        const previousSegment = segment.index > 1 ? race.segments[segment.index - 2] : null;
+        const segmentStartPct = previousSegment?.cumulativeDeltaPct ?? 0;
+        const currentSegmentProgress = isCurrent && currentDeltaPct != null && segment.targetDeltaPct > 0
+          ? clamp((currentDeltaPct - segmentStartPct) / segment.targetDeltaPct * 100, 0, 100)
+          : null;
+        const baseBackground = isLatestCompleted ? "#173024" : segment.completedAt ? "#263126" : isCurrent ? "#2c261d" : "#272727";
+        const rowBackground = currentSegmentProgress != null
+          ? `linear-gradient(90deg, rgba(74, 222, 128, 0.28) 0%, rgba(74, 222, 128, 0.28) ${currentSegmentProgress}%, ${baseBackground} ${currentSegmentProgress}%, ${baseBackground} 100%)`
+          : baseBackground;
         return (
           <div
             key={segment.index}
             ref={(node) => {
-              if (isHighlighted) highlightedRef.current = node;
+              if (isLatestCompleted) latestCompletedRef.current = node;
             }}
             className="flex items-center gap-2 text-[11px]"
             style={{
               minHeight: compact ? 30 : 34,
               padding: "5px 7px",
               borderRadius: 6,
-              background: isHighlighted ? "#173024" : segment.completedAt ? "#263126" : isCurrent ? "#2c261d" : "#272727",
-              border: `1px solid ${isHighlighted ? "#4ade80" : segment.completedAt ? "#355a35" : isCurrent ? "#5d4621" : "#383838"}`,
-              boxShadow: isHighlighted ? "0 0 0 1px rgba(74, 222, 128, 0.22), 0 0 18px rgba(74, 222, 128, 0.16)" : undefined,
+              background: rowBackground,
+              border: `1px solid ${isLatestCompleted ? "#4ade80" : segment.completedAt ? "#355a35" : isCurrent ? "#5d4621" : "#383838"}`,
+              boxShadow: isLatestCompleted ? "0 0 0 1px rgba(74, 222, 128, 0.22), 0 0 18px rgba(74, 222, 128, 0.16)" : undefined,
               color: segment.completedAt ? "#c9f7c9" : "#aaa",
             }}
           >
@@ -2450,8 +2459,8 @@ function SegmentList({
             <span className="font-mono" style={{ flex: 1, minWidth: 0 }}>
               到 {formatWholePct(segment.cumulativeDeltaPct)}
             </span>
-            {isHighlighted && (
-              <span className="font-semibold" style={{ color: "#4ade80", flexShrink: 0 }}>刚完成</span>
+            {!compact && isLatestCompleted && (
+              <span className="font-semibold" style={{ color: "#4ade80", flexShrink: 0 }}>新完成！</span>
             )}
             <span className="font-mono inline-flex items-center justify-end gap-1" style={{ width: compact ? 86 : 104, flexShrink: 0 }}>
               <span style={{ color: "#858585" }}>用时</span>

@@ -13,6 +13,9 @@ export interface QuotaSegmentCompletedDetail {
   actualDeltaPct: number;
   raceTargetDeltaPct: number;
   totalPct: number;
+  segmentElapsedSeconds?: number;
+  segmentTargetSeconds?: number;
+  cumulativeTargetSeconds?: number;
   elapsedSeconds: number;
   completedAt: string;
 }
