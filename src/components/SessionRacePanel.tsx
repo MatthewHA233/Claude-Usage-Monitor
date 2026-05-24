@@ -679,7 +679,8 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
 
   const startRace = useCallback(() => {
     if (!selectedSession) return;
-    const durationMinutes = clamp(parseDraftNumber(draft.durationMinutes, 300), 1, 24 * 60);
+    const durationSeconds = clamp(Math.round(parseDraftNumber(draft.durationMinutes, 300) * 60), 1, 24 * 3600);
+    if (durationSeconds > Math.floor(selectedSession.remainingSeconds)) return;
     const maxTargetPct = Math.max(1, Math.floor(selectedSession.remainingNormPct));
     const targetPct = Math.round(clamp(parseDraftNumber(draft.targetPct, maxTargetPct), 1, maxTargetPct));
     const stepPct = Math.round(clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 1, 20));
@@ -691,7 +692,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
       accountKey: selectedSession.key,
       createdAt: nowIso,
       startedAt: nowIso,
-      durationSeconds: Math.round(durationMinutes * 60),
+      durationSeconds,
       targetDeltaPct: round2(targetPct),
       stepPct: round2(stepPct),
       startNormPct: round2(selectedSession.currentNormPct),
@@ -1113,6 +1114,15 @@ function RaceBuilder({
   const targetRaw = session ? rawFromNorm(targetPct, session.totalPct) : 0;
   const stepLabel = Math.round(clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 1, 20));
   const durationParts = durationPartsFromMinutes(draft.durationMinutes);
+  const requestedDurationSeconds = durationParts.minutes * 60 + durationParts.seconds;
+  const maxAllowedDurationSeconds = session ? Math.max(0, Math.floor(session.remainingSeconds)) : 0;
+  const durationExceedsSession = session != null && requestedDurationSeconds > maxAllowedDurationSeconds;
+  const startDisabled = activeRace != null || session == null || session.remainingNormPct <= 0 || durationExceedsSession;
+  const startLabel = activeRace
+    ? "这个账号已有进行中竞赛"
+    : durationExceedsSession
+      ? "超过了最大允许时间"
+      : "开始竞赛";
   const setDurationMinutes = (value: string) => {
     const parsed = parseDraftNumber(value, durationParts.minutes);
     onDraftChange({
@@ -1138,7 +1148,7 @@ function RaceBuilder({
     if (!session) return;
     onDraftChange({
       ...draft,
-      durationMinutes: durationStringFromSeconds(session.remainingSeconds),
+      durationMinutes: durationStringFromSeconds(maxAllowedDurationSeconds),
     });
   };
   return (
@@ -1177,7 +1187,7 @@ function RaceBuilder({
                   <TimerReset size={12} />
                 </IconActionButton>
                 <IconActionButton
-                  title={`写入当前 session 剩余时间：${formatShortDuration(session.remainingSeconds)}`}
+                  title={`写入当前 session 剩余时间：${formatShortDuration(maxAllowedDurationSeconds)}`}
                   onClick={writeRemainingDuration}
                 >
                   <Timer size={12} />
@@ -1192,6 +1202,7 @@ function RaceBuilder({
                 min={0}
                 step={1}
                 suffix="m"
+                tone={durationExceedsSession ? "danger" : "normal"}
                 onChange={setDurationMinutes}
               />
               <NumberField
@@ -1200,6 +1211,7 @@ function RaceBuilder({
                 max={59}
                 step={5}
                 suffix="s"
+                tone={durationExceedsSession ? "danger" : "normal"}
                 onChange={setDurationSeconds}
               />
               <NumberField
@@ -1222,18 +1234,22 @@ function RaceBuilder({
           </div>
 
           <div className="flex items-center justify-between gap-2 text-[11px]" style={{ color: "#a3a3a3" }}>
-            <span>默认每 {stepLabel}% 自动记录一次</span>
+            <span style={{ color: durationExceedsSession ? TIMER_OVER_COLOR : undefined }}>
+              {durationExceedsSession
+                ? `超过最大允许时间 ${formatDetailedHms(maxAllowedDurationSeconds)}`
+                : `默认每 ${stepLabel}% 自动记录一次`}
+            </span>
             <span className="font-mono" style={{ color: session.color }}>映射 {formatWhole(targetRaw)} / {formatWhole(session.totalPct)}</span>
           </div>
 
           <button
             type="button"
             className="btn-primary w-full inline-flex items-center justify-center gap-2"
-            disabled={activeRace != null || session.remainingNormPct <= 0}
+            disabled={startDisabled}
             onClick={onStart}
           >
             <Flag size={14} />
-            <span>{activeRace ? "这个账号已有进行中竞赛" : "开始竞赛"}</span>
+            <span>{startLabel}</span>
           </button>
         </div>
       )}
@@ -1731,6 +1747,7 @@ function NumberField({
   step = 1,
   suffix,
   precision = 0,
+  tone = "normal",
   onChange,
 }: {
   label?: string;
@@ -1740,9 +1757,11 @@ function NumberField({
   step?: number;
   suffix?: string;
   precision?: number;
+  tone?: "normal" | "danger";
   onChange: (value: string) => void;
 }) {
   const currentValue = parseDraftNumber(value, min);
+  const danger = tone === "danger";
   const applyValue = (nextValue: number) => {
     const clamped = clamp(nextValue, min, max);
     onChange(formatDraftNumber(clamped, precision));
@@ -1788,6 +1807,9 @@ function NumberField({
               height: 34,
               padding: suffix ? "0 24px 0 8px" : "0 8px",
               borderRadius: "0 7px 7px 0",
+              borderColor: danger ? "#7f2f2f" : undefined,
+              color: danger ? TIMER_OVER_COLOR : undefined,
+              boxShadow: danger ? "0 0 0 1px rgba(248, 113, 113, 0.25)" : undefined,
               fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
               appearance: "none",
             }}
@@ -1800,7 +1822,7 @@ function NumberField({
                 right: 8,
                 top: "50%",
                 transform: "translateY(-50%)",
-                color: "#858585",
+                color: danger ? TIMER_OVER_COLOR : "#858585",
                 pointerEvents: "none",
               }}
             >
