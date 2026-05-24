@@ -13,6 +13,7 @@ import {
 import StatusCards from "./components/StatusCards";
 import TokenUsagePanel from "./components/TokenUsagePanel";
 import SessionRacePanel from "./components/SessionRacePanel";
+import { setFocusedQuotaRaceId, setSelectedQuotaRaceAccountKey } from "./utils/quotaRaceStorage";
 
 type AppTab = "accounts" | "race" | "tokens";
 const TAB_STORAGE_KEY = "claude_usage_monitor_active_tab";
@@ -38,6 +39,12 @@ export default function App() {
     await refetchPluginStatuses();
     await refetchTokenReport();
   }, [refetchSnaps, refetchRec, refetchAnalysis, refetchLocalStatuses, refetchPluginStatuses, refetchTokenReport]);
+
+  const openRace = useCallback((raceId?: string, accountKey?: string) => {
+    if (accountKey) setSelectedQuotaRaceAccountKey(accountKey);
+    setFocusedQuotaRaceId(raceId ?? null);
+    setTab("race");
+  }, []);
 
   useEffect(() => {
     if (snapshots.length > 0) {
@@ -84,6 +91,7 @@ export default function App() {
             analysis={analysis}
             localUsageStatuses={localUsageStatuses}
             pluginUsageStatuses={pluginUsageStatuses}
+            onOpenRace={openRace}
             onRefresh={() => void refresh()}
           />
         ) : tab === "race" ? (

@@ -305,7 +305,10 @@ async fn collect_claude_oauth(db: &Database) -> Result<Option<UsageSnapshot>, St
         .map_err(|error| error.to_string())?;
     let account_alias = identity.resolve_account_alias(&credentials, &email_aliases)?;
     let usage = fetch_claude_usage(&credentials.access_token).await?;
-    Ok(Some(usage.to_snapshot(account_alias)))
+    Ok(Some(usage.to_snapshot(
+        account_alias,
+        identity.quota_multiplier(&credentials),
+    )))
 }
 
 fn claude_credentials_path() -> Option<PathBuf> {
@@ -361,6 +364,34 @@ struct ClaudeAuthStatus {
 }
 
 impl ClaudeAuthStatus {
+    fn quota_multiplier(&self, credentials: &ClaudeCredentials) -> f64 {
+        for value in [
+            self.subscription_type.as_deref(),
+            credentials.subscription_type.as_deref(),
+            self.org_name.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let normalized = compact_plan_label(value);
+            if normalized.contains("20x")
+                || normalized.contains("x20")
+                || normalized.contains("max20")
+                || (normalized.contains("max") && normalized.contains("20"))
+            {
+                return 20.0;
+            }
+            if normalized.contains("5x")
+                || normalized.contains("x5")
+                || normalized.contains("max5")
+                || (normalized.contains("max") && normalized.contains("5"))
+            {
+                return 5.0;
+            }
+        }
+        1.0
+    }
+
     fn resolve_account_alias(
         &self,
         credentials: &ClaudeCredentials,
@@ -710,12 +741,14 @@ struct ClaudeOAuthWindow {
 }
 
 impl ClaudeOAuthUsageResponse {
-    fn to_snapshot(&self, account_alias: String) -> UsageSnapshot {
+    fn to_snapshot(&self, account_alias: String, multiplier: f64) -> UsageSnapshot {
         let weekly = self
             .seven_day
             .as_ref()
             .or(self.seven_day_opus.as_ref())
             .or(self.seven_day_sonnet.as_ref());
+        let multiplier = multiplier.max(1.0);
+        let total_pct = 100.0 * multiplier;
 
         UsageSnapshot {
             id: None,
@@ -725,14 +758,17 @@ impl ClaudeOAuthUsageResponse {
             session_pct: self
                 .five_hour
                 .as_ref()
-                .and_then(|window| window.utilization),
-            session_total_pct: Some(100.0),
+                .and_then(|window| window.utilization)
+                .map(|pct| pct * multiplier),
+            session_total_pct: Some(total_pct),
             session_reset_at: self
                 .five_hour
                 .as_ref()
                 .and_then(|window| window.resets_at.clone()),
-            weekly_pct: weekly.and_then(|window| window.utilization),
-            weekly_total_pct: Some(100.0),
+            weekly_pct: weekly
+                .and_then(|window| window.utilization)
+                .map(|pct| pct * multiplier),
+            weekly_total_pct: Some(total_pct),
             weekly_reset_at: weekly.and_then(|window| window.resets_at.clone()),
             error: None,
         }
@@ -767,13 +803,48 @@ impl CodexUsageResponse {
     }
 
     fn quota_multiplier(&self) -> f64 {
-        let plan = self.plan_type.as_deref().unwrap_or("").to_ascii_lowercase();
-        if plan.contains("pro") {
-            5.0
-        } else {
-            1.0
-        }
+        self.plan_type
+            .as_deref()
+            .and_then(codex_quota_multiplier_from_label)
+            .unwrap_or(1.0)
     }
+}
+
+fn codex_quota_multiplier_from_label(label: &str) -> Option<f64> {
+    let normalized = compact_plan_label(label);
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("20x")
+        || normalized.contains("x20")
+        || normalized.contains("pro20")
+        || (normalized.contains("pro") && normalized.contains("20"))
+    {
+        return Some(20.0);
+    }
+    if normalized.contains("5x")
+        || normalized.contains("x5")
+        || normalized.contains("prolite")
+        || normalized.contains("pro5")
+        || (normalized.contains("pro") && normalized.contains("5"))
+    {
+        return Some(5.0);
+    }
+    if normalized.contains("plus") {
+        return Some(1.0);
+    }
+    if normalized == "pro" {
+        return Some(20.0);
+    }
+    None
+}
+
+fn compact_plan_label(label: &str) -> String {
+    label
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn epoch_to_rfc3339(seconds: i64) -> Option<String> {

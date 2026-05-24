@@ -925,23 +925,25 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let generic_aliases = quoted_generic_plan_aliases();
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, provider, account_alias, collected_at,
-                    session_pct, session_total_pct, session_reset_at,
-                    weekly_pct, weekly_total_pct, weekly_reset_at, error
-             FROM usage_snapshots
-             WHERE NOT (
-                 provider = 'claude_code'
-                 AND lower(account_alias) IN ({generic_aliases})
-             )
-               AND id IN (
-                 SELECT MAX(id)
+            "WITH ranked AS (
+                 SELECT id, provider, account_alias, collected_at,
+                        session_pct, session_total_pct, session_reset_at,
+                        weekly_pct, weekly_total_pct, weekly_reset_at, error,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY provider, account_alias
+                            ORDER BY datetime(collected_at) DESC, collected_at DESC, id DESC
+                        ) AS row_num
                  FROM usage_snapshots
                  WHERE NOT (
                      provider = 'claude_code'
                      AND lower(account_alias) IN ({generic_aliases})
                  )
-                 GROUP BY provider, account_alias
              )
+             SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at, error
+             FROM ranked
+             WHERE row_num = 1
              ORDER BY provider, account_alias",
         ))?;
         let rows = stmt.query_map([], row_to_snapshot)?;

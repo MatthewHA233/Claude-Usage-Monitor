@@ -19,9 +19,15 @@ import type { PluginUsageStatus, Recommendation, UsageSnapshot } from "../types"
 import { useAccountColors, useAllHistories } from "../hooks/useData";
 import ProgressBar from "./ProgressBar";
 import { formatLocalTime } from "../utils/format";
+import {
+  notifyQuotaRacesUpdated,
+  QUOTA_RACE_FOCUSED_STORAGE_KEY,
+  QUOTA_RACE_SELECTED_STORAGE_KEY,
+  QUOTA_RACES_STORAGE_KEY,
+  setFocusedQuotaRaceId,
+  setSelectedQuotaRaceAccountKey,
+} from "../utils/quotaRaceStorage";
 
-const RACES_STORAGE_KEY = "claude_usage_monitor_quota_races_v1";
-const SELECTED_STORAGE_KEY = "claude_usage_monitor_quota_race_selected";
 const SESSION_HOURS = 5;
 const PX_PER_HOUR = 72;
 const LABEL_W = 178;
@@ -133,16 +139,6 @@ function parseDraftNumber(value: string, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function formatClock(seconds: number | null) {
-  if (seconds == null || !Number.isFinite(seconds)) return "--:--";
-  const safe = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const secs = safe % 60;
-  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  return `${minutes}:${String(secs).padStart(2, "0")}`;
-}
-
 function formatDigitalClock(seconds: number | null) {
   if (seconds == null || !Number.isFinite(seconds)) return "--:--";
   const safe = Math.max(0, Math.floor(seconds));
@@ -213,7 +209,7 @@ function durationStringFromSeconds(totalSeconds: number) {
 
 function loadRaces(): UsageRace[] {
   try {
-    const raw = localStorage.getItem(RACES_STORAGE_KEY);
+    const raw = localStorage.getItem(QUOTA_RACES_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter(isRaceLike) : [];
@@ -491,10 +487,10 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const { histories, refetch: refetchHistories, loading: historiesLoading } = useAllHistories();
   const [nowMs, setNowMs] = useState(Date.now());
   const [races, setRaces] = useState<UsageRace[]>(() => loadRaces());
-  const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(SELECTED_STORAGE_KEY));
-  const [historyKey, setHistoryKey] = useState<string | null>(() => localStorage.getItem(SELECTED_STORAGE_KEY));
+  const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
+  const [historyKey, setHistoryKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
-  const [focusedRaceId, setFocusedRaceId] = useState<string | null>(null);
+  const [focusedRaceId, setFocusedRaceId] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
   const [deleteRaceId, setDeleteRaceId] = useState<string | null>(null);
   const [draftSeedKey, setDraftSeedKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<RaceDraft>({ durationMinutes: "300", targetPct: "", stepPct: String(DEFAULT_STEP_PCT) });
@@ -526,13 +522,18 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
 
   useEffect(() => {
     if (!selectedKey) return;
-    localStorage.setItem(SELECTED_STORAGE_KEY, selectedKey);
+    setSelectedQuotaRaceAccountKey(selectedKey);
     setHistoryKey(selectedKey);
   }, [selectedKey]);
 
   useEffect(() => {
-    localStorage.setItem(RACES_STORAGE_KEY, JSON.stringify(races.slice(0, MAX_SAVED_RACES)));
+    localStorage.setItem(QUOTA_RACES_STORAGE_KEY, JSON.stringify(races.slice(0, MAX_SAVED_RACES)));
+    notifyQuotaRacesUpdated();
   }, [races]);
+
+  useEffect(() => {
+    setFocusedQuotaRaceId(focusedRaceId);
+  }, [focusedRaceId]);
 
   useEffect(() => {
     setRaces((previous) => updateRaceProgress(previous, sessionsByKey, nowMs));
@@ -563,10 +564,28 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     });
   }, [selectedSession?.key, selectedSession?.remainingNormPct]);
 
-  const activeRace = useMemo(
-    () => races.find((race) => race.status === "active" && race.accountKey === selectedKey) ?? null,
-    [races, selectedKey],
+  const activeRaces = useMemo(
+    () => races.filter((race) => race.status === "active"),
+    [races],
   );
+  const selectedActiveRace = useMemo(
+    () => activeRaces.find((race) => race.accountKey === selectedKey) ?? null,
+    [activeRaces, selectedKey],
+  );
+  const pinnedActiveRace = selectedActiveRace ?? activeRaces[0] ?? null;
+  const pinnedActiveRaceSession = pinnedActiveRace ? sessionsByKey.get(pinnedActiveRace.accountKey) : undefined;
+  const pinnedActiveRaceColor = pinnedActiveRaceSession?.color ?? (pinnedActiveRace ? providerColor(pinnedActiveRace.provider) : null);
+  const pinnedActiveRaceContext = pinnedActiveRace && selectedActiveRace == null && activeRaces.length > 1
+    ? `还有 ${activeRaces.length} 个进行中的竞赛`
+    : activeRaces.length > 1
+      ? `共 ${activeRaces.length} 个进行中的竞赛`
+      : null;
+  const pinnedActiveRaceTitle = pinnedActiveRace && selectedActiveRace == null
+    ? "其他账号正在竞赛"
+    : "进行中的竞赛";
+  const pinnedActiveRaceTone = pinnedActiveRace && selectedActiveRace == null ? "global" : "selected";
+  const activeRace = selectedActiveRace;
+
   const historyRaces = useMemo(
     () => races.filter((race) => race.accountKey === (historyKey ?? selectedKey)),
     [historyKey, races, selectedKey],
@@ -646,6 +665,10 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
 
   const focusedRace = focusedRaceId ? races.find((race) => race.id === focusedRaceId) ?? null : null;
 
+  useEffect(() => {
+    if (focusedRaceId && !focusedRace) setFocusedRaceId(null);
+  }, [focusedRace, focusedRaceId]);
+
   if (focusedRace) {
     return (
       <section>
@@ -681,6 +704,20 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
         </button>
       </div>
 
+      {pinnedActiveRace && (
+        <ActiveRaceShortcut
+          race={pinnedActiveRace}
+          session={pinnedActiveRaceSession}
+          nowMs={nowMs}
+          title={pinnedActiveRaceTitle}
+          context={pinnedActiveRaceContext}
+          tone={pinnedActiveRaceTone}
+          colorOverride={pinnedActiveRaceColor ?? undefined}
+          onOpen={() => setFocusedRaceId(pinnedActiveRace.id)}
+          onStop={() => stopRace(pinnedActiveRace.id)}
+        />
+      )}
+
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
         <div className="space-y-3" style={{ minWidth: 0 }}>
           <TimelinePanel
@@ -702,14 +739,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             onDraftChange={setDraft}
             onStart={startRace}
           />
-          {activeRace && (
-            <ActiveRacePanel
-              race={activeRace}
-              session={sessionsByKey.get(activeRace.accountKey)}
-              nowMs={nowMs}
-              onStop={() => stopRace(activeRace.id)}
-            />
-          )}
           <RaceHistoryPanel
             races={historyRaces}
             activeSessions={sessionsByKey}
@@ -1187,32 +1216,79 @@ function FocusedRaceView({
   );
 }
 
-function ActiveRacePanel({
+function ActiveRaceShortcut({
   race,
   session,
   nowMs,
+  title,
+  context,
+  tone,
+  colorOverride,
+  onOpen,
   onStop,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
+  title: string;
+  context: string | null;
+  tone: "selected" | "global";
+  colorOverride?: string;
+  onOpen: () => void;
   onStop: () => void;
 }) {
+  const color = colorOverride ?? session?.color ?? providerColor(race.provider);
   const consumed = raceConsumedDelta(race, session);
   const progress = race.targetDeltaPct > 0 ? (consumed / race.targetDeltaPct) * 100 : 0;
   const nextSegment = nextOpenSegment(race);
   const currentSegmentStartMs = segmentStartMs(race, nextSegment);
-  const currentSegmentElapsed = nextSegment?.completedAt ? nextSegment.elapsedSeconds : (nowMs - currentSegmentStartMs) / 1000;
-  const totalRemaining = (raceDeadlineMs(race) - nowMs) / 1000;
+  const currentSegmentElapsed = nextSegment?.completedAt
+    ? nextSegment.elapsedSeconds
+    : Math.max(0, (nowMs - currentSegmentStartMs) / 1000);
+  const totalRemaining = Math.max(0, (raceDeadlineMs(race) - nowMs) / 1000);
   const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
 
   return (
-    <div style={{ background: "#202020", border: "1px solid #3a3a3a", borderRadius: 8, overflow: "hidden" }}>
-      <div className="px-3 py-2 flex items-center justify-between gap-2" style={{ borderBottom: "1px solid #333" }}>
-        <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-          <TimerReset size={15} style={{ color: providerColor(race.provider) }} />
-          <span className="text-sm font-semibold truncate" style={{ color: "#eee" }}>进行中的竞赛</span>
+    <div
+      className="flex items-center gap-3 p-3"
+      style={{
+        background: tone === "global" ? "#1f1f1f" : "#202020",
+        border: `1px solid ${color}66`,
+        borderRadius: 8,
+        boxShadow: `inset 3px 0 0 ${color}`,
+      }}
+    >
+      <ProviderBadge provider={race.provider} color={color} />
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex items-center gap-3"
+        style={{ flex: 1, minWidth: 0, padding: 0, border: 0, background: "transparent", textAlign: "left", cursor: "pointer" }}
+      >
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+            <span className="text-[11px] font-semibold" style={{ color, flexShrink: 0 }}>{title}</span>
+            <span className="text-sm font-semibold truncate" style={{ color: "#f3f4f6" }}>{race.alias}</span>
+            <StatusBadge status={race.status} />
+          </div>
+          <div className="text-[11px] mt-0.5" style={{ color: "#858585" }}>
+            当前小目标 {formatDigitalClock(currentSegmentElapsed)} · 总倒计时 {formatDigitalClock(totalRemaining)}
+            {context ? ` · ${context}` : ""}
+          </div>
         </div>
+        <div className="hidden sm:block" style={{ width: 150, flexShrink: 0 }}>
+          <div className="flex items-center justify-between text-[11px] mb-1">
+            <span style={{ color: "#a3a3a3" }}>{completedCount}/{race.segments.length}</span>
+            <span className="font-mono" style={{ color }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</span>
+          </div>
+          <ProgressBar pct={progress} total={100} />
+        </div>
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color, flexShrink: 0 }}>
+          <TimerReset size={14} />
+          打开
+        </span>
+      </button>
+      {race.status === "active" && (
         <button
           type="button"
           title="停止记录"
@@ -1222,22 +1298,7 @@ function ActiveRacePanel({
         >
           <X size={13} />
         </button>
-      </div>
-
-      <div className="p-3 space-y-3">
-        <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr" }}>
-          <Stopwatch label="当前分卷" value={formatClock(currentSegmentElapsed)} color={providerColor(race.provider)} />
-          <Stopwatch label="总倒计时" value={formatClock(totalRemaining)} color={totalRemaining < 0 ? "#f87171" : "#f3f4f6"} />
-        </div>
-        <div>
-          <div className="flex items-center justify-between text-[11px] mb-1">
-            <span style={{ color: "#a3a3a3" }}>{completedCount} / {race.segments.length} 个小目标</span>
-            <span className="font-mono" style={{ color: providerColor(race.provider) }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</span>
-          </div>
-          <ProgressBar pct={progress} total={100} />
-        </div>
-        <SegmentList race={race} compact={false} />
-      </div>
+      )}
     </div>
   );
 }
@@ -1632,15 +1693,6 @@ function FocusTimerCard({
         {value}
       </div>
       <div className="text-xs mt-3" style={{ color: "#858585" }}>{subtext}</div>
-    </div>
-  );
-}
-
-function Stopwatch({ label, value, color }: { label: string; value: string; color: string }) {
-  return (
-    <div style={{ background: "#242424", border: "1px solid #383838", borderRadius: 8, padding: "9px 10px", minWidth: 0 }}>
-      <div className="text-[11px]" style={{ color: "#858585" }}>{label}</div>
-      <div className="text-2xl font-bold font-mono truncate" style={{ color, letterSpacing: 0 }}>{value}</div>
     </div>
   );
 }
