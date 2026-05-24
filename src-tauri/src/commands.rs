@@ -27,6 +27,20 @@ pub fn get_history(
 }
 
 #[tauri::command]
+pub fn get_history_since(
+    provider: Option<String>,
+    alias: String,
+    since: String,
+    state: State<AppState>,
+) -> Vec<UsageSnapshot> {
+    let provider = provider.unwrap_or_else(|| "claude_code".to_string());
+    state
+        .db
+        .history_since(&provider, &alias, &since)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 pub fn get_analysis(state: State<AppState>) -> Vec<AccountAnalysis> {
     let snapshots = state.db.latest_all().unwrap_or_default();
     let aliases: Vec<String> = snapshots
@@ -109,7 +123,11 @@ pub fn set_account_paused(
 
 #[tauri::command]
 pub fn get_all_histories(state: State<AppState>) -> HashMap<String, Vec<UsageSnapshot>> {
-    state.db.all_histories_grouped(500).unwrap_or_default()
+    let since = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    state
+        .db
+        .all_histories_grouped_since(&since)
+        .unwrap_or_default()
 }
 
 #[tauri::command]

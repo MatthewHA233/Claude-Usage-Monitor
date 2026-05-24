@@ -34,6 +34,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_latest_snapshots,
             commands::get_history,
+            commands::get_history_since,
             commands::get_analysis,
             commands::get_recommendation,
             commands::delete_snapshot,

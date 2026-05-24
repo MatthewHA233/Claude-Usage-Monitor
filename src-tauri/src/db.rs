@@ -880,6 +880,27 @@ impl Database {
         rows.collect()
     }
 
+    /// 获取某账号指定时间之后的历史记录，最新在前。
+    pub fn history_since(
+        &self,
+        provider: &str,
+        alias: &str,
+        since: &str,
+    ) -> Result<Vec<UsageSnapshot>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, provider, account_alias, collected_at,
+                    session_pct, session_total_pct, session_reset_at,
+                    weekly_pct, weekly_total_pct, weekly_reset_at, error
+             FROM usage_snapshots
+             WHERE provider = ?1 AND account_alias = ?2
+               AND collected_at >= ?3
+             ORDER BY collected_at DESC",
+        )?;
+        let rows = stmt.query_map(params![provider, alias, since], row_to_snapshot)?;
+        rows.collect()
+    }
+
     /// 删除指定 id 的快照记录
     pub fn delete_snapshot(&self, id: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
@@ -935,8 +956,11 @@ impl Database {
         Ok(())
     }
 
-    /// 获取所有账号的历史记录（每账号最多 limit 条，最新在前）
-    pub fn all_histories_grouped(&self, limit: i64) -> Result<HashMap<String, Vec<UsageSnapshot>>> {
+    /// 获取所有账号指定时间之后的历史记录，最新在前。
+    pub fn all_histories_grouped_since(
+        &self,
+        since: &str,
+    ) -> Result<HashMap<String, Vec<UsageSnapshot>>> {
         let accounts: Vec<(String, String)> = {
             let conn = self.conn.lock().unwrap();
             let generic_aliases = quoted_generic_plan_aliases();
@@ -947,15 +971,17 @@ impl Database {
                      provider = 'claude_code'
                      AND lower(account_alias) IN ({generic_aliases})
                  )
+                   AND collected_at >= ?1
                  ORDER BY provider, account_alias",
             ))?;
-            let rows =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let rows = stmt.query_map(params![since], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
             rows.collect::<Result<Vec<_>>>()?
         };
         let mut result = HashMap::new();
         for (provider, alias) in accounts {
-            let records = self.history(&provider, &alias, limit, 0)?;
+            let records = self.history_since(&provider, &alias, since)?;
             result.insert(format!("{provider}::{alias}"), records);
         }
         Ok(result)

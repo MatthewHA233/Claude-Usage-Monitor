@@ -3,7 +3,7 @@ import { Flag } from "lucide-react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis, LocalUsageStatus, PluginUsageStatus } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
-import { useHistory, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
+import { useHistory, useHistorySince, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
 import { useResetAlarm } from "../hooks/useResetAlarm";
 import InboxBadge from "./InboxPanel";
 import { AlarmBell } from "./AlarmBell";
@@ -1544,7 +1544,7 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   colors: Record<string, string>;
 }) {
   const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(provider, alias);
-  const { history: statsRecords } = useHistory(provider, alias, 1000);
+  const { history: statsRecords } = useHistorySince(provider, alias, 31);
   const { histories, loading: allLoading } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [chartMode, setChartMode] = useState<"single" | "total">("single");

@@ -190,6 +190,29 @@ export function useAllHistories() {
   return { histories, loading, refetch: fetch };
 }
 
+export function useHistorySince(provider: string, alias: string, sinceDays = 31) {
+  const [history, setHistory] = useState<UsageSnapshot[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!alias) return;
+    setLoading(true);
+    try {
+      const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+      const data = await invoke<UsageSnapshot[]>("get_history_since", { provider, alias, since });
+      setHistory(data);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  }, [provider, alias, sinceDays]);
+
+  useEffect(() => { void fetch(); }, [fetch]);
+
+  return { history, loading, refetch: fetch };
+}
+
 const PAGE_SIZE = 50;
 
 export function useHistory(provider: string, alias: string, limit = PAGE_SIZE) {
