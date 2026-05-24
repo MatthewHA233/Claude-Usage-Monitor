@@ -990,6 +990,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             session={selectedSession}
             draft={draft}
             activeRace={activeRace}
+            races={races}
             estimatedDurationSeconds={estimatedDurationSeconds}
             onDraftChange={setDraft}
             onStart={startRace}
@@ -1235,6 +1236,7 @@ function RaceBuilder({
   session,
   draft,
   activeRace,
+  races,
   estimatedDurationSeconds,
   onDraftChange,
   onStart,
@@ -1242,16 +1244,21 @@ function RaceBuilder({
   session: ActiveSession | null;
   draft: RaceDraft;
   activeRace: UsageRace | null;
+  races: UsageRace[];
   estimatedDurationSeconds: number | null;
   onDraftChange: (draft: RaceDraft) => void;
   onStart: () => void;
 }) {
+  const [showHistoricalReference, setShowHistoricalReference] = useState(false);
   const maxTargetPct = session ? Math.max(1, Math.floor(session.remainingNormPct)) : 1;
   const targetPct = session ? Math.round(clamp(parseDraftNumber(draft.targetPct, maxTargetPct), 1, maxTargetPct)) : 0;
   const targetRaw = session ? rawFromNorm(targetPct, session.totalPct) : 0;
   const stepLabel = Math.round(clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 1, 20));
   const durationParts = durationPartsFromMinutes(draft.durationMinutes);
   const requestedDurationSeconds = durationParts.minutes * 60 + durationParts.seconds;
+  const stepTargetSeconds = targetPct > 0
+    ? requestedDurationSeconds * Math.min(stepLabel, targetPct) / targetPct
+    : null;
   const maxAllowedDurationSeconds = session ? Math.max(0, Math.floor(session.remainingSeconds)) : 0;
   const durationExceedsSession = session != null && requestedDurationSeconds > maxAllowedDurationSeconds;
   const startDisabled = activeRace != null || session == null || session.remainingNormPct <= 0 || durationExceedsSession;
@@ -1289,10 +1296,12 @@ function RaceBuilder({
     });
   };
   return (
-    <div className="card p-0 overflow-hidden">
+    <div className="card p-0" style={{ position: "relative" }}>
       <div className="px-4 py-2.5 flex items-center gap-2" style={{ borderBottom: "1px solid #3a3a3a" }}>
-        <Target size={15} style={{ color: session?.color ?? "#aaa" }} />
-        <span className="text-sm font-semibold" style={{ color: "#ddd" }}>建立额度使用小目标竞赛</span>
+        <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+          <Target size={15} style={{ color: session?.color ?? "#aaa", flexShrink: 0 }} />
+          <span className="text-sm font-semibold truncate" style={{ color: "#ddd" }}>建立额度使用小目标竞赛</span>
+        </div>
       </div>
       {!session ? (
         <div className="py-8 text-center text-xs" style={{ color: "#777" }}>先在选择账号追踪里选择一个进行中的 session</div>
@@ -1371,11 +1380,37 @@ function RaceBuilder({
           </div>
 
           <div className="flex items-center justify-between gap-2 text-[11px]" style={{ color: "#a3a3a3" }}>
-            <span style={{ color: durationExceedsSession ? TIMER_OVER_COLOR : undefined }}>
-              {durationExceedsSession
-                ? `超过最大允许时间 ${formatDetailedHms(maxAllowedDurationSeconds)}`
-                : `默认每 ${stepLabel}% 自动记录一次`}
-            </span>
+            <div className="flex items-center gap-1.5" style={{ minWidth: 0, color: durationExceedsSession ? TIMER_OVER_COLOR : undefined }}>
+              {durationExceedsSession ? (
+                <span className="truncate">超过最大允许时间 {formatDetailedHms(maxAllowedDurationSeconds)}</span>
+              ) : (
+                <>
+                  <span className="truncate">默认每 {stepLabel}% 自动记录一次</span>
+                  <span
+                    className="inline-flex items-center font-mono font-semibold"
+                    style={{
+                      height: 20,
+                      padding: "0 8px",
+                      borderRadius: 999,
+                      border: "1px solid #7c3aed66",
+                      background: "#2b1f37",
+                      color: TIMER_OK_COLOR,
+                      boxShadow: `0 0 14px ${TIMER_OK_COLOR}22`,
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    每段目标 {formatDetailedHms(stepTargetSeconds)}
+                  </span>
+                  <IconActionButton
+                    title="历史小目标参考"
+                    onClick={() => setShowHistoricalReference(true)}
+                  >
+                    <History size={12} />
+                  </IconActionButton>
+                </>
+              )}
+            </div>
             <span className="font-mono" style={{ color: session.color }}>映射 {formatWhole(targetRaw)} / {formatWhole(session.totalPct)}</span>
           </div>
 
@@ -1390,7 +1425,224 @@ function RaceBuilder({
           </button>
         </div>
       )}
+      {session && showHistoricalReference && (
+        <HistoricalRaceReference
+          session={session}
+          races={races}
+          color={session.color}
+          onClose={() => setShowHistoricalReference(false)}
+        />
+      )}
     </div>
+  );
+}
+
+interface HistoricalReferenceSegment {
+  index: number;
+  targetDeltaPct: number;
+  cumulativeDeltaPct: number;
+  elapsedSeconds: number;
+  totalElapsedSeconds: number;
+  targetSeconds: number;
+}
+
+interface HistoricalReferenceRace {
+  race: UsageRace;
+  averageSegmentSeconds: number;
+  completedCount: number;
+  segments: HistoricalReferenceSegment[];
+}
+
+function HistoricalRaceReference({
+  session,
+  races,
+  color,
+  onClose,
+}: {
+  session: ActiveSession;
+  races: UsageRace[];
+  color: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const referenceRaces = useMemo<HistoricalReferenceRace[]>(() => {
+    const result: HistoricalReferenceRace[] = [];
+    for (const race of races) {
+      if (race.accountKey !== session.key || race.status === "active") continue;
+      const completedSegments: HistoricalReferenceSegment[] = [];
+      for (const segment of race.segments) {
+        if (segment.completedAt == null || segment.elapsedSeconds == null) continue;
+        const timing = segmentTiming(race, segment);
+        if (timing.elapsedSeconds == null || timing.totalElapsedSeconds == null) continue;
+        completedSegments.push({
+          index: segment.index,
+          targetDeltaPct: segment.targetDeltaPct,
+          cumulativeDeltaPct: segment.cumulativeDeltaPct,
+          elapsedSeconds: timing.elapsedSeconds,
+          totalElapsedSeconds: timing.totalElapsedSeconds,
+          targetSeconds: timing.targetSeconds,
+        });
+      }
+      if (completedSegments.length === 0) continue;
+      const averageSegmentSeconds = completedSegments.reduce((sum, item) => sum + item.elapsedSeconds, 0) / completedSegments.length;
+      result.push({
+        race,
+        averageSegmentSeconds,
+        completedCount: completedSegments.length,
+        segments: completedSegments.slice(0, 8),
+      });
+    }
+    return result
+      .sort((a, b) => new Date(b.race.startedAt).getTime() - new Date(a.race.startedAt).getTime())
+      .slice(0, 2);
+  }, [races, session.key]);
+
+  if (referenceRaces.length === 0) {
+    return (
+      <FloatingReferenceShell color={color} onClose={onClose} segmentCount={0} raceCount={0}>
+        <div
+          className="flex items-center gap-2 text-[11px]"
+          style={{ border: "1px dashed #3a3a3a", borderRadius: 8, padding: "12px 10px", color: "#858585" }}
+        >
+          <History size={13} />
+          <span>暂无同账号历史竞赛小目标用时</span>
+        </div>
+      </FloatingReferenceShell>
+    );
+  }
+
+  const totalSegments = referenceRaces.reduce((sum, item) => sum + item.completedCount, 0);
+  return (
+    <FloatingReferenceShell color={color} onClose={onClose} segmentCount={totalSegments} raceCount={referenceRaces.length}>
+      <div className="space-y-2">
+        {referenceRaces.map((item) => (
+          <div
+            key={item.race.id}
+            style={{
+              border: "1px solid #333",
+              borderRadius: 8,
+              background: "#1f1f1f",
+              padding: 8,
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <StatusBadge status={item.race.status} />
+                <span className="text-[11px] truncate" style={{ color: "#bdbdbd" }}>
+                  {formatLocalTime(item.race.startedAt)} · {formatShortDuration(item.race.durationSeconds)}
+                </span>
+              </div>
+              <span className="text-[11px] font-mono" style={{ color, flexShrink: 0 }}>
+                均值 {formatShortDuration(item.averageSegmentSeconds)}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {item.segments.map((segment) => {
+                const isOver = segment.elapsedSeconds > segment.targetSeconds;
+                return (
+                  <div
+                    key={`${item.race.id}-${segment.index}`}
+                    className="grid items-center gap-2 text-[11px]"
+                    style={{
+                      gridTemplateColumns: "minmax(72px, 1fr) minmax(46px, auto) minmax(66px, auto) minmax(66px, auto)",
+                      border: `1px solid ${isOver ? "#5a3535" : "#355a35"}`,
+                      borderRadius: 7,
+                      background: isOver ? "#302424" : "#203120",
+                      color: "#d6f5d6",
+                      padding: "7px 9px",
+                    }}
+                  >
+                    <span className="inline-flex items-center gap-1.5" style={{ minWidth: 0 }}>
+                      <Trophy size={11} style={{ color: isOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR, flexShrink: 0 }} />
+                      <span className="truncate">#{segment.index} +{formatWholePct(segment.targetDeltaPct)}</span>
+                    </span>
+                    <span>到 {formatWholePct(segment.cumulativeDeltaPct)}</span>
+                    <span className="text-right" style={{ color: isOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR }}>
+                      用时 {formatShortDuration(segment.elapsedSeconds)}
+                    </span>
+                    <span className="text-right" style={{ color: "#a3a3a3" }}>
+                      累计 {formatShortDuration(segment.totalElapsedSeconds)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </FloatingReferenceShell>
+  );
+}
+
+function FloatingReferenceShell({
+  color,
+  raceCount,
+  segmentCount,
+  onClose,
+  children,
+}: {
+  color: string;
+  raceCount: number;
+  segmentCount: number;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <div
+        className="fixed inset-0"
+        style={{ zIndex: 72, background: "rgba(0, 0, 0, 0.14)" }}
+        onClick={onClose}
+      />
+      <div
+        className="fixed"
+        style={{
+          zIndex: 73,
+          top: 86,
+          right: 16,
+          width: "min(560px, calc(100vw - 32px))",
+          maxHeight: "calc(100vh - 116px)",
+          overflowY: "auto",
+          border: `1px solid ${color}66`,
+          borderRadius: 9,
+          background: "#191919",
+          boxShadow: "0 22px 64px rgba(0, 0, 0, 0.56)",
+          padding: 12,
+        }}
+      >
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+            <span
+              className="inline-flex items-center justify-center"
+              style={{ width: 24, height: 24, borderRadius: 6, background: `${color}22`, color, flexShrink: 0 }}
+            >
+              <History size={13} />
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <div className="text-xs font-semibold" style={{ color: "#f3f4f6" }}>历史小目标参考</div>
+              <div className="text-[10px] font-mono" style={{ color: "#858585" }}>{raceCount} 场 · {segmentCount} 段</div>
+            </div>
+          </div>
+          <button
+            type="button"
+            title="关闭"
+            onClick={onClose}
+            className="inline-flex items-center justify-center"
+            style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#aaa", flexShrink: 0 }}
+          >
+            <X size={13} />
+          </button>
+        </div>
+        {children}
+      </div>
+    </>
   );
 }
 
