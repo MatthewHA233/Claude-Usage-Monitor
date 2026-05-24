@@ -1,0 +1,126 @@
+
+> claude-usage-monitor@1.0.4 dev
+> vite --host 127.0.0.1
+
+
+  [32m[1mVITE[22m v6.4.2[39m  [2mready in [0m[1m722[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m1420[22m/[39m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+[2m08:06:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m08:09:12[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m08:10:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m08:10:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m08:14:06[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:30:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:31:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:31:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:33:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:34:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:42:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:43:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:48:10[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:48:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:48:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:50:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m08:50:45[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:00:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:00:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:01:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:01:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:02:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:02:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:05:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:05:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:05:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:09:09[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:09:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:09:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m09:43:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:43:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:44:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:52:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:52:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:53:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:54:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:57:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m09:58:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:04:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:29:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css[22m
+[2m10:29:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:30:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:31:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:31:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:31:46[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:32:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:32:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:33:02[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:35:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m10:39:42[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:40:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:40:31[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:40:49[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:47:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:48:17[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:49:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:49:52[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:50:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:50:53[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:52:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:53:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:53:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:54:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:54:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:54:54[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m10:55:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:00:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:04:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:05:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:19:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:19:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:20:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:21:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:21:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:22:39[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:24:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:24:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:27:32[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:27:59[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:33:04[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:33:16[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:33:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:34:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:39:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:40:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:40:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:41:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:41:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:41:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:54:26[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css, /src/components/SessionRacePanel.tsx, /src/components/StatusCards.tsx[22m
+[2m11:54:35[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:54:45[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:55:01[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m11:55:36[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css[22m
+[2m11:58:35[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css[22m
+[2m12:03:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css, /src/components/SessionRacePanel.tsx, /src/components/StatusCards.tsx[22m
+[2m12:11:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mpage reload [39m[2mclaude-usage-monitor/popup.html[22m
+[2m12:13:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/StatusCards.tsx, /src/styles.css[22m
+[2m12:20:22[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/styles.css, /src/components/SessionRacePanel.tsx, /src/App.tsx[22m
+[2m12:21:43[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:21:56[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:22:07[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:22:19[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:22:27[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:22:37[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:22:55[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:23:13[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m12:23:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css[22m
+[2m12:32:14[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/App.tsx, /src/styles.css[22m
+[2m12:37:11[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:10:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:11:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:15:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:18:18[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:19:48[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:28:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
+[2m13:28:33[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SessionRacePanel.tsx, /src/styles.css[22m
