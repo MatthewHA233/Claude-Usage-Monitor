@@ -2407,8 +2407,7 @@ function SegmentList({
   const currentOpen = openSegment(race);
   const latestCompletedIndex = [...race.segments].reverse().find((segment) => segment.completedAt != null)?.index ?? null;
   const latestCompletedRef = useRef<HTMLDivElement | null>(null);
-  const visibleCount = Math.max(16, latestCompletedIndex ?? 0);
-  const visibleSegments = compact ? race.segments : race.segments.slice(0, visibleCount);
+  const visibleSegments = race.segments;
 
   useEffect(() => {
     if (latestCompletedIndex == null) return;
@@ -2473,9 +2472,6 @@ function SegmentList({
           </div>
         );
       })}
-      {!compact && race.segments.length > visibleSegments.length && (
-        <div className="text-[11px] text-center" style={{ color: "#858585" }}>还有 {race.segments.length - visibleSegments.length} 个分卷在历史里</div>
-      )}
     </div>
   );
 }
