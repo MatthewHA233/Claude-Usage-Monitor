@@ -1,11 +1,11 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import type { UsageSnapshot, Recommendation, AccountAnalysis, LocalUsageStatus } from "../types";
+import type { UsageSnapshot, Recommendation, AccountAnalysis, LocalUsageStatus, PluginUsageStatus } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
 import ProgressBar from "./ProgressBar";
 import { useHistory, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
 import { useResetAlarm } from "../hooks/useResetAlarm";
 import InboxBadge from "./InboxPanel";
-import { AlarmBell, AlarmBanner } from "./AlarmBell";
+import { AlarmBell } from "./AlarmBell";
 
 // ── 时间轴常量 ────────────────────────────────────────────
 const SESSION_HOURS = 5;
@@ -15,6 +15,7 @@ const ROW_H = 64;       // 每个账号行高（px）
 const HEADER_H = 28;    // 时间标题行高（px）
 
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80"];
+const PLUGIN_STATUS_FRESH_MS = 90_000;
 
 const accountKey = (snap: Pick<UsageSnapshot, "provider" | "account_alias">) =>
   `${snap.provider ?? "claude_code"}::${snap.account_alias}`;
@@ -48,6 +49,7 @@ interface Props {
   recommendation: Recommendation | null;
   analysis: AccountAnalysis[];
   localUsageStatuses: LocalUsageStatus[];
+  pluginUsageStatuses: PluginUsageStatus[];
   onRefresh: () => void;
 }
 
@@ -115,7 +117,7 @@ function computeProviderAvgCosts(accountRates: AccountRate[]): Record<string, nu
 }
 
 // ── StatusCards ───────────────────────────────────────────
-export default function StatusCards({ snapshots, recommendation, analysis, localUsageStatuses, onRefresh }: Props) {
+export default function StatusCards({ snapshots, recommendation, analysis, localUsageStatuses, pluginUsageStatuses, onRefresh }: Props) {
   const { colors, setColor } = useAccountColors();
   const { pauseStates, setPaused } = useAccountPauseStates();
   const { histories } = useAllHistories();
@@ -150,7 +152,6 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
 
   return (
     <div className="space-y-3">
-      <AlarmBanner ringingAliases={alarm.ringingAliases} colors={colors} onStop={alarm.stopAll} />
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold" style={{ color: "#ddd" }}>账号状态总览</h2>
         <div className="flex items-center gap-2 ml-auto">
@@ -174,6 +175,11 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
           const cliLoggedIn = localUsageStatuses.some((status) =>
             status.ok && status.provider === provider && status.account_alias === alias
           );
+          const pluginCollecting = pluginUsageStatuses.some((status) =>
+            status.provider === provider &&
+            status.account_alias === alias &&
+            Date.now() - new Date(status.updated_at).getTime() <= PLUGIN_STATUS_FRESH_MS
+          );
           const pause = pauseStates[key];
           const isPaused = pause?.paused ?? false;
           return (
@@ -188,6 +194,7 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
               isRecommended={recommendation?.recommended_key === key && !isPaused}
               isPaused={isPaused}
               cliLoggedIn={cliLoggedIn}
+              pluginCollecting={pluginCollecting}
               pausedAt={pause?.paused_at ?? null}
               onTogglePaused={async () => {
                 await setPaused(provider, alias, !isPaused);
@@ -201,6 +208,7 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
               alarmEnabled={alarm.isEnabled(key)}
               alarmRinging={alarm.ringingAliases.includes(key)}
               onToggleAlarm={() => alarm.toggle(key)}
+              onStopAlarm={alarm.stopAll}
             />
           );
         })
@@ -363,17 +371,22 @@ interface CardProps {
   setColor: (alias: string, color: string) => Promise<void>;
   isPaused: boolean;
   cliLoggedIn: boolean;
+  pluginCollecting: boolean;
   pausedAt: string | null;
   onTogglePaused: () => Promise<void>;
   alarmEnabled: boolean;
   alarmRinging: boolean;
   onToggleAlarm: () => void;
+  onStopAlarm: () => void;
 }
 
-function CliLoggedInBadge() {
+function CollectingSourceBadge({ cli, plugin }: { cli: boolean; plugin: boolean }) {
+  if (!cli && !plugin) return null;
+  const combined = cli && plugin;
+  const label = cli ? "CLI 采集中" : "插件 采集中";
   return (
     <span
-      title="本机 CLI 已登录，当前额度可自动采集"
+      title={cli && plugin ? "本机 CLI 与 Chrome 插件都在采集额度" : cli ? "本机 CLI 正在采集额度" : "Chrome 插件正在实时采集额度"}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -386,14 +399,22 @@ function CliLoggedInBadge() {
         fontSize: 10,
         fontWeight: 700,
         whiteSpace: "nowrap",
+        gap: 3,
       }}
     >
-      CLI已登录
+      {combined ? (
+        <>
+          <span>CLI</span>
+          <span style={{ fontSize: 9, opacity: 0.9 }}>和</span>
+          <span>插件</span>
+          <span>采集中</span>
+        </>
+      ) : label}
     </span>
   );
 }
 
-function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pausedAt, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm }: CardProps) {
+function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pluginCollecting, pausedAt, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm, onStopAlarm }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
@@ -412,8 +433,8 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
         opacity: isPaused ? 0.62 : 1,
       }}>
         {/* Header */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between mb-3 gap-2">
+          <div className="flex items-center gap-2 min-w-0" style={{ flex: 1 }}>
             <div
               title="点击设置颜色"
               onClick={() => colorInputRef.current?.click()}
@@ -434,16 +455,18 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
                 style={{ position: "absolute", opacity: 0, width: 0, height: 0, pointerEvents: "none" }}
               />
             </div>
-              <div className="flex items-center gap-2">
-                <div className="flex flex-col leading-tight">
-                  <span className="text-sm font-semibold" style={{ color: "#eee" }}>{alias}</span>
+              <div className="flex items-center gap-2 min-w-0" style={{ flex: 1 }}>
+                <div className="flex flex-col leading-tight min-w-0" style={{ flex: "1 1 auto" }}>
+                  <span className="text-sm font-semibold truncate block" style={{ color: "#eee" }}>{alias}</span>
                   <span className="text-[10px] uppercase" style={{ color: "#888" }}>{providerLabel(provider)}</span>
                 </div>
-                {cliLoggedIn && <CliLoggedInBadge />}
-                {isRecommended && <span className="plan-badge" style={{ fontSize: 10 }}>推荐</span>}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <CollectingSourceBadge cli={cliLoggedIn} plugin={pluginCollecting} />
+                  {isRecommended && <span className="plan-badge" style={{ fontSize: 10 }}>推荐</span>}
+                </div>
               </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -487,12 +510,15 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
               <div className="space-y-2.5">
                 <UsageRow label="Session (5h)" pct={snap.session_pct ?? null} total={snap.session_total_pct ?? 100}
                   resetHours={sessionHours} resetAt={snap.session_reset_at} colorFn={sessionResetColor}
+                  preciseCountdown
                   resetExtra={
-                    <AlarmBell enabled={alarmEnabled} ringing={alarmRinging} onToggle={onToggleAlarm} />
+                    <AlarmBell enabled={alarmEnabled} ringing={alarmRinging} onToggle={onToggleAlarm} onStop={onStopAlarm} />
                   }
                 />
                 <UsageRow label="Weekly" pct={snap.weekly_pct ?? null} total={snap.weekly_total_pct ?? 100}
-                  resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor} />
+                  resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor}
+                  preciseCountdownBelowHours={24}
+                />
               </div>
             </div>
 
@@ -535,16 +561,44 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
 }
 
 // ── UsageRow ──────────────────────────────────────────────
-function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra }: {
+function formatCountdownMs(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) return `${days}d${hours}h${minutes}m${seconds}s`;
+  if (hours > 0) return `${hours}h${minutes}m${seconds}s`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
+function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra, preciseCountdown = false, preciseCountdownBelowHours }: {
   label: string; pct: number | null; total?: number | null;
   resetHours: number | null; resetAt: string | null;
   colorFn: (h: number | null) => string;
   resetExtra?: React.ReactNode;
+  preciseCountdown?: boolean;
+  preciseCountdownBelowHours?: number;
 }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if ((!preciseCountdown && preciseCountdownBelowHours == null) || !resetAt) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [preciseCountdown, preciseCountdownBelowHours, resetAt]);
+
   const totalPct = total ?? 100;
   const rem = remaining(pct, totalPct);
-  const color = colorFn(resetHours);
-  const resetText = resetHours !== null ? `${formatHours(resetHours)}后重置` : formatLocalTime(resetAt);
+  const resetMs = resetAt ? new Date(resetAt).getTime() - nowMs : null;
+  const preciseLimitMs = preciseCountdownBelowHours != null ? preciseCountdownBelowHours * 3_600_000 : null;
+  const shouldUsePrecise = preciseCountdown || (resetMs !== null && preciseLimitMs !== null && resetMs <= preciseLimitMs);
+  const effectiveResetHours = resetMs !== null ? Math.max(0, resetMs / 3_600_000) : resetHours;
+  const color = colorFn(effectiveResetHours);
+  const resetText = shouldUsePrecise && resetMs !== null
+    ? `${formatCountdownMs(resetMs)}后重置`
+    : resetHours !== null ? `${formatHours(resetHours)}后重置` : formatLocalTime(resetAt);
   return (
     <div>
       <div className="flex items-center justify-between text-xs mb-1">
