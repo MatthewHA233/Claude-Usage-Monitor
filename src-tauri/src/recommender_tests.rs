@@ -26,14 +26,14 @@ mod tests {
 
     #[test]
     fn scaled_codex_quota_is_available_until_scaled_total_is_used() {
-        let snapshots = vec![snapshot("codex-pro", 200.0, 1000.0, 30.0, 1000.0)];
+        let snapshots = vec![snapshot("codex-pro", 100.0, 500.0, 15.0, 500.0)];
 
         let rec = recommend(&snapshots);
 
         assert_eq!(rec.recommended_alias.as_deref(), Some("codex-pro"));
         assert_eq!(rec.account_summaries[0].status, "available");
-        assert_eq!(rec.account_summaries[0].session_total_pct, Some(1000.0));
-        assert_eq!(rec.account_summaries[0].weekly_total_pct, Some(1000.0));
-        assert!(rec.reason.contains("剩余 970%"));
+        assert_eq!(rec.account_summaries[0].session_total_pct, Some(500.0));
+        assert_eq!(rec.account_summaries[0].weekly_total_pct, Some(500.0));
+        assert!(rec.reason.contains("剩余 485%"));
     }
 }

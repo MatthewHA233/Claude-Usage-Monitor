@@ -425,6 +425,8 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
   const sessionsLeft = avgCost != null && weeklyRemaining != null
     ? Math.ceil(weeklyRemaining / avgCost) : null;
   const resetDays = weeklyHours != null ? weeklyHours / 24 : null;
+  const periodLabel = provider === "codex" ? "3.5d" : "Weekly";
+  const periodQuotaLabel = provider === "codex" ? "周期额度" : "周额度";
 
   return (
     <>
@@ -515,7 +517,7 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
                     <AlarmBell enabled={alarmEnabled} ringing={alarmRinging} onToggle={onToggleAlarm} onStop={onStopAlarm} />
                   }
                 />
-                <UsageRow label="Weekly" pct={snap.weekly_pct ?? null} total={snap.weekly_total_pct ?? 100}
+                <UsageRow label={periodLabel} pct={snap.weekly_pct ?? null} total={snap.weekly_total_pct ?? 100}
                   resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor}
                   preciseCountdownBelowHours={24}
                 />
@@ -531,7 +533,7 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
               <div className="text-3xl font-bold font-mono" style={{ color: "#fff" }}>
                 {sessionsLeft != null ? sessionsLeft : "—"}
               </div>
-              <div className="text-xs mt-0.5" style={{ color: "#aaa" }}>次耗尽周额度</div>
+              <div className="text-xs mt-0.5" style={{ color: "#aaa" }}>次耗尽{periodQuotaLabel}</div>
               <div className="text-sm font-semibold mt-2"
                 style={{ color: weeklyResetColor(weeklyHours) }}>
                 {resetDays != null ? `${resetDays.toFixed(1)}天后重置` : "—"}
@@ -1450,6 +1452,7 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   const { days, weeklyResetDates } = computeDailyStats(statsRecords);
   const identityKey = keyFromParts(provider, alias);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
+  const periodLabel = provider === "codex" ? "3.5d" : "Weekly";
   const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
   const annotations = useMemo(() => computeTableAnnotations(statsRecords), [statsRecords]);
 
@@ -1540,7 +1543,7 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
                 <th className="text-left px-3 py-2.5 font-semibold">时间</th>
                 <th className="text-left px-3 py-2.5 font-semibold">Session</th>
                 <th className="text-left px-3 py-2.5 font-semibold">重置</th>
-                <th className="text-left px-3 py-2.5 font-semibold">Weekly</th>
+                <th className="text-left px-3 py-2.5 font-semibold">{periodLabel}</th>
                 <th className="text-left px-3 py-2.5 font-semibold">重置</th>
                 <th className="px-3 py-2.5" />
               </tr>
@@ -2045,10 +2048,10 @@ function SprintPanel({ snapshots, avgCost, avgCostsByProvider, colors }: {
         </div>
       </div>
 
-      {/* 周额度预测：时间轴下方，每账号一行 */}
+      {/* 周期额度预测：时间轴下方，每账号一行 */}
       <div className="card p-0 overflow-hidden">
         <div className="px-4 py-2.5" style={{ borderBottom: "1px solid #3a3a3a" }}>
-          <span className="text-sm font-semibold" style={{ color: "#ddd" }}>周额度预测</span>
+          <span className="text-sm font-semibold" style={{ color: "#ddd" }}>周期额度预测</span>
         </div>
         <div className="divide-y" style={{ borderColor: "#2e2e2e" }}>
           {predictionRows.map(({ key, snap, color, weeklyUsed, weeklyTotal, placed, projected }) => {

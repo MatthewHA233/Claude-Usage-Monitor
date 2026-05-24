@@ -25,9 +25,10 @@ pub fn recommend(snapshots: &[UsageSnapshot]) -> Recommendation {
             let weekly_total = s.weekly_total_pct.unwrap_or(100.0);
             let weekly_remaining = weekly_total - weekly_pct;
             if weekly_remaining > weekly_total * 0.4 && weekly_hours < 24.0 {
+                let quota_label = period_quota_label(&s.provider);
                 warnings.push(format!(
-                    "账号 {} 本周剩余 {:.0}% Weekly，但 {:.1}h 后重置，存在浪费风险",
-                    s.alias, weekly_remaining, weekly_hours
+                    "账号 {} {}剩余 {:.0}%，但 {:.1}h 后重置，存在浪费风险",
+                    s.alias, quota_label, weekly_remaining, weekly_hours
                 ));
             }
         }
@@ -177,7 +178,20 @@ fn build_reason(s: &AccountSummary, session_remaining: f64, weekly_remaining: f6
         .unwrap_or_else(|| "未知".to_string());
 
     format!(
-        "{} 周额度{}后重置（剩余 {:.0}%），Session 剩余 {:.0}%（{}后重置）",
-        s.alias, weekly_h, weekly_remaining, session_remaining, session_h
+        "{} {}{}后重置（剩余 {:.0}%），Session 剩余 {:.0}%（{}后重置）",
+        s.alias,
+        period_quota_label(&s.provider),
+        weekly_h,
+        weekly_remaining,
+        session_remaining,
+        session_h
     )
+}
+
+fn period_quota_label(provider: &str) -> &'static str {
+    if provider == "codex" {
+        "周期额度"
+    } else {
+        "周额度"
+    }
 }

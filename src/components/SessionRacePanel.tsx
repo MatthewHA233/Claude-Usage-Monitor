@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import {
+  ArrowLeft,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Flag,
   History,
   RefreshCw,
   Target,
+  Timer,
   TimerReset,
+  Trash2,
   Trophy,
   X,
 } from "lucide-react";
@@ -23,6 +29,7 @@ const ROW_H = 58;
 const HEADER_H = 26;
 const DEFAULT_STEP_PCT = 2;
 const MAX_SAVED_RACES = 120;
+const ACTIVE_UPDATE_WINDOW_MS = 10 * 60_000;
 const PROVIDER_ORDER = ["claude_code", "codex"];
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80", "#f0a500", "#a78bfa"];
 const PLUGIN_STATUS_FRESH_MS = 90_000;
@@ -136,6 +143,18 @@ function formatClock(seconds: number | null) {
   return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+function formatDigitalClock(seconds: number | null) {
+  if (seconds == null || !Number.isFinite(seconds)) return "--:--";
+  const safe = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 function formatShortDuration(seconds: number | null) {
   if (seconds == null || !Number.isFinite(seconds)) return "-";
   const safe = Math.max(0, Math.round(seconds));
@@ -155,6 +174,41 @@ function shortAlias(alias: string) {
 
 function rawFromNorm(normPct: number, totalPct: number) {
   return normPct * totalPct / 100;
+}
+
+function formatWhole(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "-";
+  return String(Math.round(value));
+}
+
+function formatWholePct(value: number | null | undefined) {
+  return `${formatWhole(value)}%`;
+}
+
+function formatDraftNumber(value: number, decimals = 0) {
+  const rounded = decimals > 0 ? round2(value) : Math.round(value);
+  return decimals > 0
+    ? rounded.toFixed(decimals).replace(/\.?0+$/, "")
+    : String(rounded);
+}
+
+function durationPartsFromMinutes(value: string) {
+  const totalSeconds = Math.max(0, Math.round(parseDraftNumber(value, 0) * 60));
+  return {
+    minutes: Math.floor(totalSeconds / 60),
+    seconds: totalSeconds % 60,
+  };
+}
+
+function durationStringFromParts(minutes: number, seconds: number) {
+  const safeMinutes = Math.max(0, Math.round(minutes));
+  const safeSeconds = clamp(Math.round(seconds), 0, 59);
+  return formatDraftNumber(safeMinutes + safeSeconds / 60, safeSeconds > 0 ? 2 : 0);
+}
+
+function durationStringFromSeconds(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.round(totalSeconds));
+  return durationStringFromParts(Math.floor(safeSeconds / 60), safeSeconds % 60);
 }
 
 function loadRaces(): UsageRace[] {
@@ -214,6 +268,85 @@ function computeRecentDelta(samples: Sample[], nowMs: number) {
     delta += Math.max(0, current.normPct - startPct);
   }
   return round1(delta);
+}
+
+function samplesFromRecords(records: UsageSnapshot[], nowMs: number) {
+  const grouped = new Map<string, Map<number, Sample>>();
+  for (const record of records) {
+    if (record.error != null || record.session_pct == null || record.session_reset_at == null) continue;
+    const atMs = new Date(record.collected_at).getTime();
+    if (!Number.isFinite(atMs) || atMs > nowMs + 60_000) continue;
+    const totalPct = record.session_total_pct ?? 100;
+    if (totalPct <= 0) continue;
+    const resetKey = normalizeResetKey(record.session_reset_at);
+    const samples = grouped.get(resetKey) ?? new Map<number, Sample>();
+    samples.set(atMs, {
+      atMs,
+      iso: record.collected_at,
+      rawPct: record.session_pct,
+      normPct: clamp((record.session_pct / totalPct) * 100, 0, 1000),
+    });
+    grouped.set(resetKey, samples);
+  }
+  return new Map([...grouped.entries()].map(([key, samples]) => [
+    key,
+    [...samples.values()].sort((a, b) => a.atMs - b.atMs),
+  ]));
+}
+
+function activeUsageStats(samples: Sample[]) {
+  const changeEvents: Sample[] = [];
+  for (const sample of samples) {
+    const last = changeEvents[changeEvents.length - 1];
+    if (!last || sample.normPct > last.normPct + 0.05) {
+      changeEvents.push(sample);
+    }
+  }
+
+  let activeMs = 0;
+  let deltaPct = 0;
+  for (let i = 1; i < changeEvents.length; i += 1) {
+    const previous = changeEvents[i - 1];
+    const current = changeEvents[i];
+    const durationMs = current.atMs - previous.atMs;
+    const delta = current.normPct - previous.normPct;
+    if (durationMs <= 0 || durationMs > ACTIVE_UPDATE_WINDOW_MS || delta <= 0.05) continue;
+    activeMs += durationMs;
+    deltaPct += delta;
+  }
+
+  return { activeMs, deltaPct };
+}
+
+function estimateDurationFromRecentSessions(
+  session: ActiveSession,
+  records: UsageSnapshot[],
+  nowMs: number,
+  targetPct: number,
+) {
+  const grouped = samplesFromRecords(records, nowMs);
+  grouped.set(session.resetKey, session.samples);
+
+  const recentGroups = [...grouped.values()]
+    .filter((samples) => samples.length >= 2)
+    .sort((a, b) => b[b.length - 1].atMs - a[a.length - 1].atMs);
+
+  let activeMs = 0;
+  let deltaPct = 0;
+  let countedSessions = 0;
+  for (const samples of recentGroups) {
+    const stats = activeUsageStats(samples);
+    if (stats.activeMs <= 0 || stats.deltaPct <= 0) continue;
+    activeMs += stats.activeMs;
+    deltaPct += stats.deltaPct;
+    countedSessions += 1;
+    if (countedSessions >= 2) break;
+  }
+
+  if (activeMs <= 0 || deltaPct <= 0) return null;
+  const pctPerMinute = deltaPct / (activeMs / 60_000);
+  if (!Number.isFinite(pctPerMinute) || pctPerMinute <= 0) return null;
+  return Math.max(60, Math.round((targetPct / pctPerMinute) * 60));
 }
 
 function buildActiveSessions(
@@ -361,6 +494,8 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(SELECTED_STORAGE_KEY));
   const [historyKey, setHistoryKey] = useState<string | null>(() => localStorage.getItem(SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
+  const [focusedRaceId, setFocusedRaceId] = useState<string | null>(null);
+  const [deleteRaceId, setDeleteRaceId] = useState<string | null>(null);
   const [draftSeedKey, setDraftSeedKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<RaceDraft>({ durationMinutes: "300", targetPct: "", stepPct: String(DEFAULT_STEP_PCT) });
 
@@ -410,13 +545,24 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     if (draftSeedKey === seedKey) return;
     setDraft({
       durationMinutes: String(Math.max(5, Math.ceil(session.remainingSeconds / 60))),
-      targetPct: round1(Math.max(0.1, session.remainingNormPct)).toString(),
+      targetPct: String(Math.max(1, Math.floor(session.remainingNormPct))),
       stepPct: String(DEFAULT_STEP_PCT),
     });
     setDraftSeedKey(seedKey);
   }, [draftSeedKey, selectedKey, sessionsByKey]);
 
   const selectedSession = selectedKey ? sessionsByKey.get(selectedKey) ?? null : null;
+
+  useEffect(() => {
+    if (!selectedSession) return;
+    const maxTargetPct = Math.max(1, Math.floor(selectedSession.remainingNormPct));
+    setDraft((current) => {
+      const currentTarget = parseDraftNumber(current.targetPct, maxTargetPct);
+      if (currentTarget <= maxTargetPct) return current;
+      return { ...current, targetPct: String(maxTargetPct) };
+    });
+  }, [selectedSession?.key, selectedSession?.remainingNormPct]);
+
   const activeRace = useMemo(
     () => races.find((race) => race.status === "active" && race.accountKey === selectedKey) ?? null,
     [races, selectedKey],
@@ -425,6 +571,17 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     () => races.filter((race) => race.accountKey === (historyKey ?? selectedKey)),
     [historyKey, races, selectedKey],
   );
+  const estimatedDurationSeconds = useMemo(() => {
+    if (!selectedSession) return null;
+    const maxTargetPct = Math.max(1, Math.floor(selectedSession.remainingNormPct));
+    const targetPct = Math.round(clamp(parseDraftNumber(draft.targetPct, maxTargetPct), 1, maxTargetPct));
+    return estimateDurationFromRecentSessions(
+      selectedSession,
+      histories[selectedSession.key] ?? [],
+      nowMs,
+      targetPct,
+    );
+  }, [draft.targetPct, histories, nowMs, selectedSession]);
 
   const refreshAll = useCallback(() => {
     void refetchHistories();
@@ -439,8 +596,9 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const startRace = useCallback(() => {
     if (!selectedSession) return;
     const durationMinutes = clamp(parseDraftNumber(draft.durationMinutes, 300), 1, 24 * 60);
-    const targetPct = clamp(parseDraftNumber(draft.targetPct, selectedSession.remainingNormPct), 0.1, Math.max(0.1, selectedSession.remainingNormPct));
-    const stepPct = clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 0.1, 20);
+    const maxTargetPct = Math.max(1, Math.floor(selectedSession.remainingNormPct));
+    const targetPct = Math.round(clamp(parseDraftNumber(draft.targetPct, maxTargetPct), 1, maxTargetPct));
+    const stepPct = Math.round(clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 1, 20));
     const nowIso = new Date().toISOString();
     const race: UsageRace = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -462,6 +620,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     };
     setRaces((previous) => [race, ...previous.filter((item) => item.id !== race.id)].slice(0, MAX_SAVED_RACES));
     setExpandedRaceId(race.id);
+    setFocusedRaceId(race.id);
     setHistoryKey(selectedSession.key);
   }, [draft, selectedSession]);
 
@@ -470,6 +629,36 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
       race.id === raceId && race.status === "active" ? { ...race, status: "expired" } : race
     )));
   }, []);
+
+  const requestDeleteRace = useCallback((raceId: string) => {
+    setDeleteRaceId(raceId);
+  }, []);
+
+  const confirmDeleteRace = useCallback(() => {
+    if (!deleteRaceId) return;
+    setRaces((previous) => previous.filter((item) => item.id !== deleteRaceId));
+    setExpandedRaceId((current) => current === deleteRaceId ? null : current);
+    setFocusedRaceId((current) => current === deleteRaceId ? null : current);
+    setDeleteRaceId(null);
+  }, [deleteRaceId]);
+
+  const pendingDeleteRace = deleteRaceId ? races.find((race) => race.id === deleteRaceId) ?? null : null;
+
+  const focusedRace = focusedRaceId ? races.find((race) => race.id === focusedRaceId) ?? null : null;
+
+  if (focusedRace) {
+    return (
+      <section>
+        <FocusedRaceView
+          race={focusedRace}
+          session={sessionsByKey.get(focusedRace.accountKey)}
+          nowMs={nowMs}
+          onBack={() => setFocusedRaceId(null)}
+          onStop={() => stopRace(focusedRace.id)}
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="space-y-3">
@@ -509,6 +698,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             session={selectedSession}
             draft={draft}
             activeRace={activeRace}
+            estimatedDurationSeconds={estimatedDurationSeconds}
             onDraftChange={setDraft}
             onStart={startRace}
           />
@@ -525,9 +715,18 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             activeSessions={sessionsByKey}
             expandedRaceId={expandedRaceId}
             onToggle={(raceId) => setExpandedRaceId((current) => current === raceId ? null : raceId)}
+            onDelete={requestDeleteRace}
           />
         </div>
       </div>
+
+      {pendingDeleteRace && (
+        <DeleteRaceConfirmDialog
+          race={pendingDeleteRace}
+          onCancel={() => setDeleteRaceId(null)}
+          onConfirm={confirmDeleteRace}
+        />
+      )}
     </section>
   );
 }
@@ -729,17 +928,50 @@ function RaceBuilder({
   session,
   draft,
   activeRace,
+  estimatedDurationSeconds,
   onDraftChange,
   onStart,
 }: {
   session: ActiveSession | null;
   draft: RaceDraft;
   activeRace: UsageRace | null;
+  estimatedDurationSeconds: number | null;
   onDraftChange: (draft: RaceDraft) => void;
   onStart: () => void;
 }) {
-  const targetPct = session ? clamp(parseDraftNumber(draft.targetPct, session.remainingNormPct), 0, Math.max(0.1, session.remainingNormPct)) : 0;
+  const maxTargetPct = session ? Math.max(1, Math.floor(session.remainingNormPct)) : 1;
+  const targetPct = session ? Math.round(clamp(parseDraftNumber(draft.targetPct, maxTargetPct), 1, maxTargetPct)) : 0;
   const targetRaw = session ? rawFromNorm(targetPct, session.totalPct) : 0;
+  const stepLabel = Math.round(clamp(parseDraftNumber(draft.stepPct, DEFAULT_STEP_PCT), 1, 20));
+  const durationParts = durationPartsFromMinutes(draft.durationMinutes);
+  const setDurationMinutes = (value: string) => {
+    const parsed = parseDraftNumber(value, durationParts.minutes);
+    onDraftChange({
+      ...draft,
+      durationMinutes: durationStringFromParts(Math.max(0, parsed), durationParts.seconds),
+    });
+  };
+  const setDurationSeconds = (value: string) => {
+    const parsed = parseDraftNumber(value, durationParts.seconds);
+    onDraftChange({
+      ...draft,
+      durationMinutes: durationStringFromParts(durationParts.minutes, clamp(parsed, 0, 59)),
+    });
+  };
+  const writeEstimatedDuration = () => {
+    if (estimatedDurationSeconds == null) return;
+    onDraftChange({
+      ...draft,
+      durationMinutes: durationStringFromSeconds(clamp(estimatedDurationSeconds, 60, 24 * 3600)),
+    });
+  };
+  const writeRemainingDuration = () => {
+    if (!session) return;
+    onDraftChange({
+      ...draft,
+      durationMinutes: durationStringFromSeconds(session.remainingSeconds),
+    });
+  };
   return (
     <div className="card p-0 overflow-hidden">
       <div className="px-4 py-2.5 flex items-center gap-2" style={{ borderBottom: "1px solid #3a3a3a" }}>
@@ -756,37 +988,73 @@ function RaceBuilder({
               <div className="text-[11px]" style={{ color: "#858585" }}>{providerLabel(session.provider)} · {formatLocalTime(session.resetAt)} 重置</div>
             </div>
             <div className="text-right font-mono" style={{ flexShrink: 0 }}>
-              <div className="text-xs" style={{ color: session.color }}>{session.currentNormPct.toFixed(1)}% / 100%</div>
-              <div className="text-[10px]" style={{ color: "#858585" }}>{session.currentRawPct.toFixed(0)} / {session.totalPct.toFixed(0)}</div>
+              <div className="text-xs" style={{ color: session.color }}>{formatWholePct(session.currentNormPct)} / 100%</div>
+              <div className="text-[10px]" style={{ color: "#858585" }}>{formatWhole(session.currentRawPct)} / {formatWhole(session.totalPct)}</div>
             </div>
           </div>
 
-          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-            <NumberField
-              label="倒计时 min"
-              value={draft.durationMinutes}
-              min={1}
-              onChange={(value) => onDraftChange({ ...draft, durationMinutes: value })}
-            />
-            <NumberField
-              label="用掉 %"
-              value={draft.targetPct}
-              min={0.1}
-              step={0.1}
-              onChange={(value) => onDraftChange({ ...draft, targetPct: value })}
-            />
-            <NumberField
-              label="分卷 %"
-              value={draft.stepPct}
-              min={0.1}
-              step={0.1}
-              onChange={(value) => onDraftChange({ ...draft, stepPct: value })}
-            />
+          <div className="space-y-1.5">
+            <div
+              className="grid gap-2 text-[11px] font-medium"
+              style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))", color: "#d4d4d4" }}
+            >
+              <span className="inline-flex items-center gap-1.5" style={{ gridColumn: "span 2", minWidth: 0 }}>
+                <span>多长时间完成</span>
+                <IconActionButton
+                  title={estimatedDurationSeconds == null ? "最近两个 session 暂无足够活跃额度记录" : `按最近两个 session 活跃速度估算：${formatShortDuration(estimatedDurationSeconds)}`}
+                  disabled={estimatedDurationSeconds == null}
+                  onClick={writeEstimatedDuration}
+                >
+                  <TimerReset size={12} />
+                </IconActionButton>
+                <IconActionButton
+                  title={`写入当前 session 剩余时间：${formatShortDuration(session.remainingSeconds)}`}
+                  onClick={writeRemainingDuration}
+                >
+                  <Timer size={12} />
+                </IconActionButton>
+              </span>
+              <span>总目标额度</span>
+              <span>每个小目标额度</span>
+            </div>
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+              <NumberField
+                value={String(durationParts.minutes)}
+                min={0}
+                step={1}
+                suffix="m"
+                onChange={setDurationMinutes}
+              />
+              <NumberField
+                value={String(durationParts.seconds)}
+                min={0}
+                max={59}
+                step={5}
+                suffix="s"
+                onChange={setDurationSeconds}
+              />
+              <NumberField
+                value={draft.targetPct}
+                min={1}
+                max={maxTargetPct}
+                step={1}
+                suffix="%"
+                onChange={(value) => onDraftChange({ ...draft, targetPct: value })}
+              />
+              <NumberField
+                value={draft.stepPct}
+                min={1}
+                max={20}
+                step={1}
+                suffix="%"
+                onChange={(value) => onDraftChange({ ...draft, stepPct: value })}
+              />
+            </div>
           </div>
 
           <div className="flex items-center justify-between gap-2 text-[11px]" style={{ color: "#a3a3a3" }}>
-            <span>默认每 {draft.stepPct || DEFAULT_STEP_PCT}% 自动记录一次</span>
-            <span className="font-mono" style={{ color: session.color }}>映射 {targetRaw.toFixed(1)} / {session.totalPct.toFixed(0)}</span>
+            <span>默认每 {stepLabel}% 自动记录一次</span>
+            <span className="font-mono" style={{ color: session.color }}>映射 {formatWhole(targetRaw)} / {formatWhole(session.totalPct)}</span>
           </div>
 
           <button
@@ -800,6 +1068,121 @@ function RaceBuilder({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function FocusedRaceView({
+  race,
+  session,
+  nowMs,
+  onBack,
+  onStop,
+}: {
+  race: UsageRace;
+  session: ActiveSession | undefined;
+  nowMs: number;
+  onBack: () => void;
+  onStop: () => void;
+}) {
+  const color = session?.color ?? providerColor(race.provider);
+  const consumed = raceConsumedDelta(race, session);
+  const progress = race.targetDeltaPct > 0 ? (consumed / race.targetDeltaPct) * 100 : 0;
+  const nextSegment = nextOpenSegment(race);
+  const currentSegmentStartMs = segmentStartMs(race, nextSegment);
+  const currentSegmentElapsed = nextSegment?.completedAt
+    ? nextSegment.elapsedSeconds
+    : Math.max(0, (nowMs - currentSegmentStartMs) / 1000);
+  const totalRemaining = (raceDeadlineMs(race) - nowMs) / 1000;
+  const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
+  const segmentRemaining = nextSegment && nextSegment.completedAt == null
+    ? Math.max(0, nextSegment.cumulativeDeltaPct - consumed)
+    : 0;
+  const plannedPerSegment = race.segments.length > 0 ? race.durationSeconds / race.segments.length : race.durationSeconds;
+  const targetRaw = rawFromNorm(race.targetDeltaPct, race.totalPct);
+  const consumedRaw = rawFromNorm(consumed, race.totalPct);
+  const deadlineIso = new Date(raceDeadlineMs(race)).toISOString();
+  const totalClockColor = race.status !== "completed" && totalRemaining <= 0 ? "#f87171" : color;
+  const segmentSubtext = race.status === "active" && nextSegment != null && nextSegment.completedAt == null
+    ? `#${nextSegment.index} 还差 ${formatWholePct(segmentRemaining)}`
+    : `${completedCount} / ${race.segments.length} 个小目标`;
+
+  return (
+    <div
+      className="card p-0 overflow-hidden"
+      style={{ minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column" }}
+    >
+      <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: "1px solid #3a3a3a" }}>
+        <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
+          <button
+            type="button"
+            title="返回主页"
+            onClick={onBack}
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db", flexShrink: 0 }}
+          >
+            <ArrowLeft size={15} />
+          </button>
+          <ProviderBadge provider={race.provider} color={color} />
+          <div style={{ minWidth: 0 }}>
+            <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+              <span className="text-sm font-semibold truncate" style={{ color: "#f3f4f6" }}>{race.alias}</span>
+              <StatusBadge status={race.status} />
+            </div>
+            <div className="text-[11px]" style={{ color: "#858585" }}>
+              {providerLabel(race.provider)} · {formatLocalTime(race.resetAt)} 重置
+            </div>
+          </div>
+        </div>
+        {race.status === "active" && (
+          <button
+            type="button"
+            title="停止记录"
+            onClick={onStop}
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #444", background: "#242424", color: "#aaa", flexShrink: 0 }}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      <div className="p-4 sm:p-5 space-y-5" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <div className="grid gap-3 sm:gap-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
+          <FocusTimerCard
+            label="当前小目标"
+            value={formatDigitalClock(currentSegmentElapsed)}
+            subtext={`${segmentSubtext} · 计划 ${formatShortDuration(plannedPerSegment)}`}
+            color={color}
+          />
+          <FocusTimerCard
+            label="总倒计时"
+            value={formatDigitalClock(Math.max(0, totalRemaining))}
+            subtext={`${formatLocalTime(deadlineIso)} 结束`}
+            color={totalClockColor}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span style={{ color: "#d4d4d4" }}>竞赛进度</span>
+            <span className="font-mono" style={{ color }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</span>
+          </div>
+          <ProgressBar pct={progress} total={100} />
+          <div className="grid gap-2 text-[11px]" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", color: "#858585" }}>
+            <span>映射 {formatWhole(consumedRaw)} / {formatWhole(targetRaw)}</span>
+            <span>每 {formatWholePct(race.stepPct)} 自动记录一次</span>
+            <span>{completedCount} / {race.segments.length} 个小目标</span>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <div className="text-xs font-medium mb-2" style={{ color: "#d4d4d4" }}>自动记录</div>
+          <div style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
+            <SegmentList race={race} compact={false} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -849,11 +1232,113 @@ function ActiveRacePanel({
         <div>
           <div className="flex items-center justify-between text-[11px] mb-1">
             <span style={{ color: "#a3a3a3" }}>{completedCount} / {race.segments.length} 个小目标</span>
-            <span className="font-mono" style={{ color: providerColor(race.provider) }}>{consumed.toFixed(1)} / {race.targetDeltaPct.toFixed(1)}%</span>
+            <span className="font-mono" style={{ color: providerColor(race.provider) }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</span>
           </div>
           <ProgressBar pct={progress} total={100} />
         </div>
         <SegmentList race={race} compact={false} />
+      </div>
+    </div>
+  );
+}
+
+function DeleteRaceConfirmDialog({
+  race,
+  onCancel,
+  onConfirm,
+}: {
+  race: UsageRace;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const isActive = race.status === "active";
+  const message = isActive
+    ? "这条竞赛仍在进行，删除后会停止记录，并从历史里移除。"
+    : "删除后会从历史竞赛列表移除，本地记录不会再显示。";
+
+  return (
+    <div
+      role="presentation"
+      onMouseDown={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 80,
+        padding: 18,
+        background: "rgba(0, 0, 0, 0.58)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-race-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: "min(420px, 100%)",
+          borderRadius: 10,
+          border: "1px solid #443333",
+          background: "#202020",
+          boxShadow: "0 18px 50px rgba(0, 0, 0, 0.48)",
+          overflow: "hidden",
+        }}
+      >
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid #333" }}>
+          <span
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, background: "#2b1d1d", color: "#fca5a5", flexShrink: 0 }}
+          >
+            <Trash2 size={15} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div id="delete-race-title" className="text-sm font-semibold" style={{ color: "#f3f4f6" }}>删除历史竞赛</div>
+            <div className="text-[11px] truncate" style={{ color: "#858585" }}>{race.alias}</div>
+          </div>
+        </div>
+
+        <div className="px-4 py-4 space-y-3">
+          <p className="text-sm" style={{ color: "#d4d4d4", margin: 0 }}>{message}</p>
+          <div
+            className="grid gap-2 text-[11px]"
+            style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", color: "#858585" }}
+          >
+            <span>{providerLabel(race.provider)}</span>
+            <span className="text-right">{formatLocalTime(race.startedAt)}</span>
+            <span>目标 {formatWholePct(race.targetDeltaPct)}</span>
+            <span className="text-right">分卷 {race.segments.length}</span>
+          </div>
+        </div>
+
+        <div className="px-4 py-3 flex items-center justify-end gap-2" style={{ borderTop: "1px solid #333" }}>
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="inline-flex items-center justify-center"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #444", background: "#262626", color: "#d4d4d4" }}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #7f2f2f", background: "#3a1f1f", color: "#fecaca" }}
+          >
+            <Trash2 size={13} />
+            删除
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -864,11 +1349,13 @@ function RaceHistoryPanel({
   activeSessions,
   expandedRaceId,
   onToggle,
+  onDelete,
 }: {
   races: UsageRace[];
   activeSessions: Map<string, ActiveSession>;
   expandedRaceId: string | null;
   onToggle: (raceId: string) => void;
+  onDelete: (raceId: string) => void;
 }) {
   return (
     <div className="card p-0 overflow-hidden">
@@ -887,31 +1374,42 @@ function RaceHistoryPanel({
             const expanded = expandedRaceId === race.id;
             return (
               <div key={race.id}>
-                <button
-                  type="button"
-                  onClick={() => onToggle(race.id)}
-                  className="w-full px-4 py-3 flex items-center gap-3"
-                  style={{ border: 0, background: "#202020", textAlign: "left", cursor: "pointer" }}
-                >
-                  <ChevronRight
-                    size={14}
-                    style={{
-                      color: "#858585",
-                      transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-                      transition: "transform 120ms ease",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <StatusBadge status={race.status} />
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div className="text-xs font-semibold truncate" style={{ color: "#ddd" }}>{race.alias}</div>
-                    <div className="text-[10px]" style={{ color: "#858585" }}>{formatLocalTime(race.startedAt)} · {formatShortDuration(race.durationSeconds)}</div>
-                  </div>
-                  <div className="text-right font-mono" style={{ flexShrink: 0 }}>
-                    <div className="text-xs" style={{ color: providerColor(race.provider) }}>{consumed.toFixed(1)} / {race.targetDeltaPct.toFixed(1)}%</div>
-                    <div className="text-[10px]" style={{ color: "#858585" }}>{completed}/{race.segments.length}</div>
-                  </div>
-                </button>
+                <div className="px-4 py-3 flex items-center gap-2" style={{ background: "#202020" }}>
+                  <button
+                    type="button"
+                    onClick={() => onToggle(race.id)}
+                    className="flex items-center gap-3"
+                    style={{ flex: 1, minWidth: 0, border: 0, background: "transparent", textAlign: "left", cursor: "pointer", padding: 0 }}
+                  >
+                    <ChevronRight
+                      size={14}
+                      style={{
+                        color: "#858585",
+                        transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+                        transition: "transform 120ms ease",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <StatusBadge status={race.status} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="text-xs font-semibold truncate" style={{ color: "#ddd" }}>{race.alias}</div>
+                      <div className="text-[10px]" style={{ color: "#858585" }}>{formatLocalTime(race.startedAt)} · {formatShortDuration(race.durationSeconds)}</div>
+                    </div>
+                    <div className="text-right font-mono" style={{ flexShrink: 0 }}>
+                      <div className="text-xs" style={{ color: providerColor(race.provider) }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</div>
+                      <div className="text-[10px]" style={{ color: "#858585" }}>{completed}/{race.segments.length}</div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    title="删除这条竞赛记录"
+                    onClick={() => onDelete(race.id)}
+                    className="inline-flex items-center justify-center"
+                    style={{ width: 26, height: 26, borderRadius: 6, border: "1px solid #443333", background: "#251f1f", color: "#fca5a5", flexShrink: 0 }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
                 {expanded && (
                   <div className="px-4 pb-3" style={{ background: "#202020" }}>
                     <SegmentList race={race} compact />
@@ -947,10 +1445,10 @@ function SegmentList({ race, compact }: { race: UsageRace; compact: boolean }) {
             {segment.completedAt ? <Trophy size={12} /> : <Flag size={12} />}
           </span>
           <span className="font-mono" style={{ width: 58, flexShrink: 0 }}>
-            #{segment.index} +{segment.targetDeltaPct.toFixed(1)}%
+            #{segment.index} +{formatWholePct(segment.targetDeltaPct)}
           </span>
           <span className="font-mono" style={{ flex: 1, minWidth: 0 }}>
-            到 {segment.cumulativeDeltaPct.toFixed(1)}%
+            到 {formatWholePct(segment.cumulativeDeltaPct)}
           </span>
           <span className="font-mono" style={{ width: 62, textAlign: "right", flexShrink: 0 }}>
             {segment.completedAt ? formatShortDuration(segment.elapsedSeconds) : "等待"}
@@ -968,28 +1466,173 @@ function NumberField({
   label,
   value,
   min,
+  max = Infinity,
   step = 1,
+  suffix,
+  precision = 0,
   onChange,
+}: {
+  label?: string;
+  value: string;
+  min: number;
+  max?: number;
+  step?: number;
+  suffix?: string;
+  precision?: number;
+  onChange: (value: string) => void;
+}) {
+  const currentValue = parseDraftNumber(value, min);
+  const applyValue = (nextValue: number) => {
+    const clamped = clamp(nextValue, min, max);
+    onChange(formatDraftNumber(clamped, precision));
+  };
+  const adjust = (direction: 1 | -1) => applyValue(currentValue + direction * step);
+
+  return (
+    <label style={{ minWidth: 0 }}>
+      {label && <span className="block text-[11px] mb-1 font-medium" style={{ color: "#d4d4d4" }}>{label}</span>}
+      <div className="flex items-stretch" style={{ minWidth: 0 }}>
+        <div className="flex flex-col" style={{ flexShrink: 0, border: "1px solid #383838", borderRight: 0, borderRadius: "7px 0 0 7px", overflow: "hidden" }}>
+          <button
+            type="button"
+            title="增加"
+            onClick={() => adjust(1)}
+            className="inline-flex items-center justify-center"
+            style={{ width: 22, height: 17, border: 0, borderBottom: "1px solid #383838", background: "#252525", color: "#aaa", cursor: "pointer" }}
+          >
+            <ChevronUp size={12} />
+          </button>
+          <button
+            type="button"
+            title="减少"
+            onClick={() => adjust(-1)}
+            className="inline-flex items-center justify-center"
+            style={{ width: 22, height: 17, border: 0, background: "#252525", color: "#aaa", cursor: "pointer" }}
+          >
+            <ChevronDown size={12} />
+          </button>
+        </div>
+        <div style={{ position: "relative", minWidth: 0, flex: 1 }}>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={value}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (next === "" || /^\d+$/.test(next)) onChange(next);
+            }}
+            onBlur={() => applyValue(currentValue)}
+            className="input-field"
+            style={{
+              height: 34,
+              padding: suffix ? "0 24px 0 8px" : "0 8px",
+              borderRadius: "0 7px 7px 0",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              appearance: "none",
+            }}
+          />
+          {suffix && (
+            <span
+              className="text-[10px]"
+              style={{
+                position: "absolute",
+                right: 8,
+                top: "50%",
+                transform: "translateY(-50%)",
+                color: "#858585",
+                pointerEvents: "none",
+              }}
+            >
+              {suffix}
+            </span>
+          )}
+        </div>
+      </div>
+    </label>
+  );
+}
+
+function IconActionButton({
+  title,
+  disabled = false,
+  color = "#d4d4d4",
+  onClick,
+  children,
+}: {
+  title: string;
+  disabled?: boolean;
+  color?: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className="inline-flex items-center justify-center"
+      style={{
+        width: 22,
+        height: 20,
+        borderRadius: 5,
+        border: "1px solid #383838",
+        background: "#252525",
+        color: disabled ? "#5f5f5f" : color,
+        cursor: disabled ? "not-allowed" : "pointer",
+        flexShrink: 0,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function FocusTimerCard({
+  label,
+  value,
+  subtext,
+  color,
 }: {
   label: string;
   value: string;
-  min: number;
-  step?: number;
-  onChange: (value: string) => void;
+  subtext: string;
+  color: string;
 }) {
+  const fontSize = value.length > 5 ? 44 : 52;
   return (
-    <label style={{ minWidth: 0 }}>
-      <span className="block text-[11px] mb-1" style={{ color: "#858585" }}>{label}</span>
-      <input
-        type="number"
-        min={min}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="input-field"
-        style={{ height: 34, padding: "0 9px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
-      />
-    </label>
+    <div
+      className="text-center"
+      style={{
+        minHeight: 210,
+        borderRadius: 8,
+        border: "1px solid #383838",
+        background: "#242424",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        padding: "22px 14px",
+        minWidth: 0,
+      }}
+    >
+      <div className="text-sm font-medium mb-3" style={{ color: "#d4d4d4" }}>{label}</div>
+      <div
+        className="font-mono font-bold"
+        style={{
+          color,
+          fontSize,
+          lineHeight: 1,
+          letterSpacing: 0,
+          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {value}
+      </div>
+      <div className="text-xs mt-3" style={{ color: "#858585" }}>{subtext}</div>
+    </div>
   );
 }
 
@@ -1048,7 +1691,7 @@ function CircularPercent({ pct, color, size = 44 }: { pct: number; color: string
     <span
       className="inline-flex items-center justify-center font-mono"
       style={{ position: "relative", width: size, height: size, color, flexShrink: 0 }}
-      title={`${safePct.toFixed(1)}%`}
+      title={formatWholePct(safePct)}
     >
       <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} aria-hidden="true" style={{ position: "absolute", inset: 0 }}>
         <circle cx={center} cy={center} r={radius} fill="none" stroke="#3a3a3a" strokeWidth={strokeWidth} />

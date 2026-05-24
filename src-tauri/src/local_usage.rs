@@ -2,7 +2,9 @@ use crate::db::Database;
 use crate::models::UsageSnapshot;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, TimeZone, Utc};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER, USER_AGENT,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -17,11 +19,19 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const COLLECT_INTERVAL_SECONDS: u64 = 20;
-const CLAUDE_COLLECT_MIN_SECONDS: u64 = 120;
+const CLAUDE_COLLECT_MIN_SECONDS: u64 = 20;
+const CLAUDE_RATE_LIMIT_FALLBACK_SECONDS: u64 = 5 * 60;
+const RATE_LIMIT_RETRY_AFTER_MARKER: &str = "rate_limit_retry_after_seconds=";
 const SESSION_RESET_SIGNIFICANT_SECONDS: i64 = 4 * 60 * 60;
 const WEEKLY_RESET_SIGNIFICANT_SECONDS: i64 = 12 * 60 * 60;
 
-static LAST_CLAUDE_COLLECT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+#[derive(Default)]
+struct ClaudeCollectState {
+    last_attempt: Option<Instant>,
+    rate_limited_until: Option<Instant>,
+}
+
+static CLAUDE_COLLECT_STATE: OnceLock<Mutex<ClaudeCollectState>> = OnceLock::new();
 
 pub async fn run_background_collector(db: Arc<Database>) {
     collect_once(Arc::clone(&db)).await;
@@ -60,6 +70,7 @@ pub async fn collect_once(db: Arc<Database>) {
     if should_collect_claude() {
         match collect_claude_oauth(db.as_ref()).await {
             Ok(Some(snapshot)) => {
+                clear_claude_rate_limit();
                 let message = format!(
                     "Claude OAuth ok: {} session={:?} weekly={:?}",
                     snapshot.account_alias, snapshot.session_pct, snapshot.weekly_pct
@@ -70,6 +81,7 @@ pub async fn collect_once(db: Arc<Database>) {
                     db.set_local_usage_status("claude_code", Some(&account_alias), true, &message);
             }
             Ok(None) => {
+                clear_claude_rate_limit();
                 let _ = db.set_local_usage_status(
                     "claude_code",
                     None,
@@ -78,7 +90,27 @@ pub async fn collect_once(db: Arc<Database>) {
                 );
             }
             Err(error) => {
-                if error.contains("HTTP 429") && has_cached_snapshot(&db, "claude_code") {
+                if let Some(retry_after_seconds) = claude_rate_limit_retry_after_seconds(&error) {
+                    schedule_claude_rate_limit(retry_after_seconds);
+                    let message = format!(
+                        "Claude OAuth rate limited; retrying after {}",
+                        format_retry_after(retry_after_seconds)
+                    );
+                    if has_cached_snapshot(&db, "claude_code") {
+                        let _ = db.set_local_usage_status(
+                            "claude_code",
+                            latest_cached_alias(&db, "claude_code").as_deref(),
+                            true,
+                            &message,
+                        );
+                    } else {
+                        let _ = db.set_local_usage_status("claude_code", None, false, &message);
+                    }
+                    eprintln!(
+                        "[local-usage] Claude OAuth rate limited; retrying after {}: {error}",
+                        format_retry_after(retry_after_seconds)
+                    );
+                } else if error.contains("HTTP 429") && has_cached_snapshot(&db, "claude_code") {
                     let _ = db.set_local_usage_status(
                         "claude_code",
                         latest_cached_alias(&db, "claude_code").as_deref(),
@@ -145,16 +177,70 @@ fn reset_shift_is_significant(
 }
 
 fn should_collect_claude() -> bool {
-    let state = LAST_CLAUDE_COLLECT.get_or_init(|| Mutex::new(None));
-    let mut last = state.lock().unwrap();
+    let state = CLAUDE_COLLECT_STATE.get_or_init(|| Mutex::new(ClaudeCollectState::default()));
+    let mut state = state.lock().unwrap();
     let now = Instant::now();
-    if let Some(previous) = *last {
+    if let Some(until) = state.rate_limited_until {
+        if now < until {
+            return false;
+        }
+        state.rate_limited_until = None;
+    }
+    if let Some(previous) = state.last_attempt {
         if now.duration_since(previous) < Duration::from_secs(CLAUDE_COLLECT_MIN_SECONDS) {
             return false;
         }
     }
-    *last = Some(now);
+    state.last_attempt = Some(now);
     true
+}
+
+fn schedule_claude_rate_limit(retry_after_seconds: u64) {
+    let state = CLAUDE_COLLECT_STATE.get_or_init(|| Mutex::new(ClaudeCollectState::default()));
+    let mut state = state.lock().unwrap();
+    state.rate_limited_until =
+        Some(Instant::now() + Duration::from_secs(retry_after_seconds.max(1)));
+}
+
+fn clear_claude_rate_limit() {
+    let state = CLAUDE_COLLECT_STATE.get_or_init(|| Mutex::new(ClaudeCollectState::default()));
+    let mut state = state.lock().unwrap();
+    state.rate_limited_until = None;
+}
+
+fn claude_rate_limit_retry_after_seconds(error: &str) -> Option<u64> {
+    if !error.contains("rate_limit_error") {
+        return None;
+    }
+    error
+        .split(RATE_LIMIT_RETRY_AFTER_MARKER)
+        .nth(1)
+        .and_then(|tail| tail.split(|ch: char| !ch.is_ascii_digit()).next())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .or(Some(CLAUDE_RATE_LIMIT_FALLBACK_SECONDS))
+        .map(|seconds| seconds.max(1))
+}
+
+fn format_retry_after(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    let rest_seconds = seconds % 60;
+    if minutes < 60 {
+        if rest_seconds == 0 {
+            return format!("{minutes}m");
+        }
+        return format!("{minutes}m{rest_seconds}s");
+    }
+    let hours = minutes / 60;
+    let rest_minutes = minutes % 60;
+    if rest_minutes == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h{rest_minutes}m")
+    }
 }
 
 fn has_cached_snapshot(db: &Database, provider: &str) -> bool {
@@ -447,14 +533,35 @@ async fn fetch_claude_usage(access_token: &str) -> Result<ClaudeOAuthUsageRespon
         .await
         .map_err(reqwest_error_detail)?;
     let status = response.status();
+    let retry_after = parse_retry_after_seconds(response.headers());
     let body = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
+        let body_preview = body.chars().take(200).collect::<String>();
+        if status.as_u16() == 429 && body.contains("rate_limit_error") {
+            let retry_after_seconds = retry_after.unwrap_or(CLAUDE_RATE_LIMIT_FALLBACK_SECONDS);
+            return Err(format!(
+                "HTTP {status}: {body_preview} ({RATE_LIMIT_RETRY_AFTER_MARKER}{retry_after_seconds})"
+            ));
+        }
         return Err(format!(
             "HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
+            body_preview
         ));
     }
     serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+fn parse_retry_after_seconds(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.max(1));
+    }
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?.with_timezone(&Utc);
+    let seconds = retry_at.signed_duration_since(Utc::now()).num_seconds();
+    Some(seconds.max(1) as u64)
 }
 
 fn claude_auth_status() -> Result<ClaudeAuthStatus, String> {
@@ -662,7 +769,7 @@ impl CodexUsageResponse {
     fn quota_multiplier(&self) -> f64 {
         let plan = self.plan_type.as_deref().unwrap_or("").to_ascii_lowercase();
         if plan.contains("pro") {
-            10.0
+            5.0
         } else {
             1.0
         }

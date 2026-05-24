@@ -90,6 +90,7 @@ impl Database {
         db.migrate()?;
         db.import_legacy_database()?;
         db.normalize_pct_scale()?;
+        db.normalize_codex_pro_scale()?;
         db.merge_generic_plan_aliases()?;
         db.dedupe_consecutive_snapshots()?;
         Ok(db)
@@ -173,12 +174,6 @@ impl Database {
                 message       TEXT    NOT NULL,
                 updated_at    TEXT    NOT NULL
             );
-            UPDATE usage_snapshots
-            SET session_total_pct = 1000
-            WHERE provider = 'codex' AND session_total_pct = 100;
-            UPDATE usage_snapshots
-            SET weekly_total_pct = 1000
-            WHERE provider = 'codex' AND weekly_total_pct = 100;
         ",
         )?;
         drop(conn);
@@ -474,6 +469,55 @@ impl Database {
               AND weekly_pct  IS NOT NULL
               AND session_pct < 1.5
               AND weekly_pct  < 1.5;
+        ",
+        )?;
+        Ok(())
+    }
+
+    /// Codex GPT Pro is a 5x quota. Older builds stored Codex Pro as 10x.
+    fn normalize_codex_pro_scale(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "
+            UPDATE usage_snapshots
+            SET session_pct = CASE
+                    WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
+                    WHEN session_total_pct = 100 AND session_pct IS NOT NULL THEN session_pct * 5
+                    ELSE session_pct
+                END,
+                session_total_pct = 500
+            WHERE provider = 'codex'
+              AND session_total_pct IN (100, 1000);
+
+            UPDATE usage_snapshots
+            SET weekly_pct = CASE
+                    WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
+                    WHEN weekly_total_pct = 100 AND weekly_pct IS NOT NULL THEN weekly_pct * 5
+                    ELSE weekly_pct
+                END,
+                weekly_total_pct = 500
+            WHERE provider = 'codex'
+              AND weekly_total_pct IN (100, 1000);
+
+            UPDATE filtered_inbox
+            SET session_pct = CASE
+                    WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
+                    WHEN session_total_pct = 100 AND session_pct IS NOT NULL THEN session_pct * 5
+                    ELSE session_pct
+                END,
+                session_total_pct = 500
+            WHERE provider = 'codex'
+              AND session_total_pct IN (100, 1000);
+
+            UPDATE filtered_inbox
+            SET weekly_pct = CASE
+                    WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
+                    WHEN weekly_total_pct = 100 AND weekly_pct IS NOT NULL THEN weekly_pct * 5
+                    ELSE weekly_pct
+                END,
+                weekly_total_pct = 500
+            WHERE provider = 'codex'
+              AND weekly_total_pct IN (100, 1000);
         ",
         )?;
         Ok(())
