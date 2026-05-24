@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowLeft,
@@ -20,13 +20,21 @@ import { useAccountColors, useAllHistories } from "../hooks/useData";
 import ProgressBar from "./ProgressBar";
 import { formatLocalTime } from "../utils/format";
 import {
+  loadHighlightedQuotaRaceSegment,
   notifyQuotaRacesUpdated,
   QUOTA_RACE_FOCUSED_STORAGE_KEY,
+  QUOTA_RACE_UPDATED_EVENT,
   QUOTA_RACE_SELECTED_STORAGE_KEY,
   QUOTA_RACES_STORAGE_KEY,
   setFocusedQuotaRaceId,
   setSelectedQuotaRaceAccountKey,
 } from "../utils/quotaRaceStorage";
+import {
+  dispatchQuotaRaceSettled,
+  dispatchQuotaSegmentCompleted,
+  type QuotaRaceSettledDetail,
+  type QuotaSegmentCompletedDetail,
+} from "../utils/quotaRaceEvents";
 
 const SESSION_HOURS = 5;
 const PX_PER_HOUR = 72;
@@ -575,15 +583,65 @@ function segmentTiming(race: UsageRace, segment: RaceSegment, nowMs?: number) {
   };
 }
 
+function completedSegmentNotice(
+  race: UsageRace,
+  segment: RaceSegment,
+  session: ActiveSession | undefined,
+): QuotaSegmentCompletedDetail {
+  const consumed = raceConsumedDelta(race, session);
+  return {
+    raceId: race.id,
+    provider: race.provider,
+    alias: race.alias,
+    accountKey: race.accountKey,
+    segmentIndex: segment.index,
+    segmentsTotal: race.segments.length,
+    targetDeltaPct: segment.targetDeltaPct,
+    cumulativeDeltaPct: segment.cumulativeDeltaPct,
+    actualDeltaPct: segment.actualDeltaPct ?? Math.min(consumed, segment.cumulativeDeltaPct),
+    raceTargetDeltaPct: race.targetDeltaPct,
+    totalPct: race.totalPct,
+    elapsedSeconds: segment.elapsedSeconds ?? 0,
+    completedAt: segment.completedAt ?? new Date().toISOString(),
+  };
+}
+
+function raceSettlementNotice(
+  race: UsageRace,
+  session: ActiveSession | undefined,
+  nowMs: number,
+): QuotaRaceSettledDetail | null {
+  if (race.status !== "completed" && race.status !== "expired" && race.status !== "lost") return null;
+  const consumed = raceConsumedDelta(race, session);
+  return {
+    raceId: race.id,
+    provider: race.provider,
+    alias: race.alias,
+    accountKey: race.accountKey,
+    status: race.status,
+    targetDeltaPct: race.targetDeltaPct,
+    consumedDeltaPct: consumed,
+    totalPct: race.totalPct,
+    completedSegments: race.segments.filter((segment) => segment.completedAt != null).length,
+    segmentsTotal: race.segments.length,
+    elapsedSeconds: raceElapsedSeconds(race, nowMs),
+  };
+}
+
 export default function SessionRacePanel({ snapshots, recommendation: _recommendation, pluginUsageStatuses, onRefresh }: Props) {
   void _recommendation;
   const { colors } = useAccountColors();
   const { histories, refetch: refetchHistories, loading: historiesLoading } = useAllHistories();
+  const notifiedSegmentKeysRef = useRef<Set<string>>(new Set());
+  const segmentNotificationsReadyRef = useRef(false);
+  const notifiedSettlementKeysRef = useRef<Set<string>>(new Set());
+  const settlementNotificationsReadyRef = useRef(false);
   const [nowMs, setNowMs] = useState(Date.now());
   const [races, setRaces] = useState<UsageRace[]>(() => loadRaces());
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
   const [focusedRaceId, setFocusedRaceId] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
+  const [highlightSegment, setHighlightSegment] = useState(() => loadHighlightedQuotaRaceSegment());
   const [showHistoryView, setShowHistoryView] = useState(false);
   const [deleteRaceId, setDeleteRaceId] = useState<string | null>(null);
   const [draftSeedKey, setDraftSeedKey] = useState<string | null>(null);
@@ -592,6 +650,20 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const syncRaceNavigationState = () => {
+      setSelectedKey(localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
+      setFocusedRaceId(localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
+      setHighlightSegment(loadHighlightedQuotaRaceSegment());
+    };
+    window.addEventListener(QUOTA_RACE_UPDATED_EVENT, syncRaceNavigationState);
+    window.addEventListener("storage", syncRaceNavigationState);
+    return () => {
+      window.removeEventListener(QUOTA_RACE_UPDATED_EVENT, syncRaceNavigationState);
+      window.removeEventListener("storage", syncRaceNavigationState);
+    };
   }, []);
 
   const activeRaces = useMemo(
@@ -640,6 +712,53 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   useEffect(() => {
     setRaces((previous) => updateRaceProgress(previous, sessionsByKey, nowMs));
   }, [nowMs, sessionsByKey]);
+
+  useEffect(() => {
+    const completedSegments: Array<{ key: string; detail: QuotaSegmentCompletedDetail }> = [];
+    for (const race of races) {
+      for (const segment of race.segments) {
+        if (segment.completedAt == null) continue;
+        const key = `${race.id}:${segment.index}`;
+        completedSegments.push({
+          key,
+          detail: completedSegmentNotice(race, segment, sessionsByKey.get(race.accountKey)),
+        });
+      }
+    }
+
+    if (!segmentNotificationsReadyRef.current) {
+      for (const { key } of completedSegments) notifiedSegmentKeysRef.current.add(key);
+      segmentNotificationsReadyRef.current = true;
+      return;
+    }
+
+    for (const { key, detail } of completedSegments) {
+      if (notifiedSegmentKeysRef.current.has(key)) continue;
+      notifiedSegmentKeysRef.current.add(key);
+      dispatchQuotaSegmentCompleted(detail);
+    }
+  }, [races, sessionsByKey]);
+
+  useEffect(() => {
+    const settledRaces: Array<{ key: string; detail: QuotaRaceSettledDetail }> = [];
+    for (const race of races) {
+      const detail = raceSettlementNotice(race, sessionsByKey.get(race.accountKey), nowMs);
+      if (!detail) continue;
+      settledRaces.push({ key: `${race.id}:${race.status}`, detail });
+    }
+
+    if (!settlementNotificationsReadyRef.current) {
+      for (const { key } of settledRaces) notifiedSettlementKeysRef.current.add(key);
+      settlementNotificationsReadyRef.current = true;
+      return;
+    }
+
+    for (const { key, detail } of settledRaces) {
+      if (notifiedSettlementKeysRef.current.has(key)) continue;
+      notifiedSettlementKeysRef.current.add(key);
+      dispatchQuotaRaceSettled(detail);
+    }
+  }, [nowMs, races, sessionsByKey]);
 
   useEffect(() => {
     const session = selectedKey ? sessionsByKey.get(selectedKey) : null;
@@ -758,12 +877,14 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   }, [focusedRace, focusedRaceId]);
 
   if (focusedRace) {
+    const highlightedSegmentIndex = highlightSegment?.raceId === focusedRace.id ? highlightSegment.segmentIndex : null;
     return (
       <section>
         <FocusedRaceView
           race={focusedRace}
           session={sessionsByKey.get(focusedRace.accountKey)}
           nowMs={nowMs}
+          highlightSegmentIndex={highlightedSegmentIndex}
           onBack={() => setFocusedRaceId(null)}
           onStop={() => stopRace(focusedRace.id)}
         />
@@ -1277,12 +1398,14 @@ function FocusedRaceView({
   race,
   session,
   nowMs,
+  highlightSegmentIndex,
   onBack,
   onStop,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
+  highlightSegmentIndex: number | null;
   onBack: () => void;
   onStop: () => void;
 }) {
@@ -1329,6 +1452,7 @@ function FocusedRaceView({
         race={race}
         session={session}
         nowMs={liveNowMs}
+        highlightSegmentIndex={highlightSegmentIndex}
         onBack={onBack}
       />
     );
@@ -1412,7 +1536,7 @@ function FocusedRaceView({
         <div style={{ flex: 1, minHeight: 0 }}>
           <div className="text-xs font-medium mb-2" style={{ color: "#d4d4d4" }}>自动记录</div>
           <div style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
-            <SegmentList race={race} compact={false} nowMs={liveNowMs} />
+            <SegmentList race={race} compact={false} nowMs={liveNowMs} highlightIndex={highlightSegmentIndex} />
           </div>
         </div>
       </div>
@@ -1424,11 +1548,13 @@ function RaceSettlementView({
   race,
   session,
   nowMs,
+  highlightSegmentIndex,
   onBack,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
+  highlightSegmentIndex: number | null;
   onBack: () => void;
 }) {
   const isWin = race.status === "completed";
@@ -1451,8 +1577,6 @@ function RaceSettlementView({
       className="card p-0 overflow-hidden"
       style={{ minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column", position: "relative" }}
     >
-      <RaceSettlementEffect status={race.status} color={toneColor} />
-
       <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: "1px solid #3a3a3a", position: "relative", zIndex: 2 }}>
         <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
           <button
@@ -1522,7 +1646,7 @@ function RaceSettlementView({
           </div>
           <ProgressBar pct={progress} total={100} />
           <div className="mt-3" style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
-            <SegmentList race={race} compact={false} />
+            <SegmentList race={race} compact={false} highlightIndex={highlightSegmentIndex} />
           </div>
         </div>
       </div>
@@ -1543,77 +1667,6 @@ function SettlementMetric({ label, value, color }: { label: string; value: strin
     >
       <div className="text-[11px]" style={{ color: "#858585" }}>{label}</div>
       <div className="font-mono text-sm font-semibold truncate" style={{ color, marginTop: 2 }}>{value}</div>
-    </div>
-  );
-}
-
-function RaceSettlementEffect({ status, color }: { status: RaceStatus; color: string }) {
-  const isWin = status === "completed";
-  const pieces = Array.from({ length: isWin ? 34 : 18 }, (_, index) => index);
-  const colors = isWin
-    ? ["#c084fc", "#a78bfa", "#e879f9", "#4ade80", "#f6c177"]
-    : ["#f87171", "#fb7185", "#7f1d1d", "#d4d4d4"];
-
-  return (
-    <div aria-hidden="true" style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", zIndex: 1 }}>
-      <style>
-        {`
-          @keyframes quota-race-confetti-fall {
-            0% { transform: translate3d(0, -26px, 0) rotate(0deg); opacity: 0; }
-            12% { opacity: 1; }
-            100% { transform: translate3d(var(--drift), calc(100vh - 120px), 0) rotate(520deg); opacity: 0; }
-          }
-          @keyframes quota-race-victory-pulse {
-            0%, 100% { opacity: 0.18; transform: scale(0.96); }
-            50% { opacity: 0.34; transform: scale(1.04); }
-          }
-          @keyframes quota-race-defeat-fall {
-            0% { transform: translate3d(0, -34px, 0) rotate(0deg); opacity: 0; }
-            18% { opacity: 0.88; }
-            100% { transform: translate3d(var(--drift), calc(100vh - 100px), 0) rotate(-120deg); opacity: 0; }
-          }
-          @keyframes quota-race-defeat-pulse {
-            0%, 100% { opacity: 0.16; }
-            50% { opacity: 0.3; }
-          }
-        `}
-      </style>
-      <div
-        style={{
-          position: "absolute",
-          inset: "16% 18%",
-          borderRadius: 999,
-          background: `radial-gradient(circle, ${color}38 0%, transparent 62%)`,
-          animation: `${isWin ? "quota-race-victory-pulse" : "quota-race-defeat-pulse"} ${isWin ? 2.2 : 1.4}s ease-in-out infinite`,
-        }}
-      />
-      {pieces.map((piece) => {
-        const left = (piece * 29 + (isWin ? 7 : 13)) % 100;
-        const width = isWin ? 6 + (piece % 3) * 2 : 3 + (piece % 2) * 2;
-        const height = isWin ? 14 + (piece % 4) * 3 : 22 + (piece % 4) * 4;
-        const delay = piece * (isWin ? 0.055 : 0.08);
-        const duration = isWin ? 2.2 + (piece % 5) * 0.22 : 1.45 + (piece % 4) * 0.18;
-        const drift = `${((piece % 9) - 4) * (isWin ? 15 : 8)}px`;
-        return (
-          <span
-            key={piece}
-            style={{
-              position: "absolute",
-              top: -34,
-              left: `${left}%`,
-              width,
-              height,
-              borderRadius: isWin ? 2 : 999,
-              background: colors[piece % colors.length],
-              opacity: 0,
-              transformOrigin: "center",
-              ["--drift" as string]: drift,
-              animation: `${isWin ? "quota-race-confetti-fall" : "quota-race-defeat-fall"} ${duration}s linear ${delay}s ${isWin ? 2 : 3}`,
-              boxShadow: isWin ? "none" : "0 0 12px rgba(248, 113, 113, 0.28)",
-            }}
-          />
-        );
-      })}
     </div>
   );
 }
@@ -1913,9 +1966,27 @@ function RaceHistoryPanel({
   );
 }
 
-function SegmentList({ race, compact, nowMs }: { race: UsageRace; compact: boolean; nowMs?: number }) {
-  const visibleSegments = compact ? race.segments : race.segments.slice(0, 16);
+function SegmentList({
+  race,
+  compact,
+  nowMs,
+  highlightIndex = null,
+}: {
+  race: UsageRace;
+  compact: boolean;
+  nowMs?: number;
+  highlightIndex?: number | null;
+}) {
+  const highlightedRef = useRef<HTMLDivElement | null>(null);
+  const visibleCount = highlightIndex != null ? Math.max(16, highlightIndex) : 16;
+  const visibleSegments = compact ? race.segments : race.segments.slice(0, visibleCount);
   const currentOpen = openSegment(race);
+
+  useEffect(() => {
+    if (highlightIndex == null) return;
+    highlightedRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightIndex, race.id]);
+
   return (
     <div className="space-y-1.5">
       {visibleSegments.map((segment) => {
@@ -1924,16 +1995,21 @@ function SegmentList({ race, compact, nowMs }: { race: UsageRace; compact: boole
         const segmentTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isSegmentOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
         const totalTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isTotalOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
         const isCurrent = currentOpen?.index === segment.index && race.status === "active";
+        const isHighlighted = highlightIndex === segment.index;
         return (
           <div
             key={segment.index}
+            ref={(node) => {
+              if (isHighlighted) highlightedRef.current = node;
+            }}
             className="flex items-center gap-2 text-[11px]"
             style={{
               minHeight: compact ? 30 : 34,
               padding: "5px 7px",
               borderRadius: 6,
-              background: segment.completedAt ? "#263126" : isCurrent ? "#2c261d" : "#272727",
-              border: `1px solid ${segment.completedAt ? "#355a35" : isCurrent ? "#5d4621" : "#383838"}`,
+              background: isHighlighted ? "#173024" : segment.completedAt ? "#263126" : isCurrent ? "#2c261d" : "#272727",
+              border: `1px solid ${isHighlighted ? "#4ade80" : segment.completedAt ? "#355a35" : isCurrent ? "#5d4621" : "#383838"}`,
+              boxShadow: isHighlighted ? "0 0 0 1px rgba(74, 222, 128, 0.22), 0 0 18px rgba(74, 222, 128, 0.16)" : undefined,
               color: segment.completedAt ? "#c9f7c9" : "#aaa",
             }}
           >
@@ -1946,6 +2022,9 @@ function SegmentList({ race, compact, nowMs }: { race: UsageRace; compact: boole
             <span className="font-mono" style={{ flex: 1, minWidth: 0 }}>
               到 {formatWholePct(segment.cumulativeDeltaPct)}
             </span>
+            {isHighlighted && (
+              <span className="font-semibold" style={{ color: "#4ade80", flexShrink: 0 }}>刚完成</span>
+            )}
             <span className="font-mono inline-flex items-center justify-end gap-1" style={{ width: compact ? 86 : 104, flexShrink: 0 }}>
               <span style={{ color: "#858585" }}>用时</span>
               <span style={{ color: segmentTimeColor }}>{hasTiming ? formatShortDuration(timing.elapsedSeconds) : "等待"}</span>

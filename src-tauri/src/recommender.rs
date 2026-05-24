@@ -189,9 +189,6 @@ fn build_reason(s: &AccountSummary, session_remaining: f64, weekly_remaining: f6
 }
 
 fn period_quota_label(provider: &str) -> &'static str {
-    if provider == "codex" {
-        "周期额度"
-    } else {
-        "周额度"
-    }
+    let _ = provider;
+    "周额度"
 }

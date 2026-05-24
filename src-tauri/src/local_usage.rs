@@ -834,7 +834,7 @@ fn codex_quota_multiplier_from_label(label: &str) -> Option<f64> {
         return Some(1.0);
     }
     if normalized == "pro" {
-        return Some(20.0);
+        return Some(5.0);
     }
     None
 }

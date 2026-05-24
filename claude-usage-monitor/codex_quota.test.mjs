@@ -34,17 +34,17 @@ test("normalizes Codex usage into scaled session and weekly quotas", () => {
 
   const reports = normalizeCodexUsage(usage, {
     alias: "codex-pro",
-    multiplier: 10,
+    multiplier: 5,
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(reports)), [
     {
       account_alias: "codex-pro",
-      session_pct: 200,
-      session_total_pct: 1000,
+      session_pct: 100,
+      session_total_pct: 500,
       session_reset_at: "2026-05-16T11:06:59.000Z",
-      weekly_pct: 30,
-      weekly_total_pct: 1000,
+      weekly_pct: 15,
+      weekly_total_pct: 500,
       weekly_reset_at: "2026-05-22T14:01:14.000Z",
     },
   ]);
@@ -67,7 +67,7 @@ test("does not report Codex quotas for Go tier", () => {
 
 });
 
-test("normalizes Codex usage for Pro 10x promo tier", () => {
+test("normalizes Codex usage for Pro 5x tier", () => {
   const usage = {
     email: "promo@example.com",
     plan_type: "pro",
@@ -78,14 +78,14 @@ test("normalizes Codex usage for Pro 10x promo tier", () => {
   };
 
   const [report] = normalizeCodexUsage(usage, {
-    alias: "codex-promo",
-    multiplier: 10,
+    alias: "codex-pro",
+    multiplier: 5,
   });
 
-  assert.equal(report.session_pct, 225);
-  assert.equal(report.session_total_pct, 1000);
-  assert.equal(report.weekly_pct, 45);
-  assert.equal(report.weekly_total_pct, 1000);
+  assert.equal(report.session_pct, 112.5);
+  assert.equal(report.session_total_pct, 500);
+  assert.equal(report.weekly_pct, 22.5);
+  assert.equal(report.weekly_total_pct, 500);
 });
 
 test("normalizes Codex usage reset_after_seconds windows", () => {
@@ -99,11 +99,11 @@ test("normalizes Codex usage reset_after_seconds windows", () => {
       },
     }, {
       alias: "codex-pro",
-      multiplier: 10,
+      multiplier: 5,
     });
 
-    assert.equal(report.session_pct, 425);
-    assert.equal(report.weekly_pct, 180);
+    assert.equal(report.session_pct, 212.5);
+    assert.equal(report.weekly_pct, 90);
     assert.equal(report.session_reset_at, "2026-05-17T01:00:00.000Z");
     assert.equal(report.weekly_reset_at, "2026-05-18T00:00:00.000Z");
   } finally {

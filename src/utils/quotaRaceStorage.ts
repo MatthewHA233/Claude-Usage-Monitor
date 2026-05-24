@@ -1,9 +1,10 @@
 export const QUOTA_RACES_STORAGE_KEY = "claude_usage_monitor_quota_races_v1";
 export const QUOTA_RACE_SELECTED_STORAGE_KEY = "claude_usage_monitor_quota_race_selected";
 export const QUOTA_RACE_FOCUSED_STORAGE_KEY = "claude_usage_monitor_quota_race_focused";
+export const QUOTA_RACE_HIGHLIGHT_SEGMENT_STORAGE_KEY = "claude_usage_monitor_quota_race_highlight_segment";
 export const QUOTA_RACE_UPDATED_EVENT = "claude_usage_monitor_quota_race_updated";
 
-export type StoredQuotaRaceStatus = "active" | "completed" | "expired";
+export type StoredQuotaRaceStatus = "active" | "completed" | "expired" | "lost";
 
 export interface StoredQuotaRace {
   id: string;
@@ -42,7 +43,7 @@ export function loadStoredQuotaRaces(): StoredQuotaRace[] {
       typeof race.startedAt === "string" &&
       typeof race.durationSeconds === "number" &&
       typeof race.targetDeltaPct === "number" &&
-      (race.status === "active" || race.status === "completed" || race.status === "expired")
+      (race.status === "active" || race.status === "completed" || race.status === "expired" || race.status === "lost")
     ));
   } catch {
     return [];
@@ -55,6 +56,37 @@ export function setFocusedQuotaRaceId(raceId: string | null) {
     window.localStorage.setItem(QUOTA_RACE_FOCUSED_STORAGE_KEY, raceId);
   } else {
     window.localStorage.removeItem(QUOTA_RACE_FOCUSED_STORAGE_KEY);
+  }
+  notifyQuotaRacesUpdated();
+}
+
+export function loadHighlightedQuotaRaceSegment(): { raceId: string; segmentIndex: number } | null {
+  if (!hasWindowStorage()) return null;
+  try {
+    const raw = window.localStorage.getItem(QUOTA_RACE_HIGHLIGHT_SEGMENT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed != null &&
+      typeof parsed === "object" &&
+      typeof parsed.raceId === "string" &&
+      typeof parsed.segmentIndex === "number" &&
+      Number.isFinite(parsed.segmentIndex)
+    ) {
+      return { raceId: parsed.raceId, segmentIndex: parsed.segmentIndex };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function setHighlightedQuotaRaceSegment(raceId: string | null, segmentIndex: number | null) {
+  if (!hasWindowStorage()) return;
+  if (raceId && segmentIndex != null) {
+    window.localStorage.setItem(QUOTA_RACE_HIGHLIGHT_SEGMENT_STORAGE_KEY, JSON.stringify({ raceId, segmentIndex }));
+  } else {
+    window.localStorage.removeItem(QUOTA_RACE_HIGHLIGHT_SEGMENT_STORAGE_KEY);
   }
   notifyQuotaRacesUpdated();
 }

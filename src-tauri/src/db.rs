@@ -72,6 +72,18 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn storage_pct_and_total(
+    provider: &str,
+    pct: Option<f64>,
+    total_pct: Option<f64>,
+) -> (Option<f64>, f64) {
+    let total_pct = total_pct.unwrap_or(100.0);
+    if provider == "codex" && (total_pct - 1000.0).abs() < 0.001 {
+        return (pct.map(|value| value * 0.5), 500.0);
+    }
+    (pct, total_pct)
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -482,45 +494,115 @@ impl Database {
             UPDATE usage_snapshots
             SET session_pct = CASE
                     WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
-                    WHEN session_total_pct = 100 AND session_pct IS NOT NULL THEN session_pct * 5
                     ELSE session_pct
                 END,
                 session_total_pct = 500
             WHERE provider = 'codex'
-              AND session_total_pct IN (100, 1000);
+              AND session_total_pct = 1000;
 
             UPDATE usage_snapshots
             SET weekly_pct = CASE
                     WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
-                    WHEN weekly_total_pct = 100 AND weekly_pct IS NOT NULL THEN weekly_pct * 5
                     ELSE weekly_pct
                 END,
                 weekly_total_pct = 500
             WHERE provider = 'codex'
-              AND weekly_total_pct IN (100, 1000);
+              AND weekly_total_pct = 1000;
 
             UPDATE filtered_inbox
             SET session_pct = CASE
                     WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
-                    WHEN session_total_pct = 100 AND session_pct IS NOT NULL THEN session_pct * 5
                     ELSE session_pct
                 END,
                 session_total_pct = 500
             WHERE provider = 'codex'
-              AND session_total_pct IN (100, 1000);
+              AND session_total_pct = 1000;
 
             UPDATE filtered_inbox
             SET weekly_pct = CASE
                     WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
-                    WHEN weekly_total_pct = 100 AND weekly_pct IS NOT NULL THEN weekly_pct * 5
                     ELSE weekly_pct
                 END,
                 weekly_total_pct = 500
             WHERE provider = 'codex'
-              AND weekly_total_pct IN (100, 1000);
+              AND weekly_total_pct = 1000;
+
+            UPDATE usage_snapshots
+            SET session_pct = CASE
+                    WHEN session_pct IS NOT NULL THEN session_pct * 5
+                    ELSE session_pct
+                END,
+                session_total_pct = 500
+            WHERE provider = 'codex'
+              AND session_total_pct = 100
+              AND account_alias IN (
+                  SELECT account_alias
+                  FROM usage_snapshots
+                  WHERE provider = 'codex'
+                    AND (session_total_pct >= 500 OR weekly_total_pct >= 500)
+              );
+
+            UPDATE usage_snapshots
+            SET weekly_pct = CASE
+                    WHEN weekly_pct IS NOT NULL THEN weekly_pct * 5
+                    ELSE weekly_pct
+                END,
+                weekly_total_pct = 500
+            WHERE provider = 'codex'
+              AND weekly_total_pct = 100
+              AND account_alias IN (
+                  SELECT account_alias
+                  FROM usage_snapshots
+                  WHERE provider = 'codex'
+                    AND (session_total_pct >= 500 OR weekly_total_pct >= 500)
+              );
+
+            UPDATE filtered_inbox
+            SET session_pct = CASE
+                    WHEN session_pct IS NOT NULL THEN session_pct * 5
+                    ELSE session_pct
+                END,
+                session_total_pct = 500
+            WHERE provider = 'codex'
+              AND session_total_pct = 100
+              AND account_alias IN (
+                  SELECT account_alias
+                  FROM usage_snapshots
+                  WHERE provider = 'codex'
+                    AND (session_total_pct >= 500 OR weekly_total_pct >= 500)
+              );
+
+            UPDATE filtered_inbox
+            SET weekly_pct = CASE
+                    WHEN weekly_pct IS NOT NULL THEN weekly_pct * 5
+                    ELSE weekly_pct
+                END,
+                weekly_total_pct = 500
+            WHERE provider = 'codex'
+              AND weekly_total_pct = 100
+              AND account_alias IN (
+                  SELECT account_alias
+                  FROM usage_snapshots
+                  WHERE provider = 'codex'
+                    AND (session_total_pct >= 500 OR weekly_total_pct >= 500)
+              );
         ",
         )?;
         Ok(())
+    }
+
+    pub fn codex_alias_has_scaled_history(&self, alias: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM usage_snapshots
+             WHERE provider = 'codex'
+               AND account_alias = ?1
+               AND (session_total_pct >= 500 OR weekly_total_pct >= 500)",
+            params![alias],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     fn import_legacy_database(&self) -> Result<()> {
@@ -722,6 +804,10 @@ impl Database {
     }
 
     pub fn insert_snapshot(&self, snap: &UsageSnapshot) -> Result<i64> {
+        let (session_pct, session_total_pct) =
+            storage_pct_and_total(&snap.provider, snap.session_pct, snap.session_total_pct);
+        let (weekly_pct, weekly_total_pct) =
+            storage_pct_and_total(&snap.provider, snap.weekly_pct, snap.weekly_total_pct);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO usage_snapshots
@@ -732,11 +818,11 @@ impl Database {
                 snap.provider,
                 snap.account_alias,
                 snap.collected_at,
-                snap.session_pct,
-                snap.session_total_pct.unwrap_or(100.0),
+                session_pct,
+                session_total_pct,
                 snap.session_reset_at,
-                snap.weekly_pct,
-                snap.weekly_total_pct.unwrap_or(100.0),
+                weekly_pct,
+                weekly_total_pct,
                 snap.weekly_reset_at,
                 snap.error,
             ],
@@ -850,6 +936,10 @@ impl Database {
     /// 写入收件箱并维持每账号最多 10 条 FIFO
     pub fn inbox_insert(&self, snap: &UsageSnapshot, reason: &str) -> Result<i64> {
         const PER_ALIAS_CAP: i64 = 10;
+        let (session_pct, session_total_pct) =
+            storage_pct_and_total(&snap.provider, snap.session_pct, snap.session_total_pct);
+        let (weekly_pct, weekly_total_pct) =
+            storage_pct_and_total(&snap.provider, snap.weekly_pct, snap.weekly_total_pct);
         let conn = self.conn.lock().unwrap();
         let created_at = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -861,11 +951,11 @@ impl Database {
                 snap.provider,
                 snap.account_alias,
                 snap.collected_at,
-                snap.session_pct,
-                snap.session_total_pct.unwrap_or(100.0),
+                session_pct,
+                session_total_pct,
                 snap.session_reset_at,
-                snap.weekly_pct,
-                snap.weekly_total_pct.unwrap_or(100.0),
+                weekly_pct,
+                weekly_total_pct,
                 snap.weekly_reset_at,
                 reason,
                 created_at,

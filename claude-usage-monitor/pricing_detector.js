@@ -44,12 +44,8 @@
     const selected = tierEls.find(isSelectedTier);
     const selectedText = textOf(selected || tierEls[0] || "").toLowerCase();
     if (selectedText === "20x") return "pro20";
-    if (selectedText === "5x") return isPro10PromoActive() ? "pro10" : "pro5";
+    if (selectedText === "5x") return "pro5";
     return "pro5";
-  }
-
-  function isPro10PromoActive(now = new Date()) {
-    return now.getTime() < new Date("2026-06-01T00:00:00+08:00").getTime();
   }
 
   async function saveDetectedPlan() {

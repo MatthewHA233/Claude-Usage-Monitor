@@ -20,13 +20,19 @@ function barClassByRatio(used, total = 100) {
   return "";
 }
 
-function codexPlanLabel(plan, multiplier) {
-  if (plan === "go") return "Go 不记录";
-  if (plan === "plus") return "Plus";
-  if (plan === "pro5") return "Pro 5x";
-  if (plan === "pro10") return "Pro 10x";
-  if (plan === "pro20") return "Pro 20x";
-  return multiplier ? `Pro ${multiplier}x` : "Codex";
+const CODEX_PLAN_LABELS = {
+  go: "Go 不记录",
+  plus: "Plus",
+  pro5: "Pro 5x",
+  pro20: "Pro 20x",
+};
+
+function normalizeCodexPlan(plan) {
+  return Object.prototype.hasOwnProperty.call(CODEX_PLAN_LABELS, plan) ? plan : "pro5";
+}
+
+function codexPlanLabel(plan) {
+  return CODEX_PLAN_LABELS[normalizeCodexPlan(plan)] || "Codex";
 }
 
 function usageCard(label, used, total, resetAt) {
@@ -82,7 +88,7 @@ function renderCodex(codexData, codexStatus) {
   }
 
   const settings = codexData.settings ?? {};
-  const planLabel = codexPlanLabel(settings.plan, settings.multiplier);
+  const planLabel = codexPlanLabel(settings.plan);
   return `
     <div class="account">
       <div class="account-email">${settings.email || settings.alias || codexData.usage?.email || "codex"}</div>
@@ -183,7 +189,11 @@ document.addEventListener("DOMContentLoaded", () => {
   chrome.storage.local.get(["accountAlias", "codexAccountAlias", "codexPlan"], (res) => {
     if (res.accountAlias) document.getElementById("aliasInput").value = res.accountAlias;
     if (res.codexAccountAlias) document.getElementById("codexAliasInput").value = res.codexAccountAlias;
-    if (res.codexPlan) document.getElementById("codexPlanInput").value = res.codexPlan;
+    if (res.codexPlan) {
+      const codexPlan = normalizeCodexPlan(res.codexPlan);
+      document.getElementById("codexPlanInput").value = codexPlan;
+      if (res.codexPlan !== codexPlan) chrome.storage.local.set({ codexPlan });
+    }
   });
 
   document.getElementById("saveAlias").addEventListener("click", () => {

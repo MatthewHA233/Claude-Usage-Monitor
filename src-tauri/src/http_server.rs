@@ -48,6 +48,35 @@ pub struct StatusResponse {
     pub snapshots: Vec<UsageSnapshot>,
 }
 
+fn normalize_report_snapshot(mut snap: UsageSnapshot, db: &Database) -> UsageSnapshot {
+    if snap.provider == "codex" {
+        if matches!(snap.session_total_pct, Some(total) if (total - 1000.0).abs() < 0.001) {
+            snap.session_pct = snap.session_pct.map(|pct| pct * 0.5);
+            snap.session_total_pct = Some(500.0);
+        }
+        if matches!(snap.weekly_total_pct, Some(total) if (total - 1000.0).abs() < 0.001) {
+            snap.weekly_pct = snap.weekly_pct.map(|pct| pct * 0.5);
+            snap.weekly_total_pct = Some(500.0);
+        }
+        if (matches!(snap.session_total_pct, Some(total) if (total - 100.0).abs() < 0.001)
+            || matches!(snap.weekly_total_pct, Some(total) if (total - 100.0).abs() < 0.001))
+            && db
+                .codex_alias_has_scaled_history(&snap.account_alias)
+                .unwrap_or(false)
+        {
+            if matches!(snap.session_total_pct, Some(total) if (total - 100.0).abs() < 0.001) {
+                snap.session_pct = snap.session_pct.map(|pct| pct * 5.0);
+                snap.session_total_pct = Some(500.0);
+            }
+            if matches!(snap.weekly_total_pct, Some(total) if (total - 100.0).abs() < 0.001) {
+                snap.weekly_pct = snap.weekly_pct.map(|pct| pct * 5.0);
+                snap.weekly_total_pct = Some(500.0);
+            }
+        }
+    }
+    snap
+}
+
 pub async fn start(db: Arc<Database>, runtime: Arc<RuntimeStatus>) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -108,19 +137,22 @@ async fn handle_report(
         );
     }
 
-    let snap = UsageSnapshot {
-        id: None,
-        provider: provider.to_string(),
-        account_alias: payload.account_alias.clone(),
-        collected_at: chrono::Utc::now().to_rfc3339(),
-        session_pct,
-        session_total_pct: payload.session_total_pct.or(Some(100.0)),
-        session_reset_at: payload.session_reset_at,
-        weekly_pct,
-        weekly_total_pct: payload.weekly_total_pct.or(Some(100.0)),
-        weekly_reset_at: payload.weekly_reset_at,
-        error: None,
-    };
+    let snap = normalize_report_snapshot(
+        UsageSnapshot {
+            id: None,
+            provider: provider.to_string(),
+            account_alias: payload.account_alias.clone(),
+            collected_at: chrono::Utc::now().to_rfc3339(),
+            session_pct,
+            session_total_pct: payload.session_total_pct.or(Some(100.0)),
+            session_reset_at: payload.session_reset_at,
+            weekly_pct,
+            weekly_total_pct: payload.weekly_total_pct.or(Some(100.0)),
+            weekly_reset_at: payload.weekly_reset_at,
+            error: None,
+        },
+        &state.db,
+    );
 
     state.runtime.record_plugin_report(&snap.provider, &snap.account_alias);
 

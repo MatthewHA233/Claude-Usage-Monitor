@@ -506,8 +506,8 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
   const sessionsLeft = avgCost != null && weeklyRemaining != null
     ? Math.ceil(weeklyRemaining / avgCost) : null;
   const resetDays = weeklyHours != null ? weeklyHours / 24 : null;
-  const periodLabel = provider === "codex" ? "3.5d" : "Weekly";
-  const periodQuotaLabel = provider === "codex" ? "周期额度" : "周额度";
+  const periodLabel = "Weekly";
+  const periodQuotaLabel = "周额度";
   const quotaMultiplier = quotaMultiplierFromSnapshot(snap);
   const accountType = accountTypeLabel(provider, snap);
 
@@ -1540,7 +1540,7 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   const { days, weeklyResetDates } = computeDailyStats(statsRecords);
   const identityKey = keyFromParts(provider, alias);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
-  const periodLabel = provider === "codex" ? "3.5d" : "Weekly";
+  const periodLabel = "Weekly";
   const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
   const annotations = useMemo(() => computeTableAnnotations(statsRecords), [statsRecords]);
 

@@ -6,17 +6,13 @@
     go: 0,
     plus: 1,
     pro5: 5,
-    pro10: 10,
     pro20: 20,
   };
+  const DEFAULT_CODEX_PLAN = "pro5";
 
-  function isPro10PromoActive(now = new Date()) {
-    return now.getTime() < new Date("2026-06-01T00:00:00+08:00").getTime();
-  }
-
-  function effectiveCodexPlan(plan) {
-    if (plan === "pro5" && isPro10PromoActive()) return "pro10";
-    return plan;
+  function normalizeCodexPlan(plan) {
+    const key = String(plan || "").trim();
+    return Object.prototype.hasOwnProperty.call(CODEX_PLAN_MULTIPLIERS, key) ? key : DEFAULT_CODEX_PLAN;
   }
 
   function inferCodexPlan(usage) {
@@ -100,7 +96,8 @@
     ]);
     const profile = getChatGptProfile();
     const alias = stored.codexAccountAlias?.trim() || usage.email || profile.email || profile.full_name || "codex";
-    const plan = effectiveCodexPlan(stored.codexPlan || inferCodexPlan(usage));
+    const plan = normalizeCodexPlan(stored.codexPlan || inferCodexPlan(usage));
+    if (stored.codexPlan !== plan) await chrome.storage.local.set({ codexPlan: plan });
     const multiplier = CODEX_PLAN_MULTIPLIERS[plan] ?? 1;
     return {
       alias,
