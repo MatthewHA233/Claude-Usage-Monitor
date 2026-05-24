@@ -2,11 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ArrowLeft,
+  Bell,
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Flag,
   History,
+  Pause,
   RefreshCw,
   Target,
   Timer,
@@ -29,8 +31,10 @@ import {
   setSelectedQuotaRaceAccountKey,
 } from "../utils/quotaRaceStorage";
 import {
+  dispatchQuotaRaceBreakFinished,
   dispatchQuotaRaceSettled,
   dispatchQuotaSegmentCompleted,
+  type QuotaRaceBreakFinishedDetail,
   type QuotaRaceSettledDetail,
   type QuotaSegmentCompletedDetail,
 } from "../utils/quotaRaceEvents";
@@ -51,6 +55,8 @@ const TIMER_OK_COLOR = "#c084fc";
 const TIMER_OVER_COLOR = "#f87171";
 const RECORD_OK_COLOR = "#4ade80";
 const RECORD_PENDING_COLOR = "#858585";
+const REST_RATIO = 5;
+const REST_COOLDOWN_SECONDS = 10 * 60;
 
 interface Props {
   snapshots: UsageSnapshot[];
@@ -94,6 +100,13 @@ interface RaceSegment {
   actualDeltaPct: number | null;
 }
 
+interface RaceBreak {
+  id: string;
+  startedAt: string;
+  durationSeconds: number;
+  endedEarly?: boolean;
+}
+
 interface UsageRace {
   id: string;
   provider: string;
@@ -111,6 +124,7 @@ interface UsageRace {
   resetKey: string;
   status: RaceStatus;
   segments: RaceSegment[];
+  breaks?: RaceBreak[];
 }
 
 interface RaceDraft {
@@ -458,6 +472,111 @@ function buildSegments(targetDeltaPct: number, stepPct: number) {
   return segments;
 }
 
+function raceBreaks(race: UsageRace): RaceBreak[] {
+  return Array.isArray(race.breaks)
+    ? race.breaks.filter((item) => (
+      item != null &&
+      typeof item.id === "string" &&
+      typeof item.startedAt === "string" &&
+      Number.isFinite(item.durationSeconds) &&
+      item.durationSeconds > 0
+    ))
+    : [];
+}
+
+function raceBreakStartMs(item: RaceBreak) {
+  return new Date(item.startedAt).getTime();
+}
+
+function raceBreakEndMs(item: RaceBreak) {
+  const startedMs = raceBreakStartMs(item);
+  return Number.isFinite(startedMs) ? startedMs + item.durationSeconds * 1000 : NaN;
+}
+
+function raceBreakElapsedSeconds(item: RaceBreak, nowMs: number) {
+  const startedMs = raceBreakStartMs(item);
+  if (!Number.isFinite(startedMs) || nowMs <= startedMs) return 0;
+  return Math.max(0, Math.min((nowMs - startedMs) / 1000, item.durationSeconds));
+}
+
+function activeRaceBreak(race: UsageRace, nowMs: number) {
+  return raceBreaks(race).find((item) => {
+    const startedMs = raceBreakStartMs(item);
+    const endMs = raceBreakEndMs(item);
+    return Number.isFinite(startedMs) && Number.isFinite(endMs) && startedMs <= nowMs && nowMs < endMs;
+  }) ?? null;
+}
+
+function raceBreakRemainingSeconds(item: RaceBreak, nowMs: number) {
+  const endMs = raceBreakEndMs(item);
+  return Number.isFinite(endMs) ? Math.max(0, (endMs - nowMs) / 1000) : 0;
+}
+
+function totalScheduledBreakSeconds(race: UsageRace) {
+  return raceBreaks(race).reduce((sum, item) => sum + item.durationSeconds, 0);
+}
+
+function raceRestElapsedSecondsUntil(race: UsageRace, atMs: number) {
+  let restSeconds = 0;
+  for (const item of raceBreaks(race)) {
+    const startedMs = raceBreakStartMs(item);
+    if (!Number.isFinite(startedMs) || atMs <= startedMs) continue;
+    const elapsedMs = Math.min(atMs - startedMs, item.durationSeconds * 1000);
+    restSeconds += Math.max(0, elapsedMs / 1000);
+  }
+  return restSeconds;
+}
+
+function raceEffectiveElapsedSecondsAt(race: UsageRace, atMs: number) {
+  const startedMs = new Date(race.startedAt).getTime();
+  if (!Number.isFinite(startedMs)) return 0;
+  return Math.max(0, (atMs - startedMs) / 1000 - raceRestElapsedSecondsUntil(race, atMs));
+}
+
+function raceWallBudgetSeconds(race: UsageRace, nowMs: number) {
+  return race.durationSeconds + raceRestElapsedSecondsUntil(race, nowMs);
+}
+
+function raceRestAvailability(race: UsageRace, nowMs: number) {
+  const workedSeconds = raceEffectiveElapsedSecondsAt(race, nowMs);
+  const usedBreakSeconds = totalScheduledBreakSeconds(race);
+  const maxTotalBreakSeconds = Math.floor(workedSeconds / REST_RATIO);
+  const availableBreakSeconds = Math.max(0, maxTotalBreakSeconds - usedBreakSeconds);
+  const lastBreak = raceBreaks(race)
+    .map((item) => ({ item, endMs: raceBreakEndMs(item) }))
+    .filter(({ endMs }) => Number.isFinite(endMs) && endMs <= nowMs)
+    .sort((a, b) => b.endMs - a.endMs)[0] ?? null;
+  const cooldownRemainingSeconds = lastBreak
+    ? Math.max(0, REST_COOLDOWN_SECONDS - (nowMs - lastBreak.endMs) / 1000)
+    : 0;
+  return {
+    workedSeconds,
+    usedBreakSeconds,
+    maxTotalBreakSeconds,
+    availableBreakSeconds,
+    cooldownRemainingSeconds,
+    activeBreak: activeRaceBreak(race, nowMs),
+  };
+}
+
+function canStartRaceBreak(race: UsageRace, nowMs: number, requestedSeconds: number) {
+  const availability = raceRestAvailability(race, nowMs);
+  return race.status === "active" &&
+    requestedSeconds > 0 &&
+    availability.activeBreak == null &&
+    availability.cooldownRemainingSeconds <= 0 &&
+    requestedSeconds <= availability.availableBreakSeconds + 0.001;
+}
+
+function canExtendRaceBreak(race: UsageRace, breakId: string, nowMs: number, extraSeconds: number) {
+  const currentBreak = activeRaceBreak(race, nowMs);
+  const availability = raceRestAvailability(race, nowMs);
+  return race.status === "active" &&
+    currentBreak?.id === breakId &&
+    extraSeconds > 0 &&
+    extraSeconds <= availability.availableBreakSeconds + 0.001;
+}
+
 function findObservedCrossingTime(samples: Sample[], targetNormPct: number, fallbackMs: number, startedMs: number) {
   if (samples.length === 0) return fallbackMs;
   for (const sample of samples) {
@@ -499,7 +618,7 @@ function repairObservedRaceTiming(race: UsageRace, histories: Record<string, Usa
     );
     const completedMs = Math.max(lastCompletedMs, observedMs);
     const completedAt = new Date(completedMs).toISOString();
-    const elapsedSeconds = Math.max(0, Math.round((completedMs - startedMs) / 1000));
+    const elapsedSeconds = Math.max(0, Math.round(raceEffectiveElapsedSecondsAt(race, completedMs)));
     lastCompletedMs = completedMs;
     if (segment.completedAt !== completedAt || segment.elapsedSeconds !== elapsedSeconds) changed = true;
     return { ...segment, completedAt, elapsedSeconds };
@@ -521,7 +640,6 @@ function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, Activ
   let changed = false;
   const updated = races.map((race) => {
     if (race.status !== "active") return race;
-    const deadlineMs = new Date(race.startedAt).getTime() + race.durationSeconds * 1000;
     const startedMs = new Date(race.startedAt).getTime();
     const session = sessionsByKey.get(race.accountKey);
     const nextRace: UsageRace = { ...race, segments: race.segments.map((segment) => ({ ...segment })) };
@@ -543,7 +661,7 @@ function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, Activ
           findObservedCrossingTime(session.samples, targetNormPct, nowMs, startedMs),
         );
         segment.completedAt = new Date(completedMs).toISOString();
-        segment.elapsedSeconds = Math.max(0, Math.round((completedMs - startedMs) / 1000));
+        segment.elapsedSeconds = Math.max(0, Math.round(raceEffectiveElapsedSecondsAt(nextRace, completedMs)));
         segment.actualDeltaPct = round2(Math.min(currentDelta, segment.cumulativeDeltaPct));
         lastCompletedMs = completedMs;
         changed = true;
@@ -564,7 +682,7 @@ function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, Activ
       }
     }
 
-    if (nextRace.status === "active" && nowMs >= deadlineMs) {
+    if (nextRace.status === "active" && raceEffectiveElapsedSecondsAt(nextRace, nowMs) >= nextRace.durationSeconds) {
       nextRace.status = "expired";
       changed = true;
     }
@@ -583,12 +701,6 @@ function raceConsumedDelta(race: UsageRace, session: ActiveSession | undefined) 
 
 function nextOpenSegment(race: UsageRace) {
   return race.segments.find((segment) => segment.completedAt == null) ?? race.segments[race.segments.length - 1] ?? null;
-}
-
-function segmentStartMs(race: UsageRace, segment: RaceSegment | null) {
-  if (!segment || segment.index <= 1) return new Date(race.startedAt).getTime();
-  const previous = race.segments[segment.index - 2];
-  return previous?.completedAt ? new Date(previous.completedAt).getTime() : new Date(race.startedAt).getTime();
 }
 
 function openSegment(race: UsageRace) {
@@ -612,12 +724,10 @@ function raceElapsedSeconds(race: UsageRace, nowMs: number) {
   }
   if (race.status === "expired") return race.durationSeconds;
   if (race.status === "lost") {
-    const startedMs = new Date(race.startedAt).getTime();
     const resetMs = new Date(race.resetAt).getTime();
-    if (Number.isFinite(resetMs)) return Math.max(0, (resetMs - startedMs) / 1000);
+    if (Number.isFinite(resetMs)) return raceEffectiveElapsedSecondsAt(race, resetMs);
   }
-  const startedMs = new Date(race.startedAt).getTime();
-  return Math.max(0, (nowMs - startedMs) / 1000);
+  return raceEffectiveElapsedSecondsAt(race, nowMs);
 }
 
 function segmentTiming(race: UsageRace, segment: RaceSegment, nowMs?: number) {
@@ -689,6 +799,17 @@ function raceSettlementNotice(
   };
 }
 
+function raceBreakFinishedNotice(race: UsageRace, item: RaceBreak): QuotaRaceBreakFinishedDetail {
+  return {
+    raceId: race.id,
+    provider: race.provider,
+    alias: race.alias,
+    accountKey: race.accountKey,
+    durationSeconds: item.durationSeconds,
+    finishedAt: new Date(raceBreakEndMs(item)).toISOString(),
+  };
+}
+
 export default function SessionRacePanel({ snapshots, recommendation: _recommendation, pluginUsageStatuses, onRefresh }: Props) {
   void _recommendation;
   const { colors } = useAccountColors();
@@ -697,6 +818,8 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const segmentNotificationsReadyRef = useRef(false);
   const notifiedSettlementKeysRef = useRef<Set<string>>(new Set());
   const settlementNotificationsReadyRef = useRef(false);
+  const notifiedBreakKeysRef = useRef<Set<string>>(new Set());
+  const breakNotificationsReadyRef = useRef(false);
   const [nowMs, setNowMs] = useState(Date.now());
   const [races, setRaces] = useState<UsageRace[]>(() => loadRaces());
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
@@ -824,6 +947,34 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   }, [nowMs, races, sessionsByKey]);
 
   useEffect(() => {
+    const finishedBreaks: Array<{ key: string; detail: QuotaRaceBreakFinishedDetail }> = [];
+    for (const race of races) {
+      if (race.status !== "active") continue;
+      for (const item of raceBreaks(race)) {
+        if (item.endedEarly) continue;
+        const endMs = raceBreakEndMs(item);
+        if (!Number.isFinite(endMs) || nowMs < endMs) continue;
+        finishedBreaks.push({
+          key: `${race.id}:${item.id}`,
+          detail: raceBreakFinishedNotice(race, item),
+        });
+      }
+    }
+
+    if (!breakNotificationsReadyRef.current) {
+      for (const { key } of finishedBreaks) notifiedBreakKeysRef.current.add(key);
+      breakNotificationsReadyRef.current = true;
+      return;
+    }
+
+    for (const { key, detail } of finishedBreaks) {
+      if (notifiedBreakKeysRef.current.has(key)) continue;
+      notifiedBreakKeysRef.current.add(key);
+      dispatchQuotaRaceBreakFinished(detail);
+    }
+  }, [nowMs, races]);
+
+  useEffect(() => {
     const session = selectedKey ? sessionsByKey.get(selectedKey) : null;
     if (!session) return;
     const seedKey = `${session.key}:${session.resetKey}`;
@@ -900,6 +1051,7 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
       resetKey: selectedSession.resetKey,
       status: "active",
       segments: buildSegments(targetPct, stepPct),
+      breaks: [],
     };
     setRaces((previous) => [race, ...previous.filter((item) => item.id !== race.id)].slice(0, MAX_SAVED_RACES));
     setExpandedRaceId(race.id);
@@ -910,6 +1062,60 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     setRaces((previous) => previous.map((race) => (
       race.id === raceId && race.status === "active" ? { ...race, status: "expired" } : race
     )));
+  }, []);
+
+  const startRaceBreak = useCallback((raceId: string, durationSeconds: number) => {
+    const requestedSeconds = Math.max(1, Math.round(durationSeconds));
+    const startedAt = new Date().toISOString();
+    const startedMs = new Date(startedAt).getTime();
+    setRaces((previous) => previous.map((race) => {
+      if (race.id !== raceId || !canStartRaceBreak(race, startedMs, requestedSeconds)) return race;
+      return {
+        ...race,
+        breaks: [
+          ...raceBreaks(race),
+          {
+            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            startedAt,
+            durationSeconds: requestedSeconds,
+          },
+        ],
+      };
+    }));
+  }, []);
+
+  const extendRaceBreak = useCallback((raceId: string, breakId: string, extraSeconds: number) => {
+    const requestedSeconds = Math.max(1, Math.round(extraSeconds));
+    const nowForUpdate = Date.now();
+    setRaces((previous) => previous.map((race) => {
+      if (race.id !== raceId || !canExtendRaceBreak(race, breakId, nowForUpdate, requestedSeconds)) return race;
+      return {
+        ...race,
+        breaks: raceBreaks(race).map((item) => (
+          item.id === breakId
+            ? { ...item, durationSeconds: item.durationSeconds + requestedSeconds }
+            : item
+        )),
+      };
+    }));
+  }, []);
+
+  const endRaceBreakEarly = useCallback((raceId: string, breakId: string) => {
+    const nowForUpdate = Date.now();
+    setRaces((previous) => previous.map((race) => {
+      if (race.id !== raceId || race.status !== "active") return race;
+      const currentBreak = activeRaceBreak(race, nowForUpdate);
+      if (currentBreak?.id !== breakId) return race;
+      const elapsedSeconds = Math.max(1, Math.round(raceBreakElapsedSeconds(currentBreak, nowForUpdate)));
+      return {
+        ...race,
+        breaks: raceBreaks(race).map((item) => (
+          item.id === breakId
+            ? { ...item, durationSeconds: Math.min(item.durationSeconds, elapsedSeconds), endedEarly: true }
+            : item
+        )),
+      };
+    }));
   }, []);
 
   const requestDeleteRace = useCallback((raceId: string) => {
@@ -947,6 +1153,9 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
           session={sessionsByKey.get(focusedRace.accountKey)}
           nowMs={nowMs}
           onBack={() => setFocusedRaceId(null)}
+          onStartBreak={(durationSeconds) => startRaceBreak(focusedRace.id, durationSeconds)}
+          onExtendBreak={(breakId, extraSeconds) => extendRaceBreak(focusedRace.id, breakId, extraSeconds)}
+          onEndBreakEarly={(breakId) => endRaceBreakEarly(focusedRace.id, breakId)}
           onStop={() => stopRace(focusedRace.id)}
         />
         {deleteDialog}
@@ -1185,7 +1394,7 @@ function TimelinePanel({
                   ? ((new Date(activeRace.startedAt).getTime() - nowMs) / 3600_000) * PX_PER_HOUR + 2
                   : 0;
                 const raceTargetWidth = activeRace != null
-                  ? Math.max(28, activeRace.durationSeconds / 3600 * PX_PER_HOUR - 4)
+                  ? Math.max(28, raceWallBudgetSeconds(activeRace, nowMs) / 3600 * PX_PER_HOUR - 4)
                   : 0;
                 const raceTargetVisible = activeRace != null
                   && raceTargetLeft < timelineWidth - 2
@@ -1244,7 +1453,7 @@ function TimelinePanel({
                     </span>
                     {raceTargetVisible && activeRace != null && (
                       <span
-                        title={`竞赛目标时长 ${formatDetailedHms(activeRace.durationSeconds)}`}
+                        title={`竞赛目标时长 ${formatDetailedHms(activeRace.durationSeconds)}，已累计休息 ${formatDetailedHms(raceRestElapsedSecondsUntil(activeRace, nowMs))}`}
                         style={{
                           position: "absolute",
                           left: raceTargetLeft,
@@ -1712,16 +1921,24 @@ function FocusedRaceView({
   session,
   nowMs,
   onBack,
+  onStartBreak,
+  onExtendBreak,
+  onEndBreakEarly,
   onStop,
 }: {
   race: UsageRace;
   session: ActiveSession | undefined;
   nowMs: number;
   onBack: () => void;
+  onStartBreak: (durationSeconds: number) => void;
+  onExtendBreak: (breakId: string, extraSeconds: number) => void;
+  onEndBreakEarly: (breakId: string) => void;
   onStop: () => void;
 }) {
   const [liveNowMs, setLiveNowMs] = useState(nowMs);
   const [showAbandonConfirm, setShowAbandonConfirm] = useState(false);
+  const [restDialogMode, setRestDialogMode] = useState<"start" | "extend" | null>(null);
+  const [showEndRestConfirm, setShowEndRestConfirm] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setLiveNowMs(Date.now()), 100);
@@ -1752,6 +1969,9 @@ function FocusedRaceView({
   const showHours = race.durationSeconds >= 3600 || totalElapsed >= 3600 || currentSegmentTarget >= 3600;
   const currentTargetColor = currentTiming?.isSegmentOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
   const totalTargetColor = currentTiming?.isTotalOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
+  const currentBreak = activeRaceBreak(race, liveNowMs);
+  const restRemainingSeconds = currentBreak ? raceBreakRemainingSeconds(currentBreak, liveNowMs) : 0;
+  const restAvailability = raceRestAvailability(race, liveNowMs);
   const segmentSubtext = race.status === "active" && nextSegment != null && nextSegment.completedAt == null
     ? `#${nextSegment.index} 还差 ${formatWholePct(segmentRemaining)}`
     : `${completedCount} / ${race.segments.length} 个小目标`;
@@ -1798,19 +2018,51 @@ function FocusedRaceView({
           </div>
         </div>
         {race.status === "active" && (
-          <button
-            type="button"
-            onClick={() => setShowAbandonConfirm(true)}
-            className="inline-flex items-center justify-center gap-1.5"
-            style={{ height: 30, padding: "0 10px", borderRadius: 6, border: "1px solid #5a3535", background: "#2b1d1d", color: "#fecaca", flexShrink: 0, fontSize: 12, fontWeight: 600 }}
-          >
-            <X size={13} />
-            放弃
-          </button>
+          <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() => currentBreak ? setShowEndRestConfirm(true) : setRestDialogMode("start")}
+              className="inline-flex items-center justify-center gap-1.5"
+              style={{
+                height: 30,
+                padding: "0 10px",
+                borderRadius: 6,
+                border: currentBreak ? "1px solid #3b5a43" : "1px solid #4b3f2a",
+                background: currentBreak ? "#1d2b20" : "#2b261d",
+                color: currentBreak ? "#9ae6a1" : "#f6c177",
+                flexShrink: 0,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {currentBreak ? <Bell size={13} /> : <Pause size={13} />}
+              {currentBreak ? `休息 ${formatDigitalClock(restRemainingSeconds)}` : "暂停休息"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAbandonConfirm(true)}
+              className="inline-flex items-center justify-center gap-1.5"
+              style={{ height: 30, padding: "0 10px", borderRadius: 6, border: "1px solid #5a3535", background: "#2b1d1d", color: "#fecaca", flexShrink: 0, fontSize: 12, fontWeight: 600 }}
+            >
+              <X size={13} />
+              放弃
+            </button>
+          </div>
         )}
       </div>
 
       <div className="p-3 sm:p-4 space-y-4" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        {currentBreak && (
+          <RestingBanner
+            color={color}
+            remainingSeconds={restRemainingSeconds}
+            durationSeconds={currentBreak.durationSeconds}
+            resetAt={race.resetAt}
+            onExtend={() => setRestDialogMode("extend")}
+            onEnd={() => setShowEndRestConfirm(true)}
+          />
+        )}
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
           <FocusTimerCard
             label="当前小目标"
@@ -1858,6 +2110,41 @@ function FocusedRaceView({
         </div>
       </div>
       </div>
+      {restDialogMode && (
+        <RaceRestDialog
+          mode={restDialogMode}
+          race={race}
+          session={session}
+          nowMs={liveNowMs}
+          availability={restAvailability}
+          activeBreak={currentBreak}
+          onCancel={() => setRestDialogMode(null)}
+          onConfirm={(durationSeconds) => {
+            setRestDialogMode(null);
+            if (restDialogMode === "extend") {
+              if (currentBreak) onExtendBreak(currentBreak.id, durationSeconds);
+              return;
+            }
+            onStartBreak(durationSeconds);
+          }}
+        />
+      )}
+      {showEndRestConfirm && currentBreak && (
+        <EndRestConfirmDialog
+          race={race}
+          activeBreak={currentBreak}
+          nowMs={liveNowMs}
+          onCancel={() => setShowEndRestConfirm(false)}
+          onExtend={() => {
+            setShowEndRestConfirm(false);
+            setRestDialogMode("extend");
+          }}
+          onConfirm={() => {
+            setShowEndRestConfirm(false);
+            onEndBreakEarly(currentBreak.id);
+          }}
+        />
+      )}
       {showAbandonConfirm && (
         <AbandonRaceConfirmDialog
           race={race}
@@ -1869,6 +2156,387 @@ function FocusedRaceView({
         />
       )}
     </>
+  );
+}
+
+function RestingBanner({
+  color,
+  remainingSeconds,
+  durationSeconds,
+  resetAt,
+  onExtend,
+  onEnd,
+}: {
+  color: string;
+  remainingSeconds: number;
+  durationSeconds: number;
+  resetAt: string;
+  onExtend: () => void;
+  onEnd: () => void;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3"
+      style={{
+        border: `1px solid ${color}55`,
+        borderRadius: 8,
+        background: `${color}14`,
+        padding: "10px 12px",
+      }}
+    >
+      <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+        <span
+          className="inline-flex items-center justify-center"
+          style={{ width: 28, height: 28, borderRadius: 7, background: `${color}22`, color, flexShrink: 0 }}
+        >
+          <Pause size={14} />
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <div className="text-xs font-semibold" style={{ color: "#f3f4f6" }}>休息中</div>
+          <div className="text-[11px] truncate" style={{ color: "#a3a3a3" }}>
+            休息 {formatDetailedHms(durationSeconds)} · {formatLocalTime(resetAt)} 重置
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+        <span className="font-mono text-lg font-semibold" style={{ color }}>
+          {formatDigitalClock(remainingSeconds)}
+        </span>
+        <button
+          type="button"
+          onClick={onExtend}
+          className="inline-flex items-center justify-center gap-1"
+          style={{ height: 26, padding: "0 8px", borderRadius: 6, border: "1px solid #3a3a3a", background: "#252525", color: "#d4d4d4", fontSize: 11, fontWeight: 600 }}
+        >
+          <TimerReset size={12} />
+          延长
+        </button>
+        <button
+          type="button"
+          onClick={onEnd}
+          className="inline-flex items-center justify-center gap-1"
+          style={{ height: 26, padding: "0 8px", borderRadius: 6, border: "1px solid #5a3535", background: "#2b1d1d", color: "#fecaca", fontSize: 11, fontWeight: 600 }}
+        >
+          <X size={12} />
+          提前结束
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RaceRestDialog({
+  mode,
+  race,
+  session,
+  nowMs,
+  availability,
+  activeBreak,
+  onCancel,
+  onConfirm,
+}: {
+  mode: "start" | "extend";
+  race: UsageRace;
+  session: ActiveSession | undefined;
+  nowMs: number;
+  availability: ReturnType<typeof raceRestAvailability>;
+  activeBreak: RaceBreak | null;
+  onCancel: () => void;
+  onConfirm: (durationSeconds: number) => void;
+}) {
+  const initialSeconds = Math.max(0, Math.min(5 * 60, Math.floor(availability.availableBreakSeconds)));
+  const [restDraft, setRestDraft] = useState(() => durationStringFromSeconds(initialSeconds));
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const durationParts = durationPartsFromMinutes(restDraft);
+  const requestedSeconds = durationParts.minutes * 60 + durationParts.seconds;
+  const exceedsAllowance = requestedSeconds > availability.availableBreakSeconds + 0.001;
+  const isExtend = mode === "extend";
+  const hasCooldown = !isExtend && availability.cooldownRemainingSeconds > 0;
+  const hasActiveBreak = !isExtend && availability.activeBreak != null;
+  const missingExtendBreak = isExtend && activeBreak == null;
+  const hasNoAllowance = availability.availableBreakSeconds < 1;
+  const resetMs = session?.resetMs ?? new Date(race.resetAt).getTime();
+  const breakEndMs = activeBreak ? raceBreakEndMs(activeBreak) : nowMs;
+  const referenceMs = isExtend && Number.isFinite(breakEndMs) ? breakEndMs : nowMs;
+  const crossesReset = Number.isFinite(resetMs) && referenceMs + requestedSeconds * 1000 >= resetMs;
+  const startDisabled = requestedSeconds <= 0 || missingExtendBreak || hasNoAllowance || exceedsAllowance || hasCooldown || hasActiveBreak;
+  const startLabel = isExtend
+    ? missingExtendBreak
+      ? "休息已结束"
+      : hasNoAllowance
+        ? "暂无可延长时长"
+        : requestedSeconds <= 0
+          ? "设置延长时长"
+          : exceedsAllowance
+            ? "超过可延长时长"
+            : "延长休息"
+    : hasActiveBreak
+      ? "已经在休息中"
+      : hasCooldown
+      ? `${formatShortDuration(availability.cooldownRemainingSeconds)} 后可再休息`
+      : hasNoAllowance
+        ? "休息额度不足"
+        : requestedSeconds <= 0
+          ? "设置休息时长"
+          : exceedsAllowance
+            ? "超过可用休息时长"
+            : "开始休息";
+  const setRestMinutes = (value: string) => {
+    const parsed = parseDraftNumber(value, durationParts.minutes);
+    setRestDraft(durationStringFromParts(Math.max(0, parsed), durationParts.seconds));
+  };
+  const setRestSeconds = (value: string) => {
+    const parsed = parseDraftNumber(value, durationParts.seconds);
+    setRestDraft(durationStringFromParts(durationParts.minutes, clamp(parsed, 0, 59)));
+  };
+
+  return (
+    <div
+      role="presentation"
+      onMouseDown={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 84,
+        padding: 18,
+        background: "rgba(0, 0, 0, 0.58)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="race-rest-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: "min(440px, 100%)",
+          borderRadius: 10,
+          border: "1px solid #4b3f2a",
+          background: "#202020",
+          boxShadow: "0 18px 50px rgba(0, 0, 0, 0.48)",
+          overflow: "hidden",
+        }}
+      >
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid #333" }}>
+          <span
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, background: "#2b261d", color: "#f6c177", flexShrink: 0 }}
+          >
+            <Pause size={15} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div id="race-rest-title" className="text-sm font-semibold" style={{ color: "#f3f4f6" }}>
+              {isExtend ? "延长休息时间" : "设置休息时长"}
+            </div>
+            <div className="text-[11px] truncate" style={{ color: "#858585" }}>{race.alias}</div>
+          </div>
+        </div>
+
+        <div className="px-4 py-4 space-y-3">
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+            <NumberField
+              label="分钟"
+              value={String(durationParts.minutes)}
+              min={0}
+              step={1}
+              suffix="m"
+              tone={exceedsAllowance ? "danger" : "normal"}
+              onChange={setRestMinutes}
+            />
+            <NumberField
+              label="秒"
+              value={String(durationParts.seconds)}
+              min={0}
+              max={59}
+              step={5}
+              suffix="s"
+              tone={exceedsAllowance ? "danger" : "normal"}
+              onChange={setRestSeconds}
+            />
+          </div>
+
+          <div className="grid gap-2 text-[11px]" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", color: "#858585" }}>
+            <span>已工作 {formatDetailedHms(availability.workedSeconds)}</span>
+            <span className="text-right">{isExtend ? "可延长" : "可用"} {formatDetailedHms(availability.availableBreakSeconds)}</span>
+            <span>已休息 {formatDetailedHms(availability.usedBreakSeconds)}</span>
+            <span className="text-right">上限 {formatDetailedHms(availability.maxTotalBreakSeconds)}</span>
+          </div>
+
+          {isExtend && activeBreak && (
+            <div className="text-[11px]" style={{ color: "#a3a3a3" }}>
+              当前休息还剩 {formatDetailedHms(raceBreakRemainingSeconds(activeBreak, nowMs))}，延长会接在当前休息后面。
+            </div>
+          )}
+
+          {hasCooldown && (
+            <div className="text-[11px]" style={{ color: "#f6c177" }}>
+              休息冷却中，还需 {formatDetailedHms(availability.cooldownRemainingSeconds)}
+            </div>
+          )}
+          {crossesReset && (
+            <div className="text-[11px]" style={{ color: TIMER_OVER_COLOR }}>
+              这段休息会跨过 session 重置；如果休息中额度刷新，这场竞赛会战败。
+            </div>
+          )}
+        </div>
+
+        <div className="px-4 py-3 flex items-center justify-end gap-2" style={{ borderTop: "1px solid #333" }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex items-center justify-center"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #444", background: "#262626", color: "#d4d4d4" }}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            disabled={startDisabled}
+            onClick={() => onConfirm(requestedSeconds)}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{
+              height: 30,
+              padding: "0 12px",
+              borderRadius: 6,
+              border: startDisabled ? "1px solid #3a3a3a" : "1px solid #4b3f2a",
+              background: startDisabled ? "#242424" : "#2b261d",
+              color: startDisabled ? "#666" : "#f6c177",
+              cursor: startDisabled ? "not-allowed" : "pointer",
+            }}
+          >
+            <Pause size={13} />
+            {startLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EndRestConfirmDialog({
+  race,
+  activeBreak,
+  nowMs,
+  onCancel,
+  onExtend,
+  onConfirm,
+}: {
+  race: UsageRace;
+  activeBreak: RaceBreak;
+  nowMs: number;
+  onCancel: () => void;
+  onExtend: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const restedSeconds = raceBreakElapsedSeconds(activeBreak, nowMs);
+  const remainingSeconds = raceBreakRemainingSeconds(activeBreak, nowMs);
+
+  return (
+    <div
+      role="presentation"
+      onMouseDown={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 86,
+        padding: 18,
+        background: "rgba(0, 0, 0, 0.58)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="end-rest-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: "min(440px, 100%)",
+          borderRadius: 10,
+          border: "1px solid #5a3535",
+          background: "#202020",
+          boxShadow: "0 18px 50px rgba(0, 0, 0, 0.48)",
+          overflow: "hidden",
+        }}
+      >
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid #333" }}>
+          <span
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, background: "#2b1d1d", color: "#fecaca", flexShrink: 0 }}
+          >
+            <X size={15} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div id="end-rest-title" className="text-sm font-semibold" style={{ color: "#f3f4f6" }}>提前结束休息？</div>
+            <div className="text-[11px] truncate" style={{ color: "#858585" }}>{race.alias}</div>
+          </div>
+        </div>
+
+        <div className="px-4 py-4 space-y-3">
+          <p className="text-sm" style={{ color: "#d4d4d4", margin: 0 }}>
+            提前结束后，这段休息会按已休息 {formatDetailedHms(restedSeconds)} 结算；从现在起 10 分钟内不能再次设置休息。
+          </p>
+          <div
+            className="grid gap-2 text-[11px]"
+            style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", color: "#858585" }}
+          >
+            <span>原计划 {formatDetailedHms(activeBreak.durationSeconds)}</span>
+            <span className="text-right">剩余 {formatDetailedHms(remainingSeconds)}</span>
+            <span>已休息 {formatDetailedHms(restedSeconds)}</span>
+            <span className="text-right">冷却 {formatDetailedHms(REST_COOLDOWN_SECONDS)}</span>
+          </div>
+        </div>
+
+        <div className="px-4 py-3 flex items-center justify-end gap-2" style={{ borderTop: "1px solid #333" }}>
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="inline-flex items-center justify-center"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #444", background: "#262626", color: "#d4d4d4" }}
+          >
+            继续休息
+          </button>
+          <button
+            type="button"
+            onClick={onExtend}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #4b3f2a", background: "#2b261d", color: "#f6c177" }}
+          >
+            <TimerReset size={13} />
+            延长休息
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #7f2f2f", background: "#3a1f1f", color: "#fecaca" }}
+          >
+            <X size={13} />
+            提前结束
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2022,14 +2690,13 @@ function ActiveRaceShortcut({
   const consumed = raceConsumedDelta(race, session);
   const progress = race.targetDeltaPct > 0 ? (consumed / race.targetDeltaPct) * 100 : 0;
   const nextSegment = nextOpenSegment(race);
-  const currentSegmentStartMs = segmentStartMs(race, nextSegment);
-  const currentSegmentElapsed = nextSegment?.completedAt
-    ? nextSegment.elapsedSeconds
-    : Math.max(0, (nowMs - currentSegmentStartMs) / 1000);
   const totalElapsed = raceElapsedSeconds(race, nowMs);
   const currentTiming = nextSegment ? segmentTiming(race, nextSegment, nowMs) : null;
+  const currentSegmentElapsed = currentTiming?.elapsedSeconds ?? nextSegment?.elapsedSeconds ?? 0;
   const totalProgressTarget = currentTiming?.cumulativeTargetSeconds ?? race.durationSeconds;
   const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
+  const currentBreak = activeRaceBreak(race, nowMs);
+  const restPrefix = currentBreak ? `休息中 ${formatDigitalClock(raceBreakRemainingSeconds(currentBreak, nowMs))} · ` : "";
 
   return (
     <div
@@ -2055,7 +2722,7 @@ function ActiveRaceShortcut({
             <StatusBadge status={race.status} />
           </div>
           <div className="text-[11px] mt-0.5" style={{ color: "#858585" }}>
-            当前小目标 {formatDigitalClock(currentSegmentElapsed)} · 总时间 {formatDigitalClock(totalElapsed)}
+            {restPrefix}当前小目标 {formatDigitalClock(currentSegmentElapsed)} · 总时间 {formatDigitalClock(totalElapsed)}
             · 目标{formatShortDuration(totalProgressTarget)}，{formatTargetDelta(totalElapsed, totalProgressTarget)}
             {context ? ` · ${context}` : ""}
           </div>

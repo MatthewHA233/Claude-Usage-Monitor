@@ -3,6 +3,7 @@ import { Activity, BarChart3, CheckCircle2, Flame, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import logoUrl from "./assets/logo.png";
 import segmentCompleteSoundUrl from "./assets/quota-segment-complete.wav";
+import restFinishedSoundUrl from "./assets/quota-rest-finished.wav";
 import {
   useLatestSnapshots,
   useRecommendation,
@@ -19,6 +20,7 @@ import {
   setSelectedQuotaRaceAccountKey,
 } from "./utils/quotaRaceStorage";
 import {
+  QUOTA_RACE_BREAK_FINISHED_EVENT,
   QUOTA_RACE_SETTLED_EVENT,
   QUOTA_SEGMENT_COMPLETED_EVENT,
   type QuotaRaceSettledDetail,
@@ -107,11 +109,17 @@ export default function App() {
       }, 4200);
     };
 
+    const handleRaceBreakFinished = () => {
+      playRestFinishedSound();
+    };
+
     window.addEventListener(QUOTA_SEGMENT_COMPLETED_EVENT, handleSegmentCompleted);
     window.addEventListener(QUOTA_RACE_SETTLED_EVENT, handleRaceSettled);
+    window.addEventListener(QUOTA_RACE_BREAK_FINISHED_EVENT, handleRaceBreakFinished);
     return () => {
       window.removeEventListener(QUOTA_SEGMENT_COMPLETED_EVENT, handleSegmentCompleted);
       window.removeEventListener(QUOTA_RACE_SETTLED_EVENT, handleRaceSettled);
+      window.removeEventListener(QUOTA_RACE_BREAK_FINISHED_EVENT, handleRaceBreakFinished);
       if (raceBurstTimerRef.current != null) window.clearTimeout(raceBurstTimerRef.current);
       raceBurstTimerRef.current = null;
     };
@@ -189,6 +197,12 @@ export default function App() {
 function playSegmentCompleteSound() {
   const audio = new Audio(segmentCompleteSoundUrl);
   audio.volume = 0.42;
+  void audio.play().catch(() => undefined);
+}
+
+function playRestFinishedSound() {
+  const audio = new Audio(restFinishedSoundUrl);
+  audio.volume = 0.32;
   void audio.play().catch(() => undefined);
 }
 
