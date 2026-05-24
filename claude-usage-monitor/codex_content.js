@@ -185,7 +185,7 @@
           codexUpdatedAt: Date.now(),
         });
       }
-      console.warn("[Claude Usage Monitor] Codex fetch error:", e.message);
+      console.warn("[claude-usage-monitor] Codex fetch error:", e.message);
     }
   }
 

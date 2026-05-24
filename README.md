@@ -46,7 +46,7 @@
 
 ### 终端用户
 
-直接下载 [Releases](../../releases) 中的 `Claude Usage Monitor_<version>_x64-setup.exe`（NSIS）或 `.msi` 安装即可。
+直接下载 [Releases](../../releases) 中的 `claude-usage-monitor_<version>_x64-setup.exe`（NSIS）或 `.msi` 安装即可。
 
 安装后还需要：
 
@@ -72,7 +72,7 @@ npx tauri build --runner cargo-xwin
 ## 目录结构
 
 ```
-claude-switch/
+claude-usage-monitor/
 ├─ src/                   # React 前端
 │  ├─ components/         # StatusCards / AlarmBell / InboxPanel / ProgressBar
 │  ├─ hooks/              # useData / useInbox / useResetAlarm

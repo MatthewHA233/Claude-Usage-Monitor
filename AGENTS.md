@@ -37,7 +37,7 @@ TypeScript 类型检查：`npx tsc --noEmit`（前端），Rust 检查直接用 
 
 ## 项目说明
 
-Claude Pro 三账号用量追踪与调度推荐工具。
+Codex / Claude Code 账号用量追踪与调度推荐工具。
 - 前端：React 19 + TypeScript + Vite + Tailwind CSS
 - 后端：Tauri 2 + Rust（reqwest + rusqlite + tokio + chrono）
 - 配置文件：`~/.claude-usage-monitor/config.json`

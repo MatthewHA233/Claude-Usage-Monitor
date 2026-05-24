@@ -46,7 +46,7 @@ async function fetchClaudeUsage() {
     await reportToTauri(data);
 
   } catch (e) {
-    console.warn('[Claude Usage Monitor] fetch error:', e.message);
+    console.warn('[claude-usage-monitor] fetch error:', e.message);
   }
 }
 
