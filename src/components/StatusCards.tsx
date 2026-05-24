@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Flag } from "lucide-react";
 import type { UsageSnapshot, Recommendation, AccountAnalysis, LocalUsageStatus, PluginUsageStatus } from "../types";
 import { formatPct, formatHours, formatLocalTime, remaining, hoursUntil } from "../utils/format";
@@ -10,6 +10,12 @@ import { AlarmBell } from "./AlarmBell";
 import { loadStoredQuotaRaces, QUOTA_RACE_UPDATED_EVENT, type StoredQuotaRace } from "../utils/quotaRaceStorage";
 
 const PLUGIN_STATUS_FRESH_MS = 90_000;
+const SESSION_HOURS = 5;
+const PX_PER_HOUR = 30;
+const LABEL_W = 72;
+const ROW_H = 64;
+const HEADER_H = 28;
+const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80"];
 
 const accountKey = (snap: Pick<UsageSnapshot, "provider" | "account_alias">) =>
   `${snap.provider ?? "claude_code"}::${snap.account_alias}`;
@@ -17,6 +23,7 @@ const keyFromParts = (provider: string | undefined, alias: string) => `${provide
 const providerFromKey = (key: string) => key.includes("::") ? (key.split("::")[0] || "claude_code") : "claude_code";
 const aliasFromKey = (key: string) => key.split("::").slice(1).join("::") || key;
 const providerLabel = (provider?: string) => provider === "codex" ? "Codex" : "Claude Code";
+const STORAGE_KEY = (alias: string) => `sprint_blocks_${alias}`;
 const quotaMultiplierFromSnapshot = (snap?: UsageSnapshot | null) =>
   Math.max(snap?.session_total_pct ?? 100, snap?.weekly_total_pct ?? 100) / 100;
 const accountTypeLabel = (provider?: string, snap?: UsageSnapshot | null) => {
@@ -47,6 +54,9 @@ function ProviderIcon({ provider, size = 18 }: { provider?: string; size?: numbe
     </svg>
   );
 }
+
+interface Block { id: number; wallHour: number; startMs: number; }
+interface Persisted { blocks: Block[]; nextId: number; weeklyResetDate: string; }
 
 // ── Props ─────────────────────────────────────────────────
 interface Props {
@@ -229,6 +239,7 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
                 onRefresh();
               }}
               avgCost={providerAvgCosts[provider] ?? avgCost}
+              avgCostsByProvider={providerAvgCosts}
               allSnapshots={snapshots}
               colors={colors}
               setColor={setColor}
@@ -392,6 +403,7 @@ interface CardProps {
   weeklyHours: number | null;
   isRecommended: boolean;
   avgCost: number | null;
+  avgCostsByProvider: Record<string, number>;
   allSnapshots: UsageSnapshot[];
   colors: Record<string, string>;
   setColor: (alias: string, color: string) => Promise<void>;
@@ -495,8 +507,8 @@ function ActiveRaceBadge({ race, onOpen }: { race: StoredQuotaRace; onOpen: () =
   );
 }
 
-function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pluginCollecting, activeRace, pausedAt, onOpenRace, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm, onStopAlarm }: CardProps) {
-  const [modal, setModal] = useState<"history" | null>(null);
+function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pluginCollecting, activeRace, pausedAt, onOpenRace, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm, onStopAlarm }: CardProps) {
+  const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
 
@@ -616,12 +628,12 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
               </div>
             </div>
 
-            {/* 右：X次耗尽（点击→额度竞赛） */}
+            {/* 右：X次耗尽（点击→冲刺规划） */}
             <div
               className="rounded-lg px-3 py-2.5 cursor-pointer flex flex-col justify-center items-center text-center"
               style={{ background: "#242424", border: "1px solid #383838", minWidth: 90 }}
-              title={activeRace ? "回到这个账号正在进行的竞赛" : "打开额度小目标竞赛"}
-              onClick={() => onOpenRace(activeRace?.id, identityKey)}
+              title="打开规划时间轴"
+              onClick={() => setModal("sprint")}
             >
               <div className="text-3xl font-bold font-mono" style={{ color: "#fff" }}>
                 {sessionsLeft != null ? sessionsLeft : "—"}
@@ -644,6 +656,11 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
             allAliases={allSnapshots.map((s) => accountKey(s))}
             colors={colors}
           />
+        </Modal>
+      )}
+      {modal === "sprint" && (
+        <Modal title="规划时间轴" onClose={() => setModal(null)}>
+          <SprintPanel snapshots={allSnapshots} avgCost={avgCost} avgCostsByProvider={avgCostsByProvider} colors={colors} />
         </Modal>
       )}
     </>
@@ -1788,6 +1805,368 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
       <div ref={tooltipElRef} style={{ position: 'fixed', left: 0, top: 0, zIndex: 300, pointerEvents: 'none',
         visibility: activeGroup ? 'visible' : 'hidden' }}>
         {activeGroup && <GroupTooltip info={activeGroup} annotations={annotations} />}
+      </div>
+    </div>
+  );
+}
+
+// ── SprintPanel（多账号共用时间轴）────────────────────────
+function SprintPanel({ snapshots, avgCost, avgCostsByProvider, colors }: {
+  snapshots: UsageSnapshot[];
+  avgCost: number | null;
+  avgCostsByProvider: Record<string, number>;
+  colors: Record<string, string>;
+}) {
+  const [allBlocks, setAllBlocks] = useState<Record<string, Block[]>>(() => {
+    const result: Record<string, Block[]> = {};
+    for (const snap of snapshots) {
+      const key = accountKey(snap);
+      const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY(key));
+        if (raw) {
+          const saved: Persisted = JSON.parse(raw);
+          if (saved.weeklyResetDate === weeklyResetDate) {
+            result[key] = saved.blocks;
+            continue;
+          }
+        }
+      } catch { /* ignore */ }
+      result[key] = [];
+    }
+    return result;
+  });
+  const [allNextId, setAllNextId] = useState<Record<string, number>>(() => {
+    const result: Record<string, number> = {};
+    for (const snap of snapshots) {
+      const key = accountKey(snap);
+      const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY(key));
+        if (raw) {
+          const saved: Persisted = JSON.parse(raw);
+          if (saved.weeklyResetDate === weeklyResetDate) {
+            result[key] = saved.nextId;
+            continue;
+          }
+        }
+      } catch { /* ignore */ }
+      result[key] = 0;
+    }
+    return result;
+  });
+
+  useEffect(() => {
+    for (const snap of snapshots) {
+      const key = accountKey(snap);
+      const weeklyResetDate = (snap.weekly_reset_at ?? "").substring(0, 10);
+      const blocks = allBlocks[key] ?? [];
+      const nextId = allNextId[key] ?? 0;
+      localStorage.setItem(STORAGE_KEY(key), JSON.stringify({ blocks, nextId, weeklyResetDate }));
+    }
+  }, [allBlocks, allNextId, snapshots]);
+
+  useEffect(() => {
+    const cleanup = () => {
+      const now = Date.now();
+      setAllBlocks((prev) => {
+        let changed = false;
+        const next: Record<string, Block[]> = {};
+        for (const key of Object.keys(prev)) {
+          let filtered = (prev[key] ?? []).filter((b) => b.startMs != null && b.startMs > now);
+          const snap = snapshots.find((s) => accountKey(s) === key);
+          if (snap?.session_reset_at) {
+            const sessionEndMs = new Date(snap.session_reset_at).getTime();
+            if (sessionEndMs > now) {
+              filtered = filtered.filter((b) => b.startMs >= sessionEndMs);
+            }
+          }
+          if (filtered.length !== (prev[key] ?? []).length) changed = true;
+          next[key] = filtered;
+        }
+        return changed ? next : prev;
+      });
+    };
+    cleanup();
+    const timer = setInterval(cleanup, 60_000);
+    return () => clearInterval(timer);
+  }, [snapshots]);
+
+  const nowMs = Date.now();
+  const nowDate = new Date(nowMs);
+  const nowWallHour = nowDate.getHours() + nowDate.getMinutes() / 60 + nowDate.getSeconds() / 3600;
+
+  const maxResetHours = Math.max(
+    24,
+    ...snapshots.map((s) =>
+      s.weekly_reset_at
+        ? Math.max(0, (new Date(s.weekly_reset_at).getTime() - nowMs) / 3_600_000)
+        : 0
+    )
+  );
+  const timelineHours = Math.ceil(maxResetHours) + 2;
+  const timelineWidth = timelineHours * PX_PER_HOUR;
+
+  const addBlock = useCallback((key: string, wallHour: number) => {
+    setAllBlocks((prev) => {
+      const existing = prev[key] ?? [];
+      const overlaps = existing.some(
+        (b) => wallHour < b.wallHour + SESSION_HOURS && wallHour + SESSION_HOURS > b.wallHour
+      );
+      if (overlaps) return prev;
+      const id = (allNextId[key] ?? 0);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const startMs = today.getTime() + wallHour * 3_600_000;
+      setAllNextId((p) => ({ ...p, [key]: id + 1 }));
+      return { ...prev, [key]: [...existing, { id, wallHour, startMs }] };
+    });
+  }, [allNextId]);
+
+  const removeBlock = useCallback((key: string, id: number) => {
+    setAllBlocks((prev) => ({
+      ...prev,
+      [key]: (prev[key] ?? []).filter((b) => b.id !== id),
+    }));
+  }, []);
+
+  const clearAll = useCallback(() => {
+    setAllBlocks(Object.fromEntries(snapshots.map((s) => [accountKey(s), []])));
+  }, [snapshots]);
+
+  const minutesPastHour = nowDate.getMinutes() + nowDate.getSeconds() / 60;
+  const hoursToNextHour = minutesPastHour === 0 ? 0 : 1 - minutesPastHour / 60;
+
+  const hourTicks: { offsetHour: number; label: string }[] = [];
+  for (let i = 0; i <= timelineHours; i++) {
+    const offsetHour = hoursToNextHour + i;
+    if (offsetHour > timelineHours) break;
+    const d = new Date(nowMs + offsetHour * 3_600_000);
+    hourTicks.push({ offsetHour, label: `${d.getHours().toString().padStart(2, "0")}:00` });
+  }
+
+  const midnightMarkers: { offsetHour: number; label: string }[] = [];
+  const hoursToMidnight = 24 - (nowDate.getHours() + nowDate.getMinutes() / 60 + nowDate.getSeconds() / 3600);
+  for (let d = 0; d * 24 + hoursToMidnight <= timelineHours; d++) {
+    const offsetHour = hoursToMidnight + d * 24;
+    const date = new Date(nowMs + offsetHour * 3_600_000);
+    const mm = (date.getMonth() + 1).toString().padStart(2, "0");
+    const dd = date.getDate().toString().padStart(2, "0");
+    midnightMarkers.push({ offsetHour, label: `${mm}/${dd}` });
+  }
+
+  const predictionRows = snapshots.map((snap, si) => {
+    const key = accountKey(snap);
+    const provider = snap.provider ?? "claude_code";
+    const accountAvgCost = avgCostsByProvider[provider] ?? avgCost;
+    const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+    const blocks = allBlocks[key] ?? [];
+    const weeklyUsed = snap.weekly_pct ?? null;
+    const weeklyTotal = snap.weekly_total_pct ?? 100;
+    const sessionTotal = snap.session_total_pct ?? 100;
+    const sessionRemainingHours = snap.session_reset_at
+      ? (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000 : null;
+    const hasActiveSession = sessionRemainingHours != null && sessionRemainingHours > 0;
+    const sessionRemainingPct = hasActiveSession && snap.session_pct != null ? Math.max(0, sessionTotal - snap.session_pct) : null;
+    const currCost = accountAvgCost != null && sessionRemainingPct != null
+      ? (sessionRemainingPct / sessionTotal) * accountAvgCost : null;
+    const placed = (currCost ?? 0) + blocks.length * (accountAvgCost ?? 0);
+    const projected = weeklyUsed != null ? Math.min(weeklyTotal, weeklyUsed + placed) : null;
+    return { key, snap, color, weeklyUsed, weeklyTotal, placed, projected };
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="card p-0 overflow-hidden">
+        <div className="px-4 py-2.5 flex items-center justify-between" style={{ borderBottom: "1px solid #3a3a3a" }}>
+          <span className="text-sm font-semibold" style={{ color: "#ddd" }}>
+            规划时间轴
+            <span className="text-xs font-normal ml-2" style={{ color: "#888" }}>点击行内放置 5h Session</span>
+          </span>
+          <button onClick={clearAll} className="text-xs px-2 py-1 rounded"
+            style={{ color: "#aaa", background: "#333", border: "1px solid #444" }}>全部清空</button>
+        </div>
+
+        <div className="overflow-x-auto" style={{ paddingBottom: 4 }}>
+          <div style={{ display: "flex", minWidth: LABEL_W + timelineWidth }}>
+            <div style={{ width: LABEL_W, flexShrink: 0 }}>
+              <div style={{ height: HEADER_H, borderBottom: "1px solid #2e2e2e" }} />
+              {snapshots.map((snap, si) => {
+                const key = accountKey(snap);
+                const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+                return (
+                  <div key={key} style={{
+                    height: ROW_H, display: "flex", flexDirection: "column",
+                    justifyContent: "center", paddingLeft: 12,
+                    borderBottom: "1px solid #2e2e2e",
+                  }}>
+                    <div className="flex items-center gap-1" style={{ color, marginBottom: 4 }}>
+                      <ProviderIcon provider={snap.provider} size={12} />
+                    </div>
+                    <span style={{ fontSize: 10, color: "#ccc", lineHeight: 1.2, maxWidth: LABEL_W - 16, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {snap.account_alias.split("@")[0]}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ position: "relative", width: timelineWidth, flexShrink: 0 }}>
+              <div style={{ position: "relative", height: HEADER_H, background: "#222", borderBottom: "1px solid #2e2e2e" }}>
+                <span style={{ position: "absolute", bottom: 4, left: 4, fontSize: 10, color: "#cc785c", fontWeight: 700 }}>现在</span>
+                {hourTicks.map(({ offsetHour, label }) => (
+                  <span key={label} style={{
+                    position: "absolute", bottom: 4,
+                    left: offsetHour * PX_PER_HOUR + 3,
+                    fontSize: 9, color: "#888", whiteSpace: "nowrap", pointerEvents: "none",
+                  }}>{label}</span>
+                ))}
+                {midnightMarkers.map(({ offsetHour, label }) => (
+                  <span key={label} style={{
+                    position: "absolute", top: 3,
+                    left: offsetHour * PX_PER_HOUR + 4,
+                    fontSize: 10, color: "#7ab8f5", fontWeight: 700, whiteSpace: "nowrap",
+                  }}>{label}</span>
+                ))}
+              </div>
+
+              {snapshots.map((snap, si) => {
+                const key = accountKey(snap);
+                const color = colors[key] ?? colors[snap.account_alias] ?? ACCOUNT_COLORS[si % ACCOUNT_COLORS.length];
+                const blocks = allBlocks[key] ?? [];
+                const sortedBlocks = [...blocks].sort((a, b) => a.wallHour - b.wallHour);
+                const sessionRemainingHours = snap.session_reset_at
+                  ? Math.max(0, (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000) : null;
+                const weeklyResetHours = snap.weekly_reset_at
+                  ? Math.max(0, (new Date(snap.weekly_reset_at).getTime() - nowMs) / 3_600_000) : null;
+
+                const handleRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const clickOffsetHour = (e.clientX - rect.left) / PX_PER_HOUR;
+                  const now2 = new Date();
+                  const nwh = now2.getHours() + now2.getMinutes() / 60 + now2.getSeconds() / 3600;
+                  const wallHour = Math.max(Math.ceil(nwh), Math.floor(nwh + clickOffsetHour));
+                  if (wallHour - nwh + SESSION_HOURS > timelineHours) return;
+                  addBlock(key, wallHour);
+                };
+
+                return (
+                  <div key={key} onClick={handleRowClick}
+                    style={{
+                      position: "relative", height: ROW_H, cursor: "crosshair",
+                      background: si % 2 === 0 ? "#1e1e1e" : "#1a1a1a",
+                      borderBottom: "1px solid #2e2e2e",
+                    }}
+                  >
+                    {hourTicks.map(({ offsetHour, label }) => (
+                      <div key={label} style={{
+                        position: "absolute", left: offsetHour * PX_PER_HOUR,
+                        top: 0, bottom: 0,
+                        borderLeft: "1px solid #2a2a2a",
+                        pointerEvents: "none",
+                      }} />
+                    ))}
+
+                    {midnightMarkers.map(({ offsetHour, label }) => (
+                      <div key={label} style={{
+                        position: "absolute", left: offsetHour * PX_PER_HOUR,
+                        top: 0, bottom: 0,
+                        borderLeft: "1px solid #3a4a5a",
+                        pointerEvents: "none", zIndex: 1,
+                      }} />
+                    ))}
+
+                    {weeklyResetHours != null && weeklyResetHours <= timelineHours && (
+                      <div style={{
+                        position: "absolute", left: weeklyResetHours * PX_PER_HOUR,
+                        top: 0, bottom: 0,
+                        borderLeft: `2px dashed ${color}88`,
+                        pointerEvents: "none", zIndex: 2,
+                      }} />
+                    )}
+
+                    {sessionRemainingHours != null && sessionRemainingHours > 0 && (
+                      <div onClick={(e) => e.stopPropagation()} style={{
+                        position: "absolute", left: 1, top: 8,
+                        width: Math.min(sessionRemainingHours, timelineHours) * PX_PER_HOUR - 2,
+                        height: ROW_H - 18,
+                        background: `${color}15`,
+                        border: `1px dashed ${color}88`,
+                        borderRadius: 4, zIndex: 3,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>
+                        <span style={{ fontSize: 10, color, fontWeight: 600 }}>
+                          进行中 {sessionRemainingHours.toFixed(1)}h
+                        </span>
+                      </div>
+                    )}
+
+                    {sortedBlocks.map((b, idx) => {
+                      const offsetHour = b.wallHour - nowWallHour;
+                      const overDeadline = weeklyResetHours != null && offsetHour + SESSION_HOURS > weeklyResetHours;
+                      return (
+                        <div key={b.id} onClick={(e) => e.stopPropagation()} style={{
+                          position: "absolute",
+                          left: offsetHour * PX_PER_HOUR + 1,
+                          top: 8, width: SESSION_HOURS * PX_PER_HOUR - 4, height: ROW_H - 18,
+                          background: overDeadline ? "#3d1a1a" : `${color}22`,
+                          border: `1px solid ${overDeadline ? "#f87171" : color}`,
+                          borderRadius: 4, zIndex: 5,
+                          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                          userSelect: "none",
+                        }}>
+                          <span style={{ fontSize: 11, color: overDeadline ? "#f87171" : color, fontWeight: 700 }}>S{idx + 1}</span>
+                          <button onClick={(e) => { e.stopPropagation(); removeBlock(key, b.id); }}
+                            style={{ position: "absolute", top: 1, right: 3, fontSize: 10, color: "#aaa", background: "none", border: "none", cursor: "pointer" }}>×</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card p-0 overflow-hidden">
+        <div className="px-4 py-2.5" style={{ borderBottom: "1px solid #3a3a3a" }}>
+          <span className="text-sm font-semibold" style={{ color: "#ddd" }}>周期额度预测</span>
+        </div>
+        <div className="divide-y" style={{ borderColor: "#2e2e2e" }}>
+          {predictionRows.map(({ key, snap, color, weeklyUsed, weeklyTotal, placed, projected }) => {
+            const usedWidth = weeklyUsed != null ? Math.min(100, (weeklyUsed / weeklyTotal) * 100) : 0;
+            const placedWidth = weeklyUsed != null && placed > 0
+              ? Math.min(100 - usedWidth, (Math.min(placed, weeklyTotal - weeklyUsed) / weeklyTotal) * 100)
+              : 0;
+            return (
+              <div key={key} className="px-4 py-3 flex items-center gap-3">
+                <span className="inline-flex items-center justify-center" style={{ width: 14, height: 14, color, flexShrink: 0 }}>
+                  <ProviderIcon provider={snap.provider} size={14} />
+                </span>
+                <span className="text-xs" style={{ color: "#bbb", width: 100, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {snap.account_alias}
+                </span>
+                <div style={{ flex: 1, position: "relative", height: 8, background: "#444", borderRadius: 4, overflow: "hidden" }}>
+                  {weeklyUsed != null && (
+                    <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${usedWidth}%`, background: color, opacity: 0.9 }} />
+                  )}
+                  {weeklyUsed != null && placed > 0 && (
+                    <div style={{ position: "absolute", left: `${usedWidth}%`, top: 0, bottom: 0, width: `${placedWidth}%`, background: color, opacity: 0.4 }} />
+                  )}
+                </div>
+                <span className="text-xs font-mono" style={{ color: "#999", width: 36, textAlign: "right", flexShrink: 0 }}>
+                  {weeklyUsed?.toFixed(0) ?? "—"}%
+                </span>
+                {projected != null && (
+                  <span className="text-xs font-semibold font-mono" style={{ color, width: 44, textAlign: "right", flexShrink: 0 }}>
+                    → {projected.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
