@@ -388,6 +388,7 @@ function buildActiveSessions(
   histories: Record<string, UsageSnapshot[]>,
   nowMs: number,
   colors: Record<string, string>,
+  activeRaceAccountKeys: ReadonlySet<string>,
 ) {
   return snapshots
     .map((snap, index): ActiveSession | null => {
@@ -401,7 +402,7 @@ function buildActiveSessions(
       const resetKey = normalizeResetKey(snap.session_reset_at);
       const currentRawPct = snap.session_pct;
       const currentNormPct = clamp((currentRawPct / totalPct) * 100, 0, 1000);
-      if (currentNormPct >= 99) return null;
+      if (currentNormPct >= 99 && !activeRaceAccountKeys.has(key)) return null;
       const samples = buildSamples(histories[key] ?? [], snap, resetKey, totalPct, nowMs);
       return {
         key,
@@ -565,9 +566,9 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   const [nowMs, setNowMs] = useState(Date.now());
   const [races, setRaces] = useState<UsageRace[]>(() => loadRaces());
   const [selectedKey, setSelectedKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
-  const [historyKey, setHistoryKey] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_SELECTED_STORAGE_KEY));
   const [expandedRaceId, setExpandedRaceId] = useState<string | null>(null);
   const [focusedRaceId, setFocusedRaceId] = useState<string | null>(() => localStorage.getItem(QUOTA_RACE_FOCUSED_STORAGE_KEY));
+  const [showHistoryView, setShowHistoryView] = useState(false);
   const [deleteRaceId, setDeleteRaceId] = useState<string | null>(null);
   const [draftSeedKey, setDraftSeedKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<RaceDraft>({ durationMinutes: "300", targetPct: "", stepPct: String(DEFAULT_STEP_PCT) });
@@ -577,9 +578,18 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     return () => window.clearInterval(timer);
   }, []);
 
+  const activeRaces = useMemo(
+    () => races.filter((race) => race.status === "active"),
+    [races],
+  );
+  const activeRaceAccountKeys = useMemo(
+    () => new Set(activeRaces.map((race) => race.accountKey)),
+    [activeRaces],
+  );
+
   const activeSessions = useMemo(
-    () => buildActiveSessions(snapshots, histories, nowMs, colors),
-    [snapshots, histories, nowMs, colors],
+    () => buildActiveSessions(snapshots, histories, nowMs, colors, activeRaceAccountKeys),
+    [snapshots, histories, nowMs, colors, activeRaceAccountKeys],
   );
 
   const sessionsByKey = useMemo(
@@ -600,7 +610,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   useEffect(() => {
     if (!selectedKey) return;
     setSelectedQuotaRaceAccountKey(selectedKey);
-    setHistoryKey(selectedKey);
   }, [selectedKey]);
 
   useEffect(() => {
@@ -641,20 +650,12 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     });
   }, [selectedSession?.key, selectedSession?.remainingNormPct]);
 
-  const activeRaces = useMemo(
-    () => races.filter((race) => race.status === "active"),
-    [races],
-  );
   const selectedActiveRace = useMemo(
     () => activeRaces.find((race) => race.accountKey === selectedKey) ?? null,
     [activeRaces, selectedKey],
   );
   const activeRace = selectedActiveRace;
 
-  const historyRaces = useMemo(
-    () => races.filter((race) => race.accountKey === (historyKey ?? selectedKey)),
-    [historyKey, races, selectedKey],
-  );
   const estimatedDurationSeconds = useMemo(() => {
     if (!selectedSession) return null;
     const maxTargetPct = Math.max(1, Math.floor(selectedSession.remainingNormPct));
@@ -674,7 +675,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
 
   const selectSession = useCallback((key: string) => {
     setSelectedKey(key);
-    setHistoryKey(key);
   }, []);
 
   const startRace = useCallback(() => {
@@ -705,7 +705,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     setRaces((previous) => [race, ...previous.filter((item) => item.id !== race.id)].slice(0, MAX_SAVED_RACES));
     setExpandedRaceId(race.id);
     setFocusedRaceId(race.id);
-    setHistoryKey(selectedSession.key);
   }, [draft, selectedSession]);
 
   const stopRace = useCallback((raceId: string) => {
@@ -727,6 +726,13 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   }, [deleteRaceId]);
 
   const pendingDeleteRace = deleteRaceId ? races.find((race) => race.id === deleteRaceId) ?? null : null;
+  const deleteDialog = pendingDeleteRace ? (
+    <DeleteRaceConfirmDialog
+      race={pendingDeleteRace}
+      onCancel={() => setDeleteRaceId(null)}
+      onConfirm={confirmDeleteRace}
+    />
+  ) : null;
 
   const focusedRace = focusedRaceId ? races.find((race) => race.id === focusedRaceId) ?? null : null;
 
@@ -744,6 +750,24 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
           onBack={() => setFocusedRaceId(null)}
           onStop={() => stopRace(focusedRace.id)}
         />
+        {deleteDialog}
+      </section>
+    );
+  }
+
+  if (showHistoryView) {
+    return (
+      <section>
+        <RaceHistoryPanel
+          races={races}
+          activeSessions={sessionsByKey}
+          expandedRaceId={expandedRaceId}
+          onToggle={(raceId) => setExpandedRaceId((current) => current === raceId ? null : raceId)}
+          onDelete={requestDeleteRace}
+          onBack={() => setShowHistoryView(false)}
+          fullView
+        />
+        {deleteDialog}
       </section>
     );
   }
@@ -758,15 +782,27 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             {historiesLoading ? " · 历史同步中" : ""}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={refreshAll}
-          title="刷新用量"
-          className="inline-flex items-center justify-center"
-          style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db" }}
-        >
-          <RefreshCw size={15} />
-        </button>
+        <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={() => setShowHistoryView(true)}
+            title="打开历史记录"
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 10px", borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db", fontSize: 12, fontWeight: 600 }}
+          >
+            <History size={14} />
+            历史记录
+          </button>
+          <button
+            type="button"
+            onClick={refreshAll}
+            title="刷新用量"
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db" }}
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
       </div>
 
       {activeRaces.length > 0 && (
@@ -820,23 +856,10 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
             onDraftChange={setDraft}
             onStart={startRace}
           />
-          <RaceHistoryPanel
-            races={historyRaces}
-            activeSessions={sessionsByKey}
-            expandedRaceId={expandedRaceId}
-            onToggle={(raceId) => setExpandedRaceId((current) => current === raceId ? null : raceId)}
-            onDelete={requestDeleteRace}
-          />
         </div>
       </div>
 
-      {pendingDeleteRace && (
-        <DeleteRaceConfirmDialog
-          race={pendingDeleteRace}
-          onCancel={() => setDeleteRaceId(null)}
-          onConfirm={confirmDeleteRace}
-        />
-      )}
+      {deleteDialog}
     </section>
   );
 }
@@ -856,7 +879,9 @@ function TimelinePanel({
   freshPluginKeys: Set<string>;
   onSelect: (key: string) => void;
 }) {
-  const activeRaceKeys = new Set(races.filter((race) => race.status === "active").map((race) => race.accountKey));
+  const activeRaceByKey = new Map(races
+    .filter((race) => race.status === "active")
+    .map((race) => [race.accountKey, race]));
   const maxRemainingHours = Math.max(SESSION_HOURS, ...sessions.map((session) => session.remainingSeconds / 3600));
   const timelineHours = Math.min(SESSION_HOURS, Math.max(1, Math.ceil(maxRemainingHours)));
   const timelineWidth = timelineHours * PX_PER_HOUR;
@@ -885,7 +910,7 @@ function TimelinePanel({
             <div style={{ width: LABEL_W, flexShrink: 0 }}>
               <div style={{ height: HEADER_H, borderBottom: "1px solid #2e2e2e" }} />
               {sessions.map((session) => {
-                const activeRace = activeRaceKeys.has(session.key);
+                const activeRace = activeRaceByKey.get(session.key) ?? null;
                 return (
                   <button
                     key={session.key}
@@ -912,14 +937,20 @@ function TimelinePanel({
                         <span className="text-[10px]" style={{ color: "#858585" }}>{providerLabel(session.provider)}</span>
                         {session.provider !== "codex" && !freshPluginKeys.has(session.key) && <PluginCollectMarker />}
                       </div>
-                      {activeRace && (
+                      {activeRace != null && (
                         <div className="inline-flex items-center gap-1 text-[10px]" style={{ color: session.color }}>
                           <Flag size={10} />
                           进行中
                         </div>
                       )}
                     </div>
-                    <CircularPercent pct={session.currentNormPct} color={session.color} size={38} />
+                    <CircularPercent
+                      pct={session.currentNormPct}
+                      color={session.color}
+                      size={38}
+                      targetStartPct={activeRace?.startNormPct}
+                      targetEndPct={activeRace != null ? activeRace.startNormPct + activeRace.targetDeltaPct : undefined}
+                    />
                   </button>
                 );
               })}
@@ -949,6 +980,16 @@ function TimelinePanel({
               {sessions.map((session, index) => {
                 const selected = selectedKey === session.key;
                 const blockWidth = Math.max(34, Math.min(session.remainingSeconds / 3600, timelineHours) * PX_PER_HOUR - 4);
+                const activeRace = activeRaceByKey.get(session.key) ?? null;
+                const raceTargetLeft = activeRace != null
+                  ? ((new Date(activeRace.startedAt).getTime() - nowMs) / 3600_000) * PX_PER_HOUR + 2
+                  : 0;
+                const raceTargetWidth = activeRace != null
+                  ? Math.max(28, activeRace.durationSeconds / 3600 * PX_PER_HOUR - 4)
+                  : 0;
+                const raceTargetVisible = activeRace != null
+                  && raceTargetLeft < timelineWidth - 2
+                  && raceTargetLeft + raceTargetWidth > 2;
                 return (
                   <button
                     key={session.key}
@@ -964,6 +1005,7 @@ function TimelinePanel({
                       background: selected ? "#252128" : index % 2 === 0 ? "#1e1e1e" : "#1a1a1a",
                       cursor: "pointer",
                       textAlign: "left",
+                      overflow: "hidden",
                     }}
                   >
                     {hourTicks.map(({ offsetHour, label }) => (
@@ -988,7 +1030,7 @@ function TimelinePanel({
                         height: ROW_H - 20,
                         borderRadius: 5,
                         background: `${session.color}${selected ? "33" : "18"}`,
-                        border: `${selected ? 2 : 1}px dashed ${session.color}${selected ? "" : "99"}`,
+                        border: `${selected ? 2 : 1}px solid ${session.color}${selected ? "" : "99"}`,
                         color: session.color,
                         display: "flex",
                         alignItems: "center",
@@ -1000,6 +1042,23 @@ function TimelinePanel({
                     >
                       <span>{formatShortDuration(session.remainingSeconds)} 后重置</span>
                     </span>
+                    {raceTargetVisible && activeRace != null && (
+                      <span
+                        title={`竞赛目标时长 ${formatDetailedHms(activeRace.durationSeconds)}`}
+                        style={{
+                          position: "absolute",
+                          left: raceTargetLeft,
+                          top: 24,
+                          width: raceTargetWidth,
+                          height: 10,
+                          borderRadius: 999,
+                          background: `${session.color}16`,
+                          border: `1px dashed ${session.color}`,
+                          zIndex: 2,
+                          pointerEvents: "none",
+                        }}
+                      />
+                    )}
                   </button>
                 );
               })}
@@ -1516,24 +1575,45 @@ function RaceHistoryPanel({
   expandedRaceId,
   onToggle,
   onDelete,
+  onBack,
+  fullView = false,
 }: {
   races: UsageRace[];
   activeSessions: Map<string, ActiveSession>;
   expandedRaceId: string | null;
   onToggle: (raceId: string) => void;
   onDelete: (raceId: string) => void;
+  onBack?: () => void;
+  fullView?: boolean;
 }) {
   return (
-    <div className="card p-0 overflow-hidden">
-      <div className="px-4 py-2.5 flex items-center gap-2" style={{ borderBottom: "1px solid #3a3a3a" }}>
-        <History size={15} style={{ color: "#aaa" }} />
-        <span className="text-sm font-semibold" style={{ color: "#ddd" }}>历史竞赛</span>
+    <div
+      className="card p-0 overflow-hidden"
+      style={fullView ? { minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column" } : undefined}
+    >
+      <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: "1px solid #3a3a3a" }}>
+        <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+          {onBack && (
+            <button
+              type="button"
+              title="返回主页"
+              onClick={onBack}
+              className="inline-flex items-center justify-center"
+              style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #3a3a3a", background: "#202020", color: "#d1d5db", flexShrink: 0 }}
+            >
+              <ArrowLeft size={15} />
+            </button>
+          )}
+          <History size={15} style={{ color: "#aaa", flexShrink: 0 }} />
+          <span className="text-sm font-semibold" style={{ color: "#ddd" }}>历史记录</span>
+        </div>
+        <span className="text-[11px]" style={{ color: "#858585", flexShrink: 0 }}>{races.length} 条</span>
       </div>
       {races.length === 0 ? (
-        <div className="py-8 text-center text-xs" style={{ color: "#777" }}>这个账号还没有小目标记录</div>
+        <div className="py-10 text-center text-xs" style={{ color: "#777" }}>还没有小目标竞赛记录</div>
       ) : (
-        <div className="divide-y" style={{ borderColor: "#2e2e2e" }}>
-          {races.slice(0, 12).map((race) => {
+        <div className="divide-y" style={{ borderColor: "#2e2e2e", overflowY: fullView ? "auto" : undefined, flex: fullView ? 1 : undefined }}>
+          {races.map((race) => {
             const completed = race.segments.filter((segment) => segment.completedAt != null).length;
             const session = activeSessions.get(race.accountKey);
             const consumed = raceConsumedDelta(race, session);
@@ -1559,7 +1639,9 @@ function RaceHistoryPanel({
                     <StatusBadge status={race.status} />
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div className="text-xs font-semibold truncate" style={{ color: "#ddd" }}>{race.alias}</div>
-                      <div className="text-[10px]" style={{ color: "#858585" }}>{formatLocalTime(race.startedAt)} · {formatShortDuration(race.durationSeconds)}</div>
+                      <div className="text-[10px]" style={{ color: "#858585" }}>
+                        {providerLabel(race.provider)} · {formatLocalTime(race.startedAt)} · {formatShortDuration(race.durationSeconds)}
+                      </div>
                     </div>
                     <div className="text-right font-mono" style={{ flexShrink: 0 }}>
                       <div className="text-xs" style={{ color: providerColor(race.provider) }}>{formatWhole(consumed)} / {formatWholePct(race.targetDeltaPct)}</div>
@@ -1906,11 +1988,46 @@ function ProviderIcon({ provider, size = 18 }: { provider: string; size?: number
   );
 }
 
-function CircularPercent({ pct, color, size = 44 }: { pct: number; color: string; size?: number }) {
+function pointOnCircle(center: number, radius: number, pct: number) {
+  const angle = (pct / 100) * Math.PI * 2 - Math.PI / 2;
+  return {
+    x: center + radius * Math.cos(angle),
+    y: center + radius * Math.sin(angle),
+  };
+}
+
+function describePercentArc(center: number, radius: number, startPct: number, endPct: number) {
+  const start = pointOnCircle(center, radius, startPct);
+  const end = pointOnCircle(center, radius, endPct);
+  const largeArc = endPct - startPct > 50 ? 1 : 0;
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y}`;
+}
+
+function CircularPercent({
+  pct,
+  color,
+  size = 44,
+  targetStartPct,
+  targetEndPct,
+}: {
+  pct: number;
+  color: string;
+  size?: number;
+  targetStartPct?: number;
+  targetEndPct?: number;
+}) {
   const safePct = clamp(pct, 0, 100);
+  const hasTarget = targetStartPct != null && targetEndPct != null && targetEndPct > targetStartPct;
+  const safeTargetStart = hasTarget ? clamp(targetStartPct, 0, 100) : 0;
+  const safeTargetEnd = hasTarget ? clamp(targetEndPct, 0, 100) : 0;
+  const targetArcVisible = hasTarget && safeTargetEnd > safeTargetStart;
+  const targetArcFull = targetArcVisible && safeTargetEnd - safeTargetStart >= 99.5;
   const strokeWidth = 4;
   const center = size / 2;
   const radius = (size - strokeWidth - 6) / 2;
+  const targetStrokeWidth = Math.max(2, strokeWidth - 1.4);
+  const targetStartPoint = targetArcVisible ? pointOnCircle(center, radius, safeTargetStart) : null;
+  const targetEndPoint = targetArcVisible ? pointOnCircle(center, radius, safeTargetEnd) : null;
   const circumference = 2 * Math.PI * radius;
   const dash = circumference * safePct / 100;
   return (
@@ -1921,6 +2038,35 @@ function CircularPercent({ pct, color, size = 44 }: { pct: number; color: string
     >
       <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} aria-hidden="true" style={{ position: "absolute", inset: 0 }}>
         <circle cx={center} cy={center} r={radius} fill="none" stroke="#3a3a3a" strokeWidth={strokeWidth} />
+        {targetArcVisible && (targetArcFull ? (
+          <circle
+            cx={center}
+            cy={center}
+            r={radius}
+            fill="none"
+            stroke="#f3f4f6"
+            strokeWidth={targetStrokeWidth}
+            strokeLinecap="round"
+            strokeDasharray="2 3"
+            opacity={0.42}
+          />
+        ) : (
+          <path
+            d={describePercentArc(center, radius, safeTargetStart, safeTargetEnd)}
+            fill="none"
+            stroke="#f3f4f6"
+            strokeWidth={targetStrokeWidth}
+            strokeLinecap="round"
+            strokeDasharray="2 3"
+            opacity={0.42}
+          />
+        ))}
+        {targetArcVisible && !targetArcFull && targetStartPoint != null && targetEndPoint != null && (
+          <>
+            <circle cx={targetStartPoint.x} cy={targetStartPoint.y} r={2.2} fill="#151515" stroke="#f3f4f6" strokeWidth={1.2} />
+            <circle cx={targetEndPoint.x} cy={targetEndPoint.y} r={2.2} fill="#151515" stroke="#f3f4f6" strokeWidth={1.2} />
+          </>
+        )}
         <circle
           cx={center}
           cy={center}
