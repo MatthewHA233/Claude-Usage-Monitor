@@ -1662,6 +1662,7 @@ function FocusedRaceView({
   onStop: () => void;
 }) {
   const [liveNowMs, setLiveNowMs] = useState(nowMs);
+  const [showAbandonConfirm, setShowAbandonConfirm] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setLiveNowMs(Date.now()), 100);
@@ -1711,10 +1712,11 @@ function FocusedRaceView({
   }
 
   return (
-    <div
-      className="card p-0 overflow-hidden"
-      style={{ minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column" }}
-    >
+    <>
+      <div
+        className="card p-0 overflow-hidden"
+        style={{ minHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column" }}
+      >
       <div className="px-4 py-3 flex items-center justify-between gap-3" style={{ borderBottom: "1px solid #3a3a3a" }}>
         <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
           <button
@@ -1740,12 +1742,12 @@ function FocusedRaceView({
         {race.status === "active" && (
           <button
             type="button"
-            title="停止记录"
-            onClick={onStop}
-            className="inline-flex items-center justify-center"
-            style={{ width: 30, height: 30, borderRadius: 6, border: "1px solid #444", background: "#242424", color: "#aaa", flexShrink: 0 }}
+            onClick={() => setShowAbandonConfirm(true)}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 10px", borderRadius: 6, border: "1px solid #5a3535", background: "#2b1d1d", color: "#fecaca", flexShrink: 0, fontSize: 12, fontWeight: 600 }}
           >
-            <X size={14} />
+            <X size={13} />
+            放弃
           </button>
         )}
       </div>
@@ -1792,7 +1794,18 @@ function FocusedRaceView({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+      {showAbandonConfirm && (
+        <AbandonRaceConfirmDialog
+          race={race}
+          onCancel={() => setShowAbandonConfirm(false)}
+          onConfirm={() => {
+            setShowAbandonConfirm(false);
+            onStop();
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -2009,6 +2022,107 @@ function ActiveRaceShortcut({
           <X size={13} />
         </button>
       )}
+    </div>
+  );
+}
+
+function AbandonRaceConfirmDialog({
+  race,
+  onCancel,
+  onConfirm,
+}: {
+  race: UsageRace;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const completed = race.segments.filter((segment) => segment.completedAt != null).length;
+
+  return (
+    <div
+      role="presentation"
+      onMouseDown={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 82,
+        padding: 18,
+        background: "rgba(0, 0, 0, 0.58)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="abandon-race-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: "min(420px, 100%)",
+          borderRadius: 10,
+          border: "1px solid #5a3535",
+          background: "#202020",
+          boxShadow: "0 18px 50px rgba(0, 0, 0, 0.48)",
+          overflow: "hidden",
+        }}
+      >
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid #333" }}>
+          <span
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, background: "#2b1d1d", color: "#fecaca", flexShrink: 0 }}
+          >
+            <X size={15} />
+          </span>
+          <div style={{ minWidth: 0 }}>
+            <div id="abandon-race-title" className="text-sm font-semibold" style={{ color: "#f3f4f6" }}>放弃进行中的竞赛？</div>
+            <div className="text-[11px] truncate" style={{ color: "#858585" }}>{race.alias}</div>
+          </div>
+        </div>
+
+        <div className="px-4 py-4 space-y-3">
+          <p className="text-sm" style={{ color: "#d4d4d4", margin: 0 }}>
+            放弃后这场竞赛会停止继续记录，并作为未完成记录保留在历史竞赛里。
+          </p>
+          <div
+            className="grid gap-2 text-[11px]"
+            style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", color: "#858585" }}
+          >
+            <span>{providerLabel(race.provider)}</span>
+            <span className="text-right">{formatLocalTime(race.startedAt)}</span>
+            <span>目标 {formatWholePct(race.targetDeltaPct)}</span>
+            <span className="text-right">已完成 {completed}/{race.segments.length}</span>
+          </div>
+        </div>
+
+        <div className="px-4 py-3 flex items-center justify-end gap-2" style={{ borderTop: "1px solid #333" }}>
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="inline-flex items-center justify-center"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #444", background: "#262626", color: "#d4d4d4" }}
+          >
+            继续竞赛
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="inline-flex items-center justify-center gap-1.5"
+            style={{ height: 30, padding: "0 12px", borderRadius: 6, border: "1px solid #7f2f2f", background: "#3a1f1f", color: "#fecaca" }}
+          >
+            <X size={13} />
+            确认放弃
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
