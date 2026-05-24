@@ -4,8 +4,23 @@ use crate::models::{
 };
 use rusqlite::{params, Connection, Result};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+const APP_DATA_DIR: &str = "claude-usage-monitor";
+const LEGACY_DATA_DIR: &str = "claude-switch";
+const GENERIC_PLAN_ALIASES: &[&str] = &[
+    "pro",
+    "max",
+    "team",
+    "enterprise",
+    "free",
+    "claude pro",
+    "claude max",
+    "claude team",
+    "claude enterprise",
+    "claude free",
+];
 
 /// 根据账号名哈希确定性地从调色板选色（新账号自动分配）
 fn color_for_alias(alias: &str) -> String {
@@ -22,8 +37,39 @@ fn color_for_alias(alias: &str) -> String {
 fn db_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("claude-switch")
+        .join(APP_DATA_DIR)
         .join("usage.db")
+}
+
+fn legacy_db_path() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|base| base.join(LEGACY_DATA_DIR).join("usage.db"))
+}
+
+fn migrate_legacy_data_dir() {
+    let Some(base) = dirs::data_local_dir() else {
+        return;
+    };
+    let legacy_dir = base.join(LEGACY_DATA_DIR);
+    let app_dir = base.join(APP_DATA_DIR);
+    if app_dir.exists() || !legacy_dir.exists() {
+        return;
+    }
+    let _ = copy_dir_recursive(&legacy_dir, &app_dir);
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else if file_type.is_file() && !dest.exists() {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
 }
 
 pub struct Database {
@@ -32,6 +78,7 @@ pub struct Database {
 
 impl Database {
     pub fn open() -> Result<Self> {
+        migrate_legacy_data_dir();
         let path = db_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -41,7 +88,9 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        db.import_legacy_database()?;
         db.normalize_pct_scale()?;
+        db.merge_generic_plan_aliases()?;
         db.dedupe_consecutive_snapshots()?;
         Ok(db)
     }
@@ -195,6 +244,23 @@ impl Database {
                 updated_at: row.get(4)?,
             })
         })?;
+        rows.collect()
+    }
+
+    pub fn email_aliases(&self, provider: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT account_alias
+             FROM (
+                 SELECT account_alias, MAX(collected_at) AS last_seen
+                 FROM usage_snapshots
+                 WHERE provider = ?1
+                   AND account_alias LIKE '%@%'
+                 GROUP BY account_alias
+             )
+             ORDER BY last_seen DESC",
+        )?;
+        let rows = stmt.query_map(params![provider], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
 
@@ -413,6 +479,128 @@ impl Database {
         Ok(())
     }
 
+    fn import_legacy_database(&self) -> Result<()> {
+        let Some(legacy_path) = legacy_db_path() else {
+            return Ok(());
+        };
+        if !legacy_path.exists() {
+            return Ok(());
+        }
+
+        if let (Ok(current), Ok(legacy)) = (
+            std::fs::canonicalize(db_path()),
+            std::fs::canonicalize(&legacy_path),
+        ) {
+            if current == legacy {
+                return Ok(());
+            }
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let legacy_path = legacy_path.to_string_lossy().to_string();
+        conn.execute("ATTACH DATABASE ?1 AS legacy", params![legacy_path])?;
+        let import_result = import_attached_legacy_database(&conn);
+        let detach_result = conn.execute_batch("DETACH DATABASE legacy");
+        import_result?;
+        detach_result?;
+        Ok(())
+    }
+
+    fn merge_generic_plan_aliases(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let generic_aliases = quoted_generic_plan_aliases();
+        let generic_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*)
+                 FROM usage_snapshots
+                 WHERE provider = 'claude_code'
+                   AND lower(account_alias) IN ({generic_aliases})"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if generic_count == 0 {
+            return Ok(());
+        }
+
+        let email_aliases = {
+            let mut stmt = conn.prepare(
+                "SELECT account_alias
+                 FROM (
+                     SELECT account_alias, MAX(collected_at) AS last_seen
+                     FROM usage_snapshots
+                     WHERE provider = 'claude_code'
+                       AND account_alias LIKE '%@%'
+                     GROUP BY account_alias
+                 )
+                 ORDER BY last_seen DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+
+        if email_aliases.len() != 1 {
+            let message = if email_aliases.is_empty() {
+                "Claude Code has plan-label history, but no email account to merge into".to_string()
+            } else {
+                format!(
+                    "Claude Code has plan-label history, but multiple email accounts exist: {}",
+                    email_aliases.join(", ")
+                )
+            };
+            conn.execute(
+                "INSERT INTO local_usage_status (provider, account_alias, ok, message, updated_at)
+                 VALUES ('claude_code', NULL, 0, ?1, ?2)
+                 ON CONFLICT(provider) DO UPDATE SET
+                    account_alias = excluded.account_alias,
+                    ok = excluded.ok,
+                    message = excluded.message,
+                    updated_at = excluded.updated_at",
+                params![message, chrono::Utc::now().to_rfc3339()],
+            )?;
+            return Ok(());
+        }
+
+        let target_alias = &email_aliases[0];
+        for alias in GENERIC_PLAN_ALIASES {
+            conn.execute(
+                "UPDATE usage_snapshots
+                 SET account_alias = ?1
+                 WHERE provider = 'claude_code'
+                   AND lower(account_alias) = ?2",
+                params![target_alias, alias],
+            )?;
+            conn.execute(
+                "UPDATE filtered_inbox
+                 SET account_alias = ?1
+                 WHERE provider = 'claude_code'
+                   AND lower(account_alias) = ?2",
+                params![target_alias, alias],
+            )?;
+            conn.execute(
+                "UPDATE local_usage_status
+                 SET account_alias = ?1
+                 WHERE provider = 'claude_code'
+                   AND account_alias IS NOT NULL
+                   AND lower(account_alias) = ?2",
+                params![target_alias, alias],
+            )?;
+            conn.execute(
+                "DELETE FROM account_pause_states
+                 WHERE provider = 'claude_code'
+                   AND lower(account_alias) = ?1",
+                params![alias],
+            )?;
+            conn.execute(
+                "DELETE FROM account_colors
+                 WHERE lower(alias) = ?1",
+                params![alias],
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// OAuth APIs can jitter reset_at while the visible usage is unchanged.
     /// Keep true reset-window shifts, but remove adjacent rows caused by small reset_at drift.
     fn dedupe_consecutive_snapshots(&self) -> Result<()> {
@@ -593,9 +781,16 @@ impl Database {
     pub fn all_histories_grouped(&self, limit: i64) -> Result<HashMap<String, Vec<UsageSnapshot>>> {
         let accounts: Vec<(String, String)> = {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT provider, account_alias FROM usage_snapshots ORDER BY provider, account_alias",
-            )?;
+            let generic_aliases = quoted_generic_plan_aliases();
+            let mut stmt = conn.prepare(&format!(
+                "SELECT DISTINCT provider, account_alias
+                 FROM usage_snapshots
+                 WHERE NOT (
+                     provider = 'claude_code'
+                     AND lower(account_alias) IN ({generic_aliases})
+                 )
+                 ORDER BY provider, account_alias",
+            ))?;
             let rows =
                 stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             rows.collect::<Result<Vec<_>>>()?
@@ -684,18 +879,264 @@ impl Database {
     /// 获取数据库中所有账号各自最新一条（不依赖 config）
     pub fn latest_all(&self) -> Result<Vec<UsageSnapshot>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let generic_aliases = quoted_generic_plan_aliases();
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, provider, account_alias, collected_at,
                     session_pct, session_total_pct, session_reset_at,
                     weekly_pct, weekly_total_pct, weekly_reset_at, error
              FROM usage_snapshots
-             WHERE id IN (
-                 SELECT MAX(id) FROM usage_snapshots GROUP BY provider, account_alias
+             WHERE NOT (
+                 provider = 'claude_code'
+                 AND lower(account_alias) IN ({generic_aliases})
+             )
+               AND id IN (
+                 SELECT MAX(id)
+                 FROM usage_snapshots
+                 WHERE NOT (
+                     provider = 'claude_code'
+                     AND lower(account_alias) IN ({generic_aliases})
+                 )
+                 GROUP BY provider, account_alias
              )
              ORDER BY provider, account_alias",
-        )?;
+        ))?;
         let rows = stmt.query_map([], row_to_snapshot)?;
         rows.collect()
+    }
+}
+
+fn quoted_generic_plan_aliases() -> String {
+    GENERIC_PLAN_ALIASES
+        .iter()
+        .map(|alias| format!("'{}'", alias.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn import_attached_legacy_database(conn: &Connection) -> Result<()> {
+    import_legacy_usage_snapshots(conn)?;
+    import_legacy_filtered_inbox(conn)?;
+    import_legacy_account_colors(conn)?;
+    import_legacy_account_pause_states(conn)?;
+    import_legacy_token_usage_files(conn)?;
+    import_legacy_token_usage_days(conn)?;
+    Ok(())
+}
+
+fn import_legacy_usage_snapshots(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "usage_snapshots")?;
+    if !columns.contains("account_alias") || !columns.contains("collected_at") {
+        return Ok(());
+    }
+
+    let provider = legacy_expr(&columns, "provider", "'claude_code'");
+    let account_alias = legacy_expr(&columns, "account_alias", "''");
+    let collected_at = legacy_expr(&columns, "collected_at", "''");
+    let session_pct = legacy_expr(&columns, "session_pct", "NULL");
+    let session_total_pct = legacy_expr(&columns, "session_total_pct", "100");
+    let session_reset_at = legacy_expr(&columns, "session_reset_at", "NULL");
+    let weekly_pct = legacy_expr(&columns, "weekly_pct", "NULL");
+    let weekly_total_pct = legacy_expr(&columns, "weekly_total_pct", "100");
+    let weekly_reset_at = legacy_expr(&columns, "weekly_reset_at", "NULL");
+    let error = legacy_expr(&columns, "error", "NULL");
+
+    conn.execute_batch(&format!(
+        "
+        INSERT INTO usage_snapshots (
+            provider, account_alias, collected_at,
+            session_pct, session_total_pct, session_reset_at,
+            weekly_pct, weekly_total_pct, weekly_reset_at, error
+        )
+        SELECT
+            {provider}, {account_alias}, {collected_at},
+            {session_pct}, {session_total_pct}, {session_reset_at},
+            {weekly_pct}, {weekly_total_pct}, {weekly_reset_at}, {error}
+        FROM legacy.usage_snapshots l
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM usage_snapshots m
+            WHERE m.provider IS {provider}
+              AND m.account_alias IS {account_alias}
+              AND m.collected_at IS {collected_at}
+              AND m.session_pct IS {session_pct}
+              AND m.session_total_pct IS {session_total_pct}
+              AND m.session_reset_at IS {session_reset_at}
+              AND m.weekly_pct IS {weekly_pct}
+              AND m.weekly_total_pct IS {weekly_total_pct}
+              AND m.weekly_reset_at IS {weekly_reset_at}
+              AND m.error IS {error}
+        );
+        "
+    ))?;
+    Ok(())
+}
+
+fn import_legacy_filtered_inbox(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "filtered_inbox")?;
+    if !columns.contains("account_alias")
+        || !columns.contains("collected_at")
+        || !columns.contains("filter_reason")
+        || !columns.contains("created_at")
+    {
+        return Ok(());
+    }
+
+    let provider = legacy_expr(&columns, "provider", "'claude_code'");
+    let account_alias = legacy_expr(&columns, "account_alias", "''");
+    let collected_at = legacy_expr(&columns, "collected_at", "''");
+    let session_pct = legacy_expr(&columns, "session_pct", "NULL");
+    let session_total_pct = legacy_expr(&columns, "session_total_pct", "100");
+    let session_reset_at = legacy_expr(&columns, "session_reset_at", "NULL");
+    let weekly_pct = legacy_expr(&columns, "weekly_pct", "NULL");
+    let weekly_total_pct = legacy_expr(&columns, "weekly_total_pct", "100");
+    let weekly_reset_at = legacy_expr(&columns, "weekly_reset_at", "NULL");
+    let filter_reason = legacy_expr(&columns, "filter_reason", "''");
+    let created_at = legacy_expr(&columns, "created_at", "''");
+
+    conn.execute_batch(&format!(
+        "
+        INSERT INTO filtered_inbox (
+            provider, account_alias, collected_at,
+            session_pct, session_total_pct, session_reset_at,
+            weekly_pct, weekly_total_pct, weekly_reset_at,
+            filter_reason, created_at
+        )
+        SELECT
+            {provider}, {account_alias}, {collected_at},
+            {session_pct}, {session_total_pct}, {session_reset_at},
+            {weekly_pct}, {weekly_total_pct}, {weekly_reset_at},
+            {filter_reason}, {created_at}
+        FROM legacy.filtered_inbox l
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM filtered_inbox m
+            WHERE m.provider IS {provider}
+              AND m.account_alias IS {account_alias}
+              AND m.collected_at IS {collected_at}
+              AND m.session_pct IS {session_pct}
+              AND m.session_total_pct IS {session_total_pct}
+              AND m.session_reset_at IS {session_reset_at}
+              AND m.weekly_pct IS {weekly_pct}
+              AND m.weekly_total_pct IS {weekly_total_pct}
+              AND m.weekly_reset_at IS {weekly_reset_at}
+              AND m.filter_reason IS {filter_reason}
+              AND m.created_at IS {created_at}
+        );
+        "
+    ))?;
+    Ok(())
+}
+
+fn import_legacy_account_colors(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "account_colors")?;
+    if columns.contains("alias") && columns.contains("color") {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO account_colors (alias, color)
+            SELECT alias, color
+            FROM legacy.account_colors;
+            ",
+        )?;
+    }
+    Ok(())
+}
+
+fn import_legacy_account_pause_states(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "account_pause_states")?;
+    if columns.contains("account_key")
+        && columns.contains("provider")
+        && columns.contains("account_alias")
+        && columns.contains("paused")
+        && columns.contains("paused_at")
+    {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO account_pause_states (
+                account_key, provider, account_alias, paused, paused_at
+            )
+            SELECT account_key, provider, account_alias, paused, paused_at
+            FROM legacy.account_pause_states;
+            ",
+        )?;
+    }
+    Ok(())
+}
+
+fn import_legacy_token_usage_files(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "token_usage_files")?;
+    if columns.contains("path")
+        && columns.contains("provider")
+        && columns.contains("modified_unix")
+        && columns.contains("size")
+        && columns.contains("days_json")
+        && columns.contains("scanned_at")
+    {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO token_usage_files (
+                path, provider, modified_unix, size, days_json, scanned_at
+            )
+            SELECT path, provider, modified_unix, size, days_json, scanned_at
+            FROM legacy.token_usage_files;
+            ",
+        )?;
+    }
+    Ok(())
+}
+
+fn import_legacy_token_usage_days(conn: &Connection) -> Result<()> {
+    let columns = legacy_table_columns(conn, "token_usage_days")?;
+    if columns.contains("provider")
+        && columns.contains("date")
+        && columns.contains("input_tokens")
+        && columns.contains("cache_read_tokens")
+        && columns.contains("cache_creation_tokens")
+        && columns.contains("output_tokens")
+        && columns.contains("total_tokens")
+        && columns.contains("cost_usd")
+        && columns.contains("models_json")
+        && columns.contains("updated_at")
+    {
+        conn.execute_batch(
+            "
+            INSERT OR IGNORE INTO token_usage_days (
+                provider, date, input_tokens, cache_read_tokens,
+                cache_creation_tokens, output_tokens, total_tokens,
+                cost_usd, models_json, updated_at
+            )
+            SELECT
+                provider, date, input_tokens, cache_read_tokens,
+                cache_creation_tokens, output_tokens, total_tokens,
+                cost_usd, models_json, updated_at
+            FROM legacy.token_usage_days;
+            ",
+        )?;
+    }
+    Ok(())
+}
+
+fn legacy_table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM legacy.sqlite_master
+         WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(HashSet::new());
+    }
+
+    let mut stmt = conn.prepare(&format!("PRAGMA legacy.table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect()
+}
+
+fn legacy_expr(columns: &HashSet<String>, column: &str, fallback: &str) -> String {
+    if columns.contains(column) {
+        format!("l.{column}")
+    } else {
+        fallback.to_string()
     }
 }
 

@@ -10,8 +10,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const COLLECT_INTERVAL_SECONDS: u64 = 60;
-const CLAUDE_COLLECT_MIN_SECONDS: u64 = 300;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+const COLLECT_INTERVAL_SECONDS: u64 = 20;
+const CLAUDE_COLLECT_MIN_SECONDS: u64 = 120;
 const SESSION_RESET_SIGNIFICANT_SECONDS: i64 = 4 * 60 * 60;
 const WEEKLY_RESET_SIGNIFICANT_SECONDS: i64 = 12 * 60 * 60;
 
@@ -52,7 +58,7 @@ pub async fn collect_once(db: Arc<Database>) {
     }
 
     if should_collect_claude() {
-        match collect_claude_oauth().await {
+        match collect_claude_oauth(db.as_ref()).await {
             Ok(Some(snapshot)) => {
                 let message = format!(
                     "Claude OAuth ok: {} session={:?} weekly={:?}",
@@ -160,7 +166,11 @@ fn latest_cached_alias(db: &Database, provider: &str) -> Option<String> {
         .map(|snapshots| {
             snapshots
                 .into_iter()
-                .find(|snapshot| snapshot.provider == provider && snapshot.error.is_none())
+                .find(|snapshot| {
+                    snapshot.provider == provider
+                        && snapshot.error.is_none()
+                        && !is_plan_label(&snapshot.account_alias)
+                })
                 .map(|snapshot| snapshot.account_alias)
         })
         .unwrap_or(None)
@@ -192,7 +202,7 @@ fn codex_auth_path() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-async fn collect_claude_oauth() -> Result<Option<UsageSnapshot>, String> {
+async fn collect_claude_oauth(db: &Database) -> Result<Option<UsageSnapshot>, String> {
     let Some(credentials_path) = claude_credentials_path() else {
         return Ok(None);
     };
@@ -204,8 +214,12 @@ async fn collect_claude_oauth() -> Result<Option<UsageSnapshot>, String> {
         return Ok(None);
     }
     let identity = claude_auth_status().unwrap_or_default();
+    let email_aliases = db
+        .email_aliases("claude_code")
+        .map_err(|error| error.to_string())?;
+    let account_alias = identity.resolve_account_alias(&credentials, &email_aliases)?;
     let usage = fetch_claude_usage(&credentials.access_token).await?;
-    Ok(Some(usage.to_snapshot(&identity, &credentials)))
+    Ok(Some(usage.to_snapshot(account_alias)))
 }
 
 fn claude_credentials_path() -> Option<PathBuf> {
@@ -223,6 +237,7 @@ struct CodexCredentials {
 #[derive(Debug, Clone)]
 struct ClaudeCredentials {
     access_token: String,
+    email: Option<String>,
     subscription_type: Option<String>,
 }
 
@@ -235,9 +250,15 @@ impl ClaudeCredentials {
         let access_token = string_field(oauth, "accessToken")
             .or_else(|| string_field(oauth, "access_token"))
             .ok_or_else(|| ".credentials.json missing access token".to_string())?;
+        let id_token = string_field(oauth, "idToken").or_else(|| string_field(oauth, "id_token"));
+        let email = email_candidate(string_field(oauth, "email"))
+            .or_else(|| email_candidate(string_field(oauth, "accountEmail")))
+            .or_else(|| id_token.as_deref().and_then(email_from_jwt))
+            .or_else(|| email_from_jwt(&access_token));
         let subscription_type = string_field(oauth, "subscriptionType");
         Ok(Self {
             access_token,
+            email,
             subscription_type,
         })
     }
@@ -254,13 +275,38 @@ struct ClaudeAuthStatus {
 }
 
 impl ClaudeAuthStatus {
-    fn account_alias(&self, credentials: &ClaudeCredentials) -> String {
-        self.email
+    fn resolve_account_alias(
+        &self,
+        credentials: &ClaudeCredentials,
+        existing_email_aliases: &[String],
+    ) -> Result<String, String> {
+        if let Some(email) = email_candidate(self.email.clone())
+            .or_else(|| email_candidate(credentials.email.clone()))
+            .or_else(|| email_candidate(self.org_name.clone()))
+        {
+            return Ok(email);
+        }
+
+        if existing_email_aliases.len() == 1 {
+            return Ok(existing_email_aliases[0].clone());
+        }
+
+        let label = self
+            .subscription_type
             .clone()
-            .or_else(|| self.org_name.clone())
-            .or_else(|| self.subscription_type.clone())
             .or_else(|| credentials.subscription_type.clone())
-            .unwrap_or_else(|| "Claude Code Local".to_string())
+            .or_else(|| self.org_name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        if existing_email_aliases.is_empty() {
+            Err(format!(
+                "Claude Code account identity unresolved: CLI returned '{label}', but no existing email account can inherit it"
+            ))
+        } else {
+            Err(format!(
+                "Claude Code account identity unresolved: CLI returned '{label}', but multiple existing email accounts match: {}",
+                existing_email_aliases.join(", ")
+            ))
+        }
     }
 }
 
@@ -310,6 +356,32 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn email_candidate(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.contains('@') && !is_plan_label(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_plan_label(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "pro"
+            | "max"
+            | "team"
+            | "enterprise"
+            | "free"
+            | "claude pro"
+            | "claude max"
+            | "claude team"
+            | "claude enterprise"
+            | "claude free"
+    )
+}
+
 fn email_from_jwt(token: &str) -> Option<String> {
     let payload = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
@@ -324,7 +396,7 @@ fn email_from_jwt(token: &str) -> Option<String> {
 async fn fetch_codex_usage(credentials: &CodexCredentials) -> Result<CodexUsageResponse, String> {
     let url = codex_usage_url();
     let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static("Codex-switch"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("claude-usage-monitor"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(
         AUTHORIZATION,
@@ -386,8 +458,12 @@ async fn fetch_claude_usage(access_token: &str) -> Result<ClaudeOAuthUsageRespon
 }
 
 fn claude_auth_status() -> Result<ClaudeAuthStatus, String> {
-    let output = Command::new("cmd")
-        .args(["/C", "claude", "auth", "status"])
+    let mut command = Command::new("cmd");
+    command.args(["/C", "claude", "auth", "status"]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command
         .output()
         .map_err(|e| format!("run claude auth status: {e}"))?;
     if !output.status.success() {
@@ -527,11 +603,7 @@ struct ClaudeOAuthWindow {
 }
 
 impl ClaudeOAuthUsageResponse {
-    fn to_snapshot(
-        &self,
-        identity: &ClaudeAuthStatus,
-        credentials: &ClaudeCredentials,
-    ) -> UsageSnapshot {
+    fn to_snapshot(&self, account_alias: String) -> UsageSnapshot {
         let weekly = self
             .seven_day
             .as_ref()
@@ -541,7 +613,7 @@ impl ClaudeOAuthUsageResponse {
         UsageSnapshot {
             id: None,
             provider: "claude_code".to_string(),
-            account_alias: identity.account_alias(credentials),
+            account_alias,
             collected_at: Utc::now().to_rfc3339(),
             session_pct: self
                 .five_hour
