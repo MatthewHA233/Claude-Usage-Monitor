@@ -39,6 +39,10 @@ const ACTIVE_UPDATE_WINDOW_MS = 10 * 60_000;
 const PROVIDER_ORDER = ["claude_code", "codex"];
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80", "#f0a500", "#a78bfa"];
 const PLUGIN_STATUS_FRESH_MS = 90_000;
+const TIMER_OK_COLOR = "#c084fc";
+const TIMER_OVER_COLOR = "#f87171";
+const RECORD_OK_COLOR = "#4ade80";
+const RECORD_PENDING_COLOR = "#858585";
 
 interface Props {
   snapshots: UsageSnapshot[];
@@ -151,6 +155,20 @@ function formatDigitalClock(seconds: number | null) {
   return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function formatRaceClockParts(seconds: number | null, showHours: boolean) {
+  if (seconds == null || !Number.isFinite(seconds)) return { main: "--:--", centis: "" };
+  const safeMs = Math.max(0, Math.floor(seconds * 1000));
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  const centis = Math.floor((safeMs % 1000) / 10);
+  const main = showHours || hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  return { main, centis: `.${String(centis).padStart(2, "0")}` };
+}
+
 function formatShortDuration(seconds: number | null) {
   if (seconds == null || !Number.isFinite(seconds)) return "-";
   const safe = Math.max(0, Math.round(seconds));
@@ -161,6 +179,26 @@ function formatShortDuration(seconds: number | null) {
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
   return restMinutes > 0 ? `${hours}h${restMinutes}m` : `${hours}h`;
+}
+
+function formatDetailedHms(seconds: number | null) {
+  if (seconds == null || !Number.isFinite(seconds)) return "-";
+  const safe = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
+  const parts = [
+    hours > 0 ? `${hours}h` : null,
+    minutes > 0 ? `${minutes}m` : null,
+    secs > 0 ? `${secs}s` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : "0s";
+}
+
+function formatTargetDelta(elapsedSeconds: number, targetSeconds: number) {
+  const delta = targetSeconds - elapsedSeconds;
+  if (delta >= 0) return `盈余 ${formatShortDuration(delta)}`;
+  return `超出 ${formatShortDuration(Math.abs(delta))}`;
 }
 
 function shortAlias(alias: string) {
@@ -467,10 +505,6 @@ function raceConsumedDelta(race: UsageRace, session: ActiveSession | undefined) 
   return lastDone?.cumulativeDeltaPct ?? 0;
 }
 
-function raceDeadlineMs(race: UsageRace) {
-  return new Date(race.startedAt).getTime() + race.durationSeconds * 1000;
-}
-
 function nextOpenSegment(race: UsageRace) {
   return race.segments.find((segment) => segment.completedAt == null) ?? race.segments[race.segments.length - 1] ?? null;
 }
@@ -479,6 +513,49 @@ function segmentStartMs(race: UsageRace, segment: RaceSegment | null) {
   if (!segment || segment.index <= 1) return new Date(race.startedAt).getTime();
   const previous = race.segments[segment.index - 2];
   return previous?.completedAt ? new Date(previous.completedAt).getTime() : new Date(race.startedAt).getTime();
+}
+
+function openSegment(race: UsageRace) {
+  return race.segments.find((segment) => segment.completedAt == null) ?? null;
+}
+
+function segmentTargetSeconds(race: UsageRace, segment: RaceSegment) {
+  if (race.targetDeltaPct <= 0) return race.durationSeconds / Math.max(1, race.segments.length);
+  return race.durationSeconds * (segment.targetDeltaPct / race.targetDeltaPct);
+}
+
+function segmentCumulativeTargetSeconds(race: UsageRace, segment: RaceSegment) {
+  if (race.targetDeltaPct <= 0) return race.durationSeconds;
+  return race.durationSeconds * (segment.cumulativeDeltaPct / race.targetDeltaPct);
+}
+
+function raceElapsedSeconds(race: UsageRace, nowMs: number) {
+  if (race.status === "completed") {
+    const lastCompleted = [...race.segments].reverse().find((segment) => segment.elapsedSeconds != null);
+    if (lastCompleted?.elapsedSeconds != null) return lastCompleted.elapsedSeconds;
+  }
+  const startedMs = new Date(race.startedAt).getTime();
+  return Math.max(0, (nowMs - startedMs) / 1000);
+}
+
+function segmentTiming(race: UsageRace, segment: RaceSegment, nowMs?: number) {
+  const previous = segment.index > 1 ? race.segments[segment.index - 2] : null;
+  const previousTotalSeconds = previous?.elapsedSeconds ?? 0;
+  const currentOpen = openSegment(race);
+  const isLiveSegment = race.status === "active" && currentOpen?.index === segment.index && nowMs != null;
+  const totalElapsedSeconds = segment.elapsedSeconds ?? (isLiveSegment && nowMs != null ? raceElapsedSeconds(race, nowMs) : null);
+  const elapsedSeconds = totalElapsedSeconds != null ? Math.max(0, totalElapsedSeconds - previousTotalSeconds) : null;
+  const targetSeconds = segmentTargetSeconds(race, segment);
+  const cumulativeTargetSeconds = segmentCumulativeTargetSeconds(race, segment);
+  return {
+    elapsedSeconds,
+    totalElapsedSeconds,
+    targetSeconds,
+    cumulativeTargetSeconds,
+    isLiveSegment,
+    isSegmentOver: elapsedSeconds != null && elapsedSeconds > targetSeconds,
+    isTotalOver: totalElapsedSeconds != null && totalElapsedSeconds > cumulativeTargetSeconds,
+  };
 }
 
 export default function SessionRacePanel({ snapshots, recommendation: _recommendation, pluginUsageStatuses, onRefresh }: Props) {
@@ -572,18 +649,6 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
     () => activeRaces.find((race) => race.accountKey === selectedKey) ?? null,
     [activeRaces, selectedKey],
   );
-  const pinnedActiveRace = selectedActiveRace ?? activeRaces[0] ?? null;
-  const pinnedActiveRaceSession = pinnedActiveRace ? sessionsByKey.get(pinnedActiveRace.accountKey) : undefined;
-  const pinnedActiveRaceColor = pinnedActiveRaceSession?.color ?? (pinnedActiveRace ? providerColor(pinnedActiveRace.provider) : null);
-  const pinnedActiveRaceContext = pinnedActiveRace && selectedActiveRace == null && activeRaces.length > 1
-    ? `还有 ${activeRaces.length} 个进行中的竞赛`
-    : activeRaces.length > 1
-      ? `共 ${activeRaces.length} 个进行中的竞赛`
-      : null;
-  const pinnedActiveRaceTitle = pinnedActiveRace && selectedActiveRace == null
-    ? "其他账号正在竞赛"
-    : "进行中的竞赛";
-  const pinnedActiveRaceTone = pinnedActiveRace && selectedActiveRace == null ? "global" : "selected";
   const activeRace = selectedActiveRace;
 
   const historyRaces = useMemo(
@@ -704,18 +769,34 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
         </button>
       </div>
 
-      {pinnedActiveRace && (
-        <ActiveRaceShortcut
-          race={pinnedActiveRace}
-          session={pinnedActiveRaceSession}
-          nowMs={nowMs}
-          title={pinnedActiveRaceTitle}
-          context={pinnedActiveRaceContext}
-          tone={pinnedActiveRaceTone}
-          colorOverride={pinnedActiveRaceColor ?? undefined}
-          onOpen={() => setFocusedRaceId(pinnedActiveRace.id)}
-          onStop={() => stopRace(pinnedActiveRace.id)}
-        />
+      {activeRaces.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3 text-[11px]" style={{ color: "#858585" }}>
+            <span>进行中的竞赛</span>
+            <span>{activeRaces.length} 个账号</span>
+          </div>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+            {activeRaces.map((race) => {
+              const session = sessionsByKey.get(race.accountKey);
+              const isSelectedRace = race.accountKey === selectedKey;
+              const raceColor = session?.color ?? providerColor(race.provider);
+              return (
+                <ActiveRaceShortcut
+                  key={race.id}
+                  race={race}
+                  session={session}
+                  nowMs={nowMs}
+                  title={isSelectedRace ? "当前账号竞赛" : "进行中的竞赛"}
+                  context={`${providerLabel(race.provider)} · ${shortAlias(race.alias)}`}
+                  tone={isSelectedRace ? "selected" : "global"}
+                  colorOverride={raceColor}
+                  onOpen={() => setFocusedRaceId(race.id)}
+                  onStop={() => stopRace(race.id)}
+                />
+              );
+            })}
+          </div>
+        </div>
       )}
 
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
@@ -1114,27 +1195,42 @@ function FocusedRaceView({
   onBack: () => void;
   onStop: () => void;
 }) {
+  const [liveNowMs, setLiveNowMs] = useState(nowMs);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setLiveNowMs(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setLiveNowMs(nowMs);
+  }, [nowMs]);
+
   const color = session?.color ?? providerColor(race.provider);
   const consumed = raceConsumedDelta(race, session);
   const progress = race.targetDeltaPct > 0 ? (consumed / race.targetDeltaPct) * 100 : 0;
-  const nextSegment = nextOpenSegment(race);
-  const currentSegmentStartMs = segmentStartMs(race, nextSegment);
-  const currentSegmentElapsed = nextSegment?.completedAt
-    ? nextSegment.elapsedSeconds
-    : Math.max(0, (nowMs - currentSegmentStartMs) / 1000);
-  const totalRemaining = (raceDeadlineMs(race) - nowMs) / 1000;
+  const nextSegment = openSegment(race) ?? race.segments[race.segments.length - 1] ?? null;
+  const currentTiming = nextSegment ? segmentTiming(race, nextSegment, liveNowMs) : null;
+  const currentSegmentElapsed = currentTiming?.elapsedSeconds ?? 0;
+  const currentSegmentTarget = currentTiming?.targetSeconds ?? race.durationSeconds;
+  const totalElapsed = raceElapsedSeconds(race, liveNowMs);
+  const totalProgressTarget = currentTiming?.cumulativeTargetSeconds ?? race.durationSeconds;
   const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
   const segmentRemaining = nextSegment && nextSegment.completedAt == null
     ? Math.max(0, nextSegment.cumulativeDeltaPct - consumed)
     : 0;
-  const plannedPerSegment = race.segments.length > 0 ? race.durationSeconds / race.segments.length : race.durationSeconds;
   const targetRaw = rawFromNorm(race.targetDeltaPct, race.totalPct);
   const consumedRaw = rawFromNorm(consumed, race.totalPct);
-  const deadlineIso = new Date(raceDeadlineMs(race)).toISOString();
-  const totalClockColor = race.status !== "completed" && totalRemaining <= 0 ? "#f87171" : color;
+  const currentClockColor = race.status === "active" && currentTiming?.isSegmentOver ? TIMER_OVER_COLOR : TIMER_OK_COLOR;
+  const totalClockColor = race.status === "active" && (currentTiming?.isTotalOver || totalElapsed > race.durationSeconds) ? TIMER_OVER_COLOR : TIMER_OK_COLOR;
+  const showHours = race.durationSeconds >= 3600 || totalElapsed >= 3600 || currentSegmentTarget >= 3600;
+  const currentTargetColor = currentTiming?.isSegmentOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
+  const totalTargetColor = currentTiming?.isTotalOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
   const segmentSubtext = race.status === "active" && nextSegment != null && nextSegment.completedAt == null
     ? `#${nextSegment.index} 还差 ${formatWholePct(segmentRemaining)}`
     : `${completedCount} / ${race.segments.length} 个小目标`;
+  const segmentTargetSubtext = `每个小目标 ${formatDetailedHms(currentSegmentTarget)}`;
+  const totalTargetSubtext = `总共 ${formatDetailedHms(race.durationSeconds)}`;
 
   return (
     <div
@@ -1176,19 +1272,25 @@ function FocusedRaceView({
         )}
       </div>
 
-      <div className="p-4 sm:p-5 space-y-5" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <div className="grid gap-3 sm:gap-5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
+      <div className="p-3 sm:p-4 space-y-4" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
           <FocusTimerCard
             label="当前小目标"
-            value={formatDigitalClock(currentSegmentElapsed)}
-            subtext={`${segmentSubtext} · 计划 ${formatShortDuration(plannedPerSegment)}`}
-            color={color}
+            seconds={currentSegmentElapsed}
+            subtext={`${segmentSubtext} · ${segmentTargetSubtext}`}
+            targetText={`目标 ${formatShortDuration(currentSegmentTarget)} · ${formatTargetDelta(currentSegmentElapsed, currentSegmentTarget)}`}
+            targetColor={currentTargetColor}
+            color={currentClockColor}
+            showHours={showHours}
           />
           <FocusTimerCard
-            label="总倒计时"
-            value={formatDigitalClock(Math.max(0, totalRemaining))}
-            subtext={`${formatLocalTime(deadlineIso)} 结束`}
+            label="总时间"
+            seconds={totalElapsed}
+            subtext={`${completedCount} / ${race.segments.length} 个小目标 · ${totalTargetSubtext}`}
+            targetText={`当前目标 ${formatShortDuration(totalProgressTarget)} · ${formatTargetDelta(totalElapsed, totalProgressTarget)}`}
+            targetColor={totalTargetColor}
             color={totalClockColor}
+            showHours={showHours}
           />
         </div>
 
@@ -1208,7 +1310,7 @@ function FocusedRaceView({
         <div style={{ flex: 1, minHeight: 0 }}>
           <div className="text-xs font-medium mb-2" style={{ color: "#d4d4d4" }}>自动记录</div>
           <div style={{ maxHeight: 260, overflowY: "auto", paddingRight: 2 }}>
-            <SegmentList race={race} compact={false} />
+            <SegmentList race={race} compact={false} nowMs={liveNowMs} />
           </div>
         </div>
       </div>
@@ -1245,7 +1347,9 @@ function ActiveRaceShortcut({
   const currentSegmentElapsed = nextSegment?.completedAt
     ? nextSegment.elapsedSeconds
     : Math.max(0, (nowMs - currentSegmentStartMs) / 1000);
-  const totalRemaining = Math.max(0, (raceDeadlineMs(race) - nowMs) / 1000);
+  const totalElapsed = raceElapsedSeconds(race, nowMs);
+  const currentTiming = nextSegment ? segmentTiming(race, nextSegment, nowMs) : null;
+  const totalProgressTarget = currentTiming?.cumulativeTargetSeconds ?? race.durationSeconds;
   const completedCount = race.segments.filter((segment) => segment.completedAt != null).length;
 
   return (
@@ -1272,7 +1376,8 @@ function ActiveRaceShortcut({
             <StatusBadge status={race.status} />
           </div>
           <div className="text-[11px] mt-0.5" style={{ color: "#858585" }}>
-            当前小目标 {formatDigitalClock(currentSegmentElapsed)} · 总倒计时 {formatDigitalClock(totalRemaining)}
+            当前小目标 {formatDigitalClock(currentSegmentElapsed)} · 总时间 {formatDigitalClock(totalElapsed)}
+            · 目标{formatShortDuration(totalProgressTarget)}，{formatTargetDelta(totalElapsed, totalProgressTarget)}
             {context ? ` · ${context}` : ""}
           </div>
         </div>
@@ -1485,37 +1590,50 @@ function RaceHistoryPanel({
   );
 }
 
-function SegmentList({ race, compact }: { race: UsageRace; compact: boolean }) {
+function SegmentList({ race, compact, nowMs }: { race: UsageRace; compact: boolean; nowMs?: number }) {
   const visibleSegments = compact ? race.segments : race.segments.slice(0, 16);
+  const currentOpen = openSegment(race);
   return (
     <div className="space-y-1.5">
-      {visibleSegments.map((segment) => (
-        <div
-          key={segment.index}
-          className="flex items-center gap-2 text-[11px]"
-          style={{
-            minHeight: 24,
-            padding: "4px 7px",
-            borderRadius: 6,
-            background: segment.completedAt ? "#263126" : "#272727",
-            border: `1px solid ${segment.completedAt ? "#355a35" : "#383838"}`,
-            color: segment.completedAt ? "#c9f7c9" : "#aaa",
-          }}
-        >
-          <span className="inline-flex items-center justify-center" style={{ width: 16, flexShrink: 0 }}>
-            {segment.completedAt ? <Trophy size={12} /> : <Flag size={12} />}
-          </span>
-          <span className="font-mono" style={{ width: 58, flexShrink: 0 }}>
-            #{segment.index} +{formatWholePct(segment.targetDeltaPct)}
-          </span>
-          <span className="font-mono" style={{ flex: 1, minWidth: 0 }}>
-            到 {formatWholePct(segment.cumulativeDeltaPct)}
-          </span>
-          <span className="font-mono" style={{ width: 62, textAlign: "right", flexShrink: 0 }}>
-            {segment.completedAt ? formatShortDuration(segment.elapsedSeconds) : "等待"}
-          </span>
-        </div>
-      ))}
+      {visibleSegments.map((segment) => {
+        const timing = segmentTiming(race, segment, nowMs);
+        const hasTiming = timing.elapsedSeconds != null && timing.totalElapsedSeconds != null;
+        const segmentTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isSegmentOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
+        const totalTimeColor = !hasTiming ? RECORD_PENDING_COLOR : timing.isTotalOver ? TIMER_OVER_COLOR : RECORD_OK_COLOR;
+        const isCurrent = currentOpen?.index === segment.index && race.status === "active";
+        return (
+          <div
+            key={segment.index}
+            className="flex items-center gap-2 text-[11px]"
+            style={{
+              minHeight: compact ? 30 : 34,
+              padding: "5px 7px",
+              borderRadius: 6,
+              background: segment.completedAt ? "#263126" : isCurrent ? "#2c261d" : "#272727",
+              border: `1px solid ${segment.completedAt ? "#355a35" : isCurrent ? "#5d4621" : "#383838"}`,
+              color: segment.completedAt ? "#c9f7c9" : "#aaa",
+            }}
+          >
+            <span className="inline-flex items-center justify-center" style={{ width: 16, flexShrink: 0, color: isCurrent ? "#f6c177" : undefined }}>
+              {segment.completedAt ? <Trophy size={12} /> : <Flag size={12} />}
+            </span>
+            <span className="font-mono" style={{ width: compact ? 52 : 58, flexShrink: 0 }}>
+              #{segment.index} +{formatWholePct(segment.targetDeltaPct)}
+            </span>
+            <span className="font-mono" style={{ flex: 1, minWidth: 0 }}>
+              到 {formatWholePct(segment.cumulativeDeltaPct)}
+            </span>
+            <span className="font-mono inline-flex items-center justify-end gap-1" style={{ width: compact ? 86 : 104, flexShrink: 0 }}>
+              <span style={{ color: "#858585" }}>用时</span>
+              <span style={{ color: segmentTimeColor }}>{hasTiming ? formatShortDuration(timing.elapsedSeconds) : "等待"}</span>
+            </span>
+            <span className="font-mono inline-flex items-center justify-end gap-1" style={{ width: compact ? 86 : 104, flexShrink: 0 }}>
+              <span style={{ color: "#858585" }}>累计</span>
+              <span style={{ color: totalTimeColor }}>{hasTiming ? formatShortDuration(timing.totalElapsedSeconds) : "-"}</span>
+            </span>
+          </div>
+        );
+      })}
       {!compact && race.segments.length > visibleSegments.length && (
         <div className="text-[11px] text-center" style={{ color: "#858585" }}>还有 {race.segments.length - visibleSegments.length} 个分卷在历史里</div>
       )}
@@ -1651,48 +1769,104 @@ function IconActionButton({
 
 function FocusTimerCard({
   label,
-  value,
+  seconds,
   subtext,
+  targetText,
+  targetColor,
   color,
+  showHours,
 }: {
   label: string;
-  value: string;
+  seconds: number | null;
   subtext: string;
+  targetText: string;
+  targetColor: string;
   color: string;
+  showHours: boolean;
 }) {
-  const fontSize = value.length > 5 ? 44 : 52;
+  const value = formatRaceClockParts(seconds, showHours);
+  const fontSize = value.main.length > 5 ? 31 : 36;
   return (
     <div
       className="text-center"
       style={{
-        minHeight: 210,
+        minHeight: 118,
         borderRadius: 8,
         border: "1px solid #383838",
-        background: "#242424",
+        background: "#202020",
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
-        padding: "22px 14px",
+        padding: "12px 10px",
         minWidth: 0,
       }}
     >
-      <div className="text-sm font-medium mb-3" style={{ color: "#d4d4d4" }}>{label}</div>
+      <div className="text-xs font-medium mb-2" style={{ color: "#d4d4d4" }}>{label}</div>
       <div
-        className="font-mono font-bold"
         style={{
-          color,
-          fontSize,
-          lineHeight: 1,
-          letterSpacing: 0,
-          fontVariantNumeric: "tabular-nums",
+          display: "inline-flex",
+          alignItems: "baseline",
+          justifyContent: "center",
+          alignSelf: "center",
+          maxWidth: "100%",
+          borderRadius: 8,
+          border: "1px solid #3a2f42",
+          background: "#151515",
+          padding: "7px 10px",
+          boxShadow: `0 0 18px ${color}22, inset 0 0 12px ${color}10`,
+        }}
+      >
+        <span
+          className="font-mono font-bold"
+          style={{
+            color,
+            fontSize,
+            lineHeight: 1,
+            letterSpacing: 0,
+            fontVariantNumeric: "tabular-nums",
+            whiteSpace: "nowrap",
+            textShadow: `0 0 12px ${color}88`,
+          }}
+        >
+          {value.main}
+        </span>
+        {value.centis && (
+          <span
+            className="font-mono font-bold"
+            style={{
+              color,
+              fontSize: Math.max(16, Math.floor(fontSize * 0.58)),
+              lineHeight: 1,
+              opacity: 0.82,
+              marginLeft: 2,
+              letterSpacing: 0,
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {value.centis}
+          </span>
+        )}
+      </div>
+      <div
+        className="inline-flex items-center justify-center self-center font-mono"
+        style={{
+          marginTop: 8,
+          minHeight: 22,
+          padding: "2px 8px",
+          borderRadius: 999,
+          border: `1px solid ${targetColor}55`,
+          background: `${targetColor}16`,
+          color: targetColor,
+          fontSize: 11,
           whiteSpace: "nowrap",
+          maxWidth: "100%",
           overflow: "hidden",
           textOverflow: "ellipsis",
         }}
       >
-        {value}
+        {targetText}
       </div>
-      <div className="text-xs mt-3" style={{ color: "#858585" }}>{subtext}</div>
+      <div className="text-[11px] mt-1 truncate" style={{ color: "#858585" }}>{subtext}</div>
     </div>
   );
 }
