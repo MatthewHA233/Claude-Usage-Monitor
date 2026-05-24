@@ -44,6 +44,7 @@ const HEADER_H = 26;
 const DEFAULT_STEP_PCT = 2;
 const MAX_SAVED_RACES = 120;
 const ACTIVE_UPDATE_WINDOW_MS = 10 * 60_000;
+const MAX_SPEED_ESTIMATE_DELTA_PCT = 8;
 const PROVIDER_ORDER = ["claude_code", "codex"];
 const ACCOUNT_COLORS = ["#cc785c", "#4a9eff", "#4ade80", "#f0a500", "#a78bfa"];
 const PLUGIN_STATUS_FRESH_MS = 90_000;
@@ -353,6 +354,7 @@ function activeUsageStats(samples: Sample[]) {
     const durationMs = current.atMs - previous.atMs;
     const delta = current.normPct - previous.normPct;
     if (durationMs <= 0 || durationMs > ACTIVE_UPDATE_WINDOW_MS || delta <= 0.05) continue;
+    if (delta > MAX_SPEED_ESTIMATE_DELTA_PCT) continue;
     activeMs += durationMs;
     deltaPct += delta;
   }
@@ -457,18 +459,63 @@ function buildSegments(targetDeltaPct: number, stepPct: number) {
   return segments;
 }
 
-function findCrossingTime(samples: Sample[], targetNormPct: number, fallbackMs: number) {
+function findObservedCrossingTime(samples: Sample[], targetNormPct: number, fallbackMs: number, startedMs: number) {
   if (samples.length === 0) return fallbackMs;
-  let previous: Sample | null = null;
   for (const sample of samples) {
-    if (sample.normPct >= targetNormPct) {
-      if (!previous || sample.normPct <= previous.normPct) return sample.atMs;
-      const ratio = (targetNormPct - previous.normPct) / (sample.normPct - previous.normPct);
-      return previous.atMs + clamp(ratio, 0, 1) * (sample.atMs - previous.atMs);
-    }
-    previous = sample;
+    if (sample.atMs < startedMs) continue;
+    if (sample.normPct >= targetNormPct) return sample.atMs;
   }
   return fallbackMs;
+}
+
+function hasNonMonotonicCompletedSegmentTimes(race: UsageRace) {
+  let previousElapsed = 0;
+  for (const segment of race.segments) {
+    if (segment.completedAt == null || segment.elapsedSeconds == null) continue;
+    if (segment.elapsedSeconds + 0.001 < previousElapsed) return true;
+    previousElapsed = segment.elapsedSeconds;
+  }
+  return false;
+}
+
+function repairObservedRaceTiming(race: UsageRace, histories: Record<string, UsageSnapshot[]>, nowMs: number) {
+  if ((race.status !== "active" && race.status !== "completed") || !hasNonMonotonicCompletedSegmentTimes(race)) {
+    return race;
+  }
+  const samples = samplesFromRecords(histories[race.accountKey] ?? [], nowMs).get(race.resetKey) ?? [];
+  if (samples.length === 0) return race;
+  const startedMs = new Date(race.startedAt).getTime();
+  if (!Number.isFinite(startedMs)) return race;
+  let changed = false;
+  let lastCompletedMs = startedMs;
+  const segments = race.segments.map((segment) => {
+    if (segment.completedAt == null) return segment;
+    const previousMs = new Date(segment.completedAt).getTime();
+    const fallbackMs = Number.isFinite(previousMs) ? previousMs : lastCompletedMs;
+    const observedMs = findObservedCrossingTime(
+      samples,
+      race.startNormPct + segment.cumulativeDeltaPct,
+      fallbackMs,
+      startedMs,
+    );
+    const completedMs = Math.max(lastCompletedMs, observedMs);
+    const completedAt = new Date(completedMs).toISOString();
+    const elapsedSeconds = Math.max(0, Math.round((completedMs - startedMs) / 1000));
+    lastCompletedMs = completedMs;
+    if (segment.completedAt !== completedAt || segment.elapsedSeconds !== elapsedSeconds) changed = true;
+    return { ...segment, completedAt, elapsedSeconds };
+  });
+  return changed ? { ...race, segments } : race;
+}
+
+function repairObservedRaceTimings(races: UsageRace[], histories: Record<string, UsageSnapshot[]>, nowMs: number) {
+  let changed = false;
+  const next = races.map((race) => {
+    const repaired = repairObservedRaceTiming(race, histories, nowMs);
+    if (repaired !== race) changed = true;
+    return repaired;
+  });
+  return changed ? next : races;
 }
 
 function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, ActiveSession>, nowMs: number) {
@@ -476,19 +523,30 @@ function updateRaceProgress(races: UsageRace[], sessionsByKey: Map<string, Activ
   const updated = races.map((race) => {
     if (race.status !== "active") return race;
     const deadlineMs = new Date(race.startedAt).getTime() + race.durationSeconds * 1000;
+    const startedMs = new Date(race.startedAt).getTime();
     const session = sessionsByKey.get(race.accountKey);
     const nextRace: UsageRace = { ...race, segments: race.segments.map((segment) => ({ ...segment })) };
 
     if (session && session.resetKey === race.resetKey) {
       const currentDelta = Math.max(0, session.currentNormPct - race.startNormPct);
+      let lastCompletedMs = startedMs;
+      for (const segment of nextRace.segments) {
+        if (!segment.completedAt) continue;
+        const completedMs = new Date(segment.completedAt).getTime();
+        if (Number.isFinite(completedMs)) lastCompletedMs = Math.max(lastCompletedMs, completedMs);
+      }
       for (const segment of nextRace.segments) {
         if (segment.completedAt != null) continue;
         if (currentDelta + 0.001 < segment.cumulativeDeltaPct) continue;
         const targetNormPct = race.startNormPct + segment.cumulativeDeltaPct;
-        const completedMs = findCrossingTime(session.samples, targetNormPct, nowMs);
+        const completedMs = Math.max(
+          lastCompletedMs,
+          findObservedCrossingTime(session.samples, targetNormPct, nowMs, startedMs),
+        );
         segment.completedAt = new Date(completedMs).toISOString();
-        segment.elapsedSeconds = Math.max(0, Math.round((completedMs - new Date(race.startedAt).getTime()) / 1000));
+        segment.elapsedSeconds = Math.max(0, Math.round((completedMs - startedMs) / 1000));
         segment.actualDeltaPct = round2(Math.min(currentDelta, segment.cumulativeDeltaPct));
+        lastCompletedMs = completedMs;
         changed = true;
       }
       if (nextRace.segments.every((segment) => segment.completedAt != null)) {
@@ -712,6 +770,10 @@ export default function SessionRacePanel({ snapshots, recommendation: _recommend
   useEffect(() => {
     setRaces((previous) => updateRaceProgress(previous, sessionsByKey, nowMs));
   }, [nowMs, sessionsByKey]);
+
+  useEffect(() => {
+    setRaces((previous) => repairObservedRaceTimings(previous, histories, Date.now()));
+  }, [histories]);
 
   useEffect(() => {
     const completedSegments: Array<{ key: string; detail: QuotaSegmentCompletedDetail }> = [];
