@@ -17,13 +17,14 @@ use state::AppState;
 pub fn run() {
     let app_state = AppState::new().expect("初始化 AppState 失败");
     let db_for_http = std::sync::Arc::clone(&app_state.db);
+    let runtime_for_http = std::sync::Arc::clone(&app_state.runtime);
     let db_for_local_usage = std::sync::Arc::clone(&app_state.db);
 
     tauri::Builder::default()
         .manage(app_state)
         .setup(|_app| {
             tauri::async_runtime::spawn(async move {
-                http_server::start(db_for_http).await;
+                http_server::start(db_for_http, runtime_for_http).await;
             });
             tauri::async_runtime::spawn(async move {
                 local_usage::run_background_collector(db_for_local_usage).await;
@@ -40,6 +41,7 @@ pub fn run() {
             commands::set_account_color,
             commands::get_account_pause_states,
             commands::get_local_usage_statuses,
+            commands::get_plugin_usage_statuses,
             commands::set_account_paused,
             commands::get_all_histories,
             commands::inbox_list,

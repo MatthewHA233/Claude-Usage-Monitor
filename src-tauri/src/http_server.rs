@@ -13,8 +13,15 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::db::Database;
 use crate::models::UsageSnapshot;
+use crate::state::RuntimeStatus;
 
 pub const PORT: u16 = 47892;
+
+#[derive(Clone)]
+struct HttpState {
+    db: Arc<Database>,
+    runtime: Arc<RuntimeStatus>,
+}
 
 /// Chrome 扩展上报的数据格式
 #[derive(Debug, Deserialize)]
@@ -41,7 +48,7 @@ pub struct StatusResponse {
     pub snapshots: Vec<UsageSnapshot>,
 }
 
-pub async fn start(db: Arc<Database>) {
+pub async fn start(db: Arc<Database>, runtime: Arc<RuntimeStatus>) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST])
@@ -52,7 +59,7 @@ pub async fn start(db: Arc<Database>) {
         .route("/status", get(handle_status))
         .route("/local-refresh", post(handle_local_refresh))
         .route("/ping", get(|| async { "pong" }))
-        .with_state(db)
+        .with_state(HttpState { db, runtime })
         .layer(cors);
 
     let addr = format!("127.0.0.1:{PORT}");
@@ -71,7 +78,7 @@ pub async fn start(db: Arc<Database>) {
 }
 
 async fn handle_report(
-    State(db): State<Arc<Database>>,
+    State(state): State<HttpState>,
     Json(payload): Json<ReportPayload>,
 ) -> (StatusCode, Json<ReportResponse>) {
     // Claude API 大多数情况返回百分比整数（1, 36, 44…），少数老路径返回 0-1 小数
@@ -115,8 +122,10 @@ async fn handle_report(
         error: None,
     };
 
+    state.runtime.record_plugin_report(&snap.provider, &snap.account_alias);
+
     // 去重 & 异常跳变过滤
-    if let Ok(Some(last)) = db.last_snapshot(&snap.provider, &snap.account_alias) {
+    if let Ok(Some(last)) = state.db.last_snapshot(&snap.provider, &snap.account_alias) {
         // 1. 完全相同则跳过
         if last.session_pct == snap.session_pct
             && last.session_total_pct == snap.session_total_pct
@@ -135,7 +144,7 @@ async fn handle_report(
         if let (Some(last_w), Some(new_w)) = (last.weekly_pct, snap.weekly_pct) {
             if last_w <= 5.0 && new_w >= 95.0 {
                 let reason = format!("异常跳变（weekly {:.0}% → {:.0}%）", last_w, new_w);
-                let _ = db.inbox_insert(&snap, &reason);
+                let _ = state.db.inbox_insert(&snap, &reason);
                 return (
                     StatusCode::OK,
                     Json(ReportResponse {
@@ -160,7 +169,7 @@ async fn handle_report(
                     new_s,
                     new_w - last_w
                 );
-                let _ = db.inbox_insert(&snap, &reason);
+                let _ = state.db.inbox_insert(&snap, &reason);
                 return (
                     StatusCode::OK,
                     Json(ReportResponse {
@@ -172,7 +181,7 @@ async fn handle_report(
         }
     }
 
-    match db.insert_snapshot(&snap) {
+    match state.db.insert_snapshot(&snap) {
         Ok(_) => (
             StatusCode::OK,
             Json(ReportResponse {
@@ -190,14 +199,14 @@ async fn handle_report(
     }
 }
 
-async fn handle_status(State(db): State<Arc<Database>>) -> Json<StatusResponse> {
+async fn handle_status(State(state): State<HttpState>) -> Json<StatusResponse> {
     // 读取所有账号最新快照（不依赖 config，直接查 DB 里有记录的账号）
-    let snapshots = db.latest_all().unwrap_or_default();
+    let snapshots = state.db.latest_all().unwrap_or_default();
     Json(StatusResponse { snapshots })
 }
 
-async fn handle_local_refresh(State(db): State<Arc<Database>>) -> Json<ReportResponse> {
-    crate::local_usage::collect_once(db).await;
+async fn handle_local_refresh(State(state): State<HttpState>) -> Json<ReportResponse> {
+    crate::local_usage::collect_once(state.db).await;
     Json(ReportResponse {
         ok: true,
         message: "已触发本机采集".to_string(),

@@ -45,6 +45,13 @@ export interface LocalUsageStatus {
   updated_at: string;
 }
 
+export interface PluginUsageStatus {
+  provider: "claude_code" | "codex" | string;
+  account_alias: string;
+  account_key: string;
+  updated_at: string;
+}
+
 export interface AccountSummary {
   provider: "claude_code" | "codex" | string;
   key: string;

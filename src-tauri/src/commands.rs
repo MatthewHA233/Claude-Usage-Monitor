@@ -1,6 +1,6 @@
 use crate::models::{
-    AccountAnalysis, AccountColor, AccountPauseState, InboxItem, LocalUsageStatus, Recommendation,
-    TokenUsageReport, UsageSnapshot,
+    AccountAnalysis, AccountColor, AccountPauseState, InboxItem, LocalUsageStatus,
+    PluginUsageStatus, Recommendation, TokenUsageReport, UsageSnapshot,
 };
 use crate::state::AppState;
 use std::collections::HashMap;
@@ -87,6 +87,11 @@ pub fn get_account_pause_states(state: State<AppState>) -> Vec<AccountPauseState
 #[tauri::command]
 pub fn get_local_usage_statuses(state: State<AppState>) -> Vec<LocalUsageStatus> {
     state.db.local_usage_statuses().unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_plugin_usage_statuses(state: State<AppState>) -> Vec<PluginUsageStatus> {
+    state.runtime.plugin_usage_statuses()
 }
 
 #[tauri::command]

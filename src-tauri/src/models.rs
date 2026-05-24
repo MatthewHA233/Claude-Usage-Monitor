@@ -70,6 +70,14 @@ pub struct LocalUsageStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginUsageStatus {
+    pub provider: String,
+    pub account_alias: String,
+    pub account_key: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxItem {
     pub id: Option<i64>,
     pub provider: String,

@@ -7,6 +7,7 @@ import type {
   AccountColor,
   AccountPauseState,
   LocalUsageStatus,
+  PluginUsageStatus,
   TokenUsageReport,
 } from "../types";
 
@@ -133,6 +134,28 @@ export function useLocalUsageStatuses(autoRefreshMs = 0) {
   const fetch = useCallback(async () => {
     try {
       const data = await invoke<LocalUsageStatus[]>("get_local_usage_statuses");
+      setStatuses(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    void fetch();
+    if (autoRefreshMs > 0) {
+      const timer = setInterval(() => void fetch(), autoRefreshMs);
+      return () => clearInterval(timer);
+    }
+    return undefined;
+  }, [fetch, autoRefreshMs]);
+
+  return { statuses, refetch: fetch };
+}
+
+export function usePluginUsageStatuses(autoRefreshMs = 0) {
+  const [statuses, setStatuses] = useState<PluginUsageStatus[]>([]);
+
+  const fetch = useCallback(async () => {
+    try {
+      const data = await invoke<PluginUsageStatus[]>("get_plugin_usage_statuses");
       setStatuses(data);
     } catch { /* ignore */ }
   }, []);
