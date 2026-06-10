@@ -72,7 +72,8 @@
     .refresh-btn:hover { background: #333; color: #ddd; }
     .no-data { text-align: center; padding: 18px 0; color: #666; font-size: 13px; line-height: 1.8; }
     .no-data a { color: #4b8ef1; text-decoration: none; }
-    .alias-row { display: grid; grid-template-columns: 1fr 1fr 96px auto; gap: 6px; align-items: center; }
+    .alias-row { display: grid; grid-template-columns: 1fr 96px auto; gap: 6px; align-items: center; }
+    .alias-row button { grid-column: 3; grid-row: 1 / span 2; align-self: stretch; }
     .alias-row input, .alias-row select {
       min-width: 0; background: #1a1a1a; border: 1px solid #3a3a3a;
       border-radius: 6px; padding: 5px 8px; color: #ccc; font-size: 12px; outline: none;
@@ -97,6 +98,12 @@
 
   <div class="alias-row">
     <input type="text" id="aliasInput" placeholder="Claude 别名" />
+    <select id="claudePlanInput">
+      <option value="auto">自动检测</option>
+      <option value="pro">Pro 1x</option>
+      <option value="max5">Max 5x</option>
+      <option value="max20">Max 20x</option>
+    </select>
     <input type="text" id="codexAliasInput" placeholder="Codex 别名" />
     <select id="codexPlanInput">
       <option value="plus">Plus 1x</option>

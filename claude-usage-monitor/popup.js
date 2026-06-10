@@ -31,6 +31,12 @@ function normalizeCodexPlan(plan) {
   return Object.prototype.hasOwnProperty.call(CODEX_PLAN_LABELS, plan) ? plan : "pro5";
 }
 
+const CLAUDE_PLAN_KEYS = ["auto", "pro", "max5", "max20"];
+
+function normalizeClaudePlan(plan) {
+  return CLAUDE_PLAN_KEYS.includes(plan) ? plan : "auto";
+}
+
 function codexPlanLabel(plan) {
   return CODEX_PLAN_LABELS[normalizeCodexPlan(plan)] || "Codex";
 }
@@ -58,14 +64,16 @@ function renderClaude(data) {
   if (!data) {
     return `<div class="no-data">暂无 Claude 数据<br><a href="https://claude.ai" target="_blank">打开 Claude</a></div>`;
   }
+  const multiplier = data.multiplier ?? 1;
+  const total = 100 * multiplier;
   return `
     <div class="account">
       <div class="account-email">${data.email || "未知账号"}</div>
       <div class="account-name">${data.full_name || ""}</div>
       <span class="plan-badge">${data.plan}</span>
     </div>
-    ${usageCard("Claude Session（5小时）", data.current_session?.utilization ?? 0, 100, data.current_session?.resets_at)}
-    ${usageCard("Claude 周限额", data.weekly?.utilization ?? 0, 100, data.weekly?.resets_at)}
+    ${usageCard("Claude Session（5小时）", (data.current_session?.utilization ?? 0) * multiplier, total, data.current_session?.resets_at)}
+    ${usageCard("Claude 周限额", (data.weekly?.utilization ?? 0) * multiplier, total, data.weekly?.resets_at)}
     <div class="extra-row">
       <span>Extra Usage</span>
       <div style="display:flex;align-items:center;gap:6px;">
@@ -186,8 +194,9 @@ function loadAndRender() {
 document.addEventListener("DOMContentLoaded", () => {
   loadAndRender();
 
-  chrome.storage.local.get(["accountAlias", "codexAccountAlias", "codexPlan"], (res) => {
+  chrome.storage.local.get(["accountAlias", "claudePlan", "codexAccountAlias", "codexPlan"], (res) => {
     if (res.accountAlias) document.getElementById("aliasInput").value = res.accountAlias;
+    if (res.claudePlan) document.getElementById("claudePlanInput").value = normalizeClaudePlan(res.claudePlan);
     if (res.codexAccountAlias) document.getElementById("codexAliasInput").value = res.codexAccountAlias;
     if (res.codexPlan) {
       const codexPlan = normalizeCodexPlan(res.codexPlan);
@@ -198,10 +207,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("saveAlias").addEventListener("click", () => {
     const accountAlias = document.getElementById("aliasInput").value.trim();
+    const claudePlan = document.getElementById("claudePlanInput").value;
     const codexAccountAlias = document.getElementById("codexAliasInput").value.trim();
     const codexPlan = document.getElementById("codexPlanInput").value;
 
-    chrome.storage.local.set({ accountAlias, codexAccountAlias, codexPlan }, () => {
+    chrome.storage.local.set({ accountAlias, claudePlan, codexAccountAlias, codexPlan }, () => {
       const btn = document.getElementById("saveAlias");
       btn.textContent = "已保存";
       setTimeout(() => { btn.textContent = "保存"; }, 1200);
