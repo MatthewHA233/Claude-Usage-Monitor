@@ -305,10 +305,17 @@ async fn collect_claude_oauth(db: &Database) -> Result<Option<UsageSnapshot>, St
         .map_err(|error| error.to_string())?;
     let account_alias = identity.resolve_account_alias(&credentials, &email_aliases)?;
     let usage = fetch_claude_usage(&credentials.access_token).await?;
-    Ok(Some(usage.to_snapshot(
-        account_alias,
-        identity.quota_multiplier(&credentials),
-    )))
+    // subscriptionType 往往只有 "max"（不带 5x/20x），CLI 侧检测不出倍率时
+    // 复用插件上报落库的 total_pct（popup 套餐选择 / rate_limit_tier 自动检测）
+    let mut multiplier = identity.quota_multiplier(&credentials);
+    if multiplier <= 1.0 {
+        if let Ok(Some(total)) = db.latest_session_total_pct("claude_code", &account_alias) {
+            if total > 100.0 {
+                multiplier = total / 100.0;
+            }
+        }
+    }
+    Ok(Some(usage.to_snapshot(account_alias, multiplier)))
 }
 
 fn claude_credentials_path() -> Option<PathBuf> {

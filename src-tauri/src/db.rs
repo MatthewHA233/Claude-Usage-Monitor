@@ -619,6 +619,24 @@ impl Database {
         Ok(())
     }
 
+    /// 最近一条快照的 session_total_pct（CLI 采集检测不出倍率时，复用插件上报的总额）
+    pub fn latest_session_total_pct(&self, provider: &str, alias: &str) -> Result<Option<f64>> {
+        let conn = self.conn.lock().unwrap();
+        let total = conn
+            .query_row(
+                "SELECT session_total_pct
+                 FROM usage_snapshots
+                 WHERE provider = ?1 AND account_alias = ?2
+                   AND session_total_pct IS NOT NULL
+                 ORDER BY collected_at DESC
+                 LIMIT 1",
+                params![provider, alias],
+                |row| row.get::<_, f64>(0),
+            )
+            .ok();
+        Ok(total)
+    }
+
     pub fn codex_alias_has_scaled_history(&self, alias: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
