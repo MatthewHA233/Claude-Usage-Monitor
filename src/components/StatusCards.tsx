@@ -97,19 +97,22 @@ function computeAccountRates(histories: Record<string, UsageSnapshot[]>, pauseSt
     const recent = records.filter(r => r.collected_at >= effectiveCutoff);
     if (recent.length === 0) continue;
     const ann = computeTableAnnotations(recent);
-    let totalWeeklyIncrease = 0;
+    // weeklyIncrease 按各 phase 自身总额归一化为「周额度百分比」，
+    // 跨刻度（Pro 100 / Max20 2000 / Codex 500）可比、可加权平均
+    let totalWeeklyIncreasePct = 0;
     let totalSessionUnits = 0;
     for (const phase of ann.weeklyPhases.values()) {
       if (phase.weeklyIncrease != null && phase.weeklyIncrease > 0 && phase.sessionUnits > 0) {
-        totalWeeklyIncrease += phase.weeklyIncrease;
+        totalWeeklyIncreasePct += (phase.weeklyIncrease / (phase.weeklyTotalPct || 100)) * 100;
         totalSessionUnits += phase.sessionUnits;
       }
     }
-    if (totalSessionUnits > 0 && totalWeeklyIncrease > 0) {
+    if (totalSessionUnits > 0 && totalWeeklyIncreasePct > 0) {
       result.push({
         alias: aliasFromKey(key),
         provider: providerFromKey(key),
-        rate: totalWeeklyIncrease / totalSessionUnits,
+        // 每次完整 session 消耗本账号周额度的百分比（无刻度）
+        rate: totalWeeklyIncreasePct / totalSessionUnits,
         sessionUnits: totalSessionUnits,
       });
     }
@@ -320,7 +323,7 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
             </span>
           </span>
         ))}
-        <span style={{ fontSize: 11, color: '#aaa' }}>Weekly / Session</span>
+        <span style={{ fontSize: 11, color: '#aaa' }}>周额度 / 次</span>
         <span style={{ fontSize: 11, color: open ? '#a78bfa' : '#888' }}>▾</span>
       </div>
 
@@ -330,7 +333,7 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
           boxShadow: '0 16px 48px rgba(0,0,0,0.75)', overflow: 'hidden' }}>
           {/* 头部 */}
           <div style={{ padding: '11px 14px', borderBottom: '1px solid #2e2e2e', background: '#1c1c1c' }}>
-            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 6 }}>分类型加权均值（权重 = 近30天 Session 消耗量）</div>
+            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 6 }}>每次完整 Session 消耗周额度的 %（分类型加权，权重 = 近30天 Session 次数）</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
               {providerSummaries.map((summary) => (
                 <div key={summary.provider} style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
@@ -342,7 +345,7 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
                   </span>
                 </div>
               ))}
-              <span style={{ fontSize: 12, color: '#bbb' }}>Weekly / Session</span>
+              <span style={{ fontSize: 12, color: '#bbb' }}>周额度 / 次</span>
             </div>
           </div>
           {/* 各账号明细 */}
@@ -384,7 +387,7 @@ function RateInfoBadge({ accountRates }: { accountRates: AccountRate[] }) {
           {/* 公式 */}
           <div style={{ padding: '8px 14px', borderTop: '1px solid #2e2e2e', background: '#1c1c1c' }}>
             <span style={{ fontSize: 11, color: '#aaa', fontFamily: 'monospace' }}>
-              单类均值 = Σ(rate × session消耗) ÷ 同类session消耗
+              单类均值 = Σ(周额度涨幅% ) ÷ Σ(完整 session 次数)
             </span>
           </div>
         </div>
@@ -515,8 +518,11 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
   const weeklyPct = snap?.weekly_pct ?? null;
   const weeklyTotal = snap?.weekly_total_pct ?? 100;
   const weeklyRemaining = weeklyPct != null ? weeklyTotal - weeklyPct : null;
-  const sessionsLeft = avgCost != null && weeklyRemaining != null
-    ? Math.ceil(weeklyRemaining / avgCost) : null;
+  // avgCost = 每次完整 session 消耗周额度的百分比（无刻度），剩余量同样化为百分比再除
+  const weeklyRemainingPctOfQuota = weeklyRemaining != null && weeklyTotal > 0
+    ? (weeklyRemaining / weeklyTotal) * 100 : null;
+  const sessionsLeft = avgCost != null && avgCost > 0 && weeklyRemainingPctOfQuota != null
+    ? Math.ceil(weeklyRemainingPctOfQuota / avgCost) : null;
   const resetDays = weeklyHours != null ? weeklyHours / 24 : null;
   const periodLabel = "Weekly";
   const periodQuotaLabel = "周额度";
@@ -856,6 +862,7 @@ interface WeeklyPhaseDetail {
   sessionUnits: number;
   weeklyLevel: number;
   weeklyIncrease: number | null;
+  weeklyTotalPct: number;
   weeklyResetHour: string;
   phaseIndexInWeek: number;
   weekIndex: number;
@@ -1054,6 +1061,9 @@ function computeTableAnnotations(records: UsageSnapshot[]): TableAnnotations {
       const sessionTotalPct = phaseRecords
         .map((r) => r.session_total_pct ?? 100)
         .find((total) => total > 0) ?? 100;
+      const weeklyTotalPct = phaseRecords
+        .map((r) => r.weekly_total_pct ?? 100)
+        .find((total) => total > 0) ?? 100;
       const sessionUnits = Math.round((sessionTotal / sessionTotalPct) * 1000) / 1000;
       // weeklyIncrease = 本段内 weekly 涨幅，最后段（进行中）= null
       const weeklyIncrease = isLast ? null
@@ -1063,6 +1073,7 @@ function computeTableAnnotations(records: UsageSnapshot[]): TableAnnotations {
         sessions, sessionTotal, sessionUnits,
         weeklyLevel: Math.round((phaseWeeklyLast.get(pKey) ?? 0) * 10) / 10,
         weeklyIncrease,
+        weeklyTotalPct,
         weeklyResetHour: wDay,
         phaseIndexInWeek: i,
         weekIndex: weekColorMap.get(wDay) ?? 0,
@@ -1968,9 +1979,11 @@ function SprintPanel({ snapshots, avgCost, avgCostsByProvider, colors }: {
       ? (new Date(snap.session_reset_at).getTime() - nowMs) / 3_600_000 : null;
     const hasActiveSession = sessionRemainingHours != null && sessionRemainingHours > 0;
     const sessionRemainingPct = hasActiveSession && snap.session_pct != null ? Math.max(0, sessionTotal - snap.session_pct) : null;
-    const currCost = accountAvgCost != null && sessionRemainingPct != null
-      ? (sessionRemainingPct / sessionTotal) * accountAvgCost : null;
-    const placed = (currCost ?? 0) + blocks.length * (accountAvgCost ?? 0);
+    // accountAvgCost 是「周额度% / 次」（无刻度），换算回本账号刻度的点数
+    const costPointsPerSession = accountAvgCost != null ? (accountAvgCost / 100) * weeklyTotal : null;
+    const currCost = costPointsPerSession != null && sessionRemainingPct != null
+      ? (sessionRemainingPct / sessionTotal) * costPointsPerSession : null;
+    const placed = (currCost ?? 0) + blocks.length * (costPointsPerSession ?? 0);
     const projected = weeklyUsed != null ? Math.min(weeklyTotal, weeklyUsed + placed) : null;
     return { key, snap, color, weeklyUsed, weeklyTotal, placed, projected };
   });
