@@ -5,6 +5,7 @@ mod http_server;
 mod local_usage;
 mod models;
 mod recommender;
+mod session_remote;
 mod state;
 mod token_usage;
 
@@ -16,6 +17,25 @@ use state::AppState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = AppState::new().expect("初始化 AppState 失败");
+
+    // 启动时从库载入代理配置（默认开启、固定本地 7890）
+    {
+        let enabled = app_state
+            .db
+            .get_setting("proxy_enabled")
+            .ok()
+            .flatten()
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        let url = app_state
+            .db
+            .get_setting("proxy_url")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| local_usage::DEFAULT_PROXY_URL.to_string());
+        local_usage::set_proxy_config(enabled, url);
+    }
+
     let db_for_http = std::sync::Arc::clone(&app_state.db);
     let runtime_for_http = std::sync::Arc::clone(&app_state.runtime);
     let db_for_local_usage = std::sync::Arc::clone(&app_state.db);
@@ -53,6 +73,14 @@ pub fn run() {
             commands::get_token_usage_report,
             commands::get_cached_token_usage_report,
             commands::refresh_local_usage,
+            commands::get_proxy_settings,
+            commands::set_proxy_settings,
+            session_remote::session_sources_get,
+            session_remote::session_sources_save,
+            session_remote::session_ping,
+            session_remote::session_api_get,
+            session_remote::session_local_ensure,
+            session_remote::session_local_stop,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

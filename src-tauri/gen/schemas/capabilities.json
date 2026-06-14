@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for Claude Usage Monitor","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default capability for Claude Usage Monitor","local":true,"windows":["main","sessions"],"permissions":["core:default","core:window:allow-create","core:window:allow-set-focus","core:window:allow-close","core:webview:allow-create-webview-window"]}}

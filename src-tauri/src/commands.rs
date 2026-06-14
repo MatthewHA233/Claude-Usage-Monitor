@@ -1,6 +1,6 @@
 use crate::models::{
     AccountAnalysis, AccountColor, AccountPauseState, InboxItem, LocalUsageStatus,
-    PluginUsageStatus, Recommendation, TokenUsageReport, UsageSnapshot,
+    PluginUsageStatus, ProxySettings, Recommendation, TokenUsageReport, UsageSnapshot,
 };
 use crate::state::AppState;
 use std::collections::HashMap;
@@ -216,4 +216,43 @@ pub async fn refresh_local_usage(state: State<'_, AppState>) -> Result<(), Strin
     let db = std::sync::Arc::clone(&state.db);
     crate::local_usage::collect_once(db).await;
     Ok(())
+}
+
+const SETTING_PROXY_ENABLED: &str = "proxy_enabled";
+const SETTING_PROXY_URL: &str = "proxy_url";
+
+#[tauri::command]
+pub fn get_proxy_settings(state: State<AppState>) -> ProxySettings {
+    let cfg = crate::local_usage::current_proxy_config();
+    // 以运行时配置为准（启动时已从 DB 载入），避免读到落后的库值
+    let _ = state;
+    ProxySettings {
+        enabled: cfg.enabled,
+        url: cfg.url,
+    }
+}
+
+#[tauri::command]
+pub fn set_proxy_settings(
+    enabled: bool,
+    url: String,
+    state: State<AppState>,
+) -> Result<ProxySettings, String> {
+    let trimmed = url.trim();
+    let stored_url = if trimmed.is_empty() {
+        crate::local_usage::DEFAULT_PROXY_URL.to_string()
+    } else {
+        trimmed.to_string()
+    };
+    // 先写库（持久化），再更新运行时
+    state
+        .db
+        .set_setting(SETTING_PROXY_ENABLED, if enabled { "true" } else { "false" })
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_setting(SETTING_PROXY_URL, &stored_url)
+        .map_err(|e| e.to_string())?;
+    crate::local_usage::set_proxy_config(enabled, stored_url);
+    Ok(get_proxy_settings(state))
 }

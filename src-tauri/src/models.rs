@@ -70,6 +70,12 @@ pub struct LocalUsageStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxySettings {
+    pub enabled: bool,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginUsageStatus {
     pub provider: String,
     pub account_alias: String,

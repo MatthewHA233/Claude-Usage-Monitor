@@ -2,8 +2,12 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema/acl/capability.schema.json",
   "identifier": "default",
   "description": "Default capability for Claude Usage Monitor",
-  "windows": ["main"],
+  "windows": ["main", "sessions"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-create",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "core:webview:allow-create-webview-window"
   ]
 }

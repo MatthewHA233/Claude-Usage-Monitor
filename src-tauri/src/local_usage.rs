@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
@@ -619,12 +619,60 @@ fn claude_auth_status() -> Result<ClaudeAuthStatus, String> {
     serde_json::from_str(&stdout).map_err(|e| e.to_string())
 }
 
+/// 代理配置（默认开启、固定走本地 7890；可在设置里改地址或关闭）
+#[derive(Debug, Clone)]
+pub struct ProxyConfig {
+    pub enabled: bool,
+    pub url: String,
+}
+
+pub const DEFAULT_PROXY_URL: &str = "http://127.0.0.1:7890";
+
+static PROXY_CONFIG: OnceLock<RwLock<ProxyConfig>> = OnceLock::new();
+
+fn proxy_config_cell() -> &'static RwLock<ProxyConfig> {
+    PROXY_CONFIG.get_or_init(|| {
+        RwLock::new(ProxyConfig {
+            enabled: true,
+            url: DEFAULT_PROXY_URL.to_string(),
+        })
+    })
+}
+
+/// 运行时更新代理配置（设置命令调用）。空地址回退到默认 7890。
+pub fn set_proxy_config(enabled: bool, url: String) {
+    let url = url.trim();
+    let url = if url.is_empty() {
+        DEFAULT_PROXY_URL.to_string()
+    } else {
+        normalize_proxy_url(url)
+    };
+    let mut cfg = proxy_config_cell().write().unwrap();
+    cfg.enabled = enabled;
+    cfg.url = url;
+}
+
+pub fn current_proxy_config() -> ProxyConfig {
+    proxy_config_cell().read().unwrap().clone()
+}
+
 fn http_client() -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-    if let Some(proxy) = system_proxy_url() {
-        if let Ok(proxy) = reqwest::Proxy::all(&proxy) {
-            builder = builder.proxy(proxy);
-        }
+    let cfg = current_proxy_config();
+    // 开启 → 强制走配置的代理；关闭 → 回退到系统/环境变量代理检测
+    let proxy_url = if cfg.enabled {
+        Some(cfg.url.clone())
+    } else {
+        system_proxy_url()
+    };
+    match proxy_url {
+        Some(url) => match reqwest::Proxy::all(&url) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            // 配置的代理地址非法时，宁可不发也别直连（避免封号风险）
+            Err(e) => return Err(format!("代理地址无效（{url}）：{e}")),
+        },
+        // 既没开代理、系统也没检测到 → 明确直连（reqwest 默认会读环境变量，这里固定行为）
+        None => builder = builder.no_proxy(),
     }
     builder.build().map_err(|e| e.to_string())
 }
