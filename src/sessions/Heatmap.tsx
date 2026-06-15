@@ -7,14 +7,14 @@ const CELL = 12;
 const GAP = 2; // 同月内列间距
 const MONTH_GAP = 6; // 月份组之间的间距
 
-// 0..4 档绿色（仿 flomo/GitHub）；最亮(档 4)= 100 句及以上
+// 0..4 档绿色（仿 flomo/GitHub）；最亮(档 4)= 200 句及以上
 const COLORS = ["#1f1f1f", "#173a24", "#1f6b38", "#2f9e54", "#48c66b"];
 
 function level(count: number): number {
   if (count <= 0) return 0;
-  if (count < 25) return 1;
-  if (count < 50) return 2;
-  if (count < 100) return 3;
+  if (count < 50) return 1;
+  if (count < 100) return 2;
+  if (count < 200) return 3;
   return 4;
 }
 

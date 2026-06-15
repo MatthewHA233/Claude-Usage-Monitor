@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ChevronRight, FolderGit2, Monitor, MessagesSquare } from "lucide-react";
+import { ChevronRight, ChevronDown, ChevronUp, FolderGit2, Monitor, MessagesSquare } from "lucide-react";
 import type { StreamMessage } from "./types";
 import { clock, nfmt, bucketOf } from "./format";
 import MessageText from "./MessageText";
@@ -117,8 +117,9 @@ function StreamCard({
   const hasReply = m.reply_chars > 0;
 
   // 按 10 分钟桶奇偶相间的卡片背景（与时间轴斑马同节奏）
+  const bg = shade ? "#25252c" : "#191919";
   return (
-    <div className="rounded-xl px-4 py-3 flex gap-3" style={{ background: shade ? "#25252c" : "#191919", border: "1px solid #2a2a2a" }}>
+    <div className="rounded-xl px-4 py-3 flex gap-3" style={{ background: bg, border: "1px solid #2a2a2a" }}>
       <div
         className="shrink-0 font-mono"
         style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, width: 46, paddingTop: 1, letterSpacing: "0.3px" }}
@@ -127,9 +128,7 @@ function StreamCard({
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className="text-sm whitespace-pre-wrap break-words" style={{ color: "#e5e7eb", lineHeight: 1.6 }}>
-          <MessageText text={m.text} images={m.images} />
-        </div>
+        <CollapsibleText text={m.text} images={m.images} bg={bg} />
 
       <div className="flex items-center gap-1.5 mt-2 text-[10px] flex-wrap">
         <Tag
@@ -177,6 +176,94 @@ function StreamCard({
           <Markdown content={m.reply} />
         </div>
       )}
+      </div>
+    </div>
+  );
+}
+
+// 超过该字数的发言（常是大段粘贴）默认折叠，底部渐变 + 大范围可点的展开/收起
+const COLLAPSE_THRESHOLD = 1000;
+const COLLAPSED_H = 220;
+
+function CollapsibleText({
+  text,
+  images,
+  bg,
+}: {
+  text: string;
+  images: StreamMessage["images"];
+  bg: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const long = text.length > COLLAPSE_THRESHOLD;
+
+  const body = (
+    <div className="card-selectable text-sm whitespace-pre-wrap break-words" style={{ color: "#e5e7eb", lineHeight: 1.6 }}>
+      <MessageText text={text} images={images} />
+    </div>
+  );
+
+  if (!long) return body;
+
+  if (!expanded) {
+    return (
+      <div style={{ position: "relative" }}>
+        <div style={{ maxHeight: COLLAPSED_H, overflow: "hidden" }}>{body}</div>
+        {/* 底部渐变 + 大范围可点的展开按钮 */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(true);
+          }}
+          className="card-expand absolute inset-x-0 bottom-0 flex items-end justify-center"
+          style={{
+            height: 92,
+            paddingBottom: 8,
+            background: `linear-gradient(to bottom, ${bg}00 0%, ${bg} 78%)`,
+            border: 0,
+            cursor: "pointer",
+          }}
+          title="展开全文"
+        >
+          <span
+            className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium"
+            style={{ color: "#cbd5e1", background: "#2c2c34", border: "1px solid #3a3b46", boxShadow: "0 2px 8px rgba(0,0,0,0.45)" }}
+          >
+            <ChevronDown size={14} /> 展开全文 · {nfmt(text.length)} 字
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  // 展开态：收起按钮 sticky 在视口底部，正文滚出后才归位
+  return (
+    <div>
+      {body}
+      <div
+        className="flex justify-center"
+        style={{ position: "sticky", bottom: 8, marginTop: 10, pointerEvents: "none", zIndex: 1 }}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(false);
+          }}
+          className="card-expand inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium"
+          style={{
+            pointerEvents: "auto",
+            color: "#cbd5e1",
+            background: "#2c2c34",
+            border: "1px solid #3a3b46",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.55)",
+            cursor: "pointer",
+          }}
+          title="收起"
+        >
+          <ChevronUp size={14} /> 收起
+        </button>
       </div>
     </div>
   );
