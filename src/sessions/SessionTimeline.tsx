@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderGit2, Monitor, ChevronUp, ChevronDown } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { TimelineRowWithSource, StreamFilter } from "./types";
@@ -31,6 +31,8 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 
 export default function SessionTimeline({ date, rows, loading, collapsed, activeFilter, onToggleCollapse, onFilter }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 悬浮某单元格时显示的大数字浮层
+  const [hover, setHover] = useState<{ cx: number; top: number; bottom: number; hour: number; count: number } | null>(null);
 
   let minB = Infinity;
   let maxB = -Infinity;
@@ -195,7 +197,12 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                           onClick={() =>
                             onFilter({ source: r.source_id, session: r.session_id, since, until, label: `${r.title} · ${date} ${pad2(h)}时` })
                           }
-                          title={hourCount > 0 ? `${pad2(h)}:00–${pad2(h)}:59 · ${hourCount} 句` : undefined}
+                          onMouseEnter={(e) => {
+                            if (hourCount === 0) return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setHover({ cx: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom, hour: h, count: hourCount });
+                          }}
+                          onMouseLeave={() => setHover(null)}
                           className="flex items-center tl-hour"
                           style={{
                             width: HOUR_W,
@@ -217,7 +224,6 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                                 key={i}
                                 className="flex flex-col items-center justify-center"
                                 style={{ width: CELL, height: "100%", gap: 1.5, background: sub % 2 === 0 ? "transparent" : "rgba(0,0,0,0.28)" }}
-                                title={n > 0 ? `${n} 句` : undefined}
                               >
                                 {Array.from({ length: dots }).map((_, di) => (
                                   <span key={di} style={{ width: 5, height: 5, borderRadius: "50%", background: "#e08a6a" }} />
@@ -232,6 +238,35 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {hover && !collapsed && (
+        <div
+          style={{
+            position: "fixed",
+            left: hover.cx,
+            top: hover.top > 84 ? hover.top - 8 : hover.bottom + 8,
+            transform: hover.top > 84 ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+            zIndex: 60,
+            pointerEvents: "none",
+            background: "#22232b",
+            border: "1px solid #3a3b46",
+            borderRadius: 10,
+            boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
+            padding: "9px 18px",
+            textAlign: "center",
+            minWidth: 72,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "#e08a6a", fontFamily: "ui-monospace, monospace" }}>
+            {hover.count}
+            <span style={{ fontSize: 13, fontWeight: 500, color: "#c7ccd1", marginLeft: 3 }}>句</span>
+          </div>
+          <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, letterSpacing: "0.5px" }}>
+            {pad2(hover.hour)}:00–{pad2(hover.hour)}:59
           </div>
         </div>
       )}
