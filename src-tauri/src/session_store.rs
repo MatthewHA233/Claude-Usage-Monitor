@@ -1,0 +1,892 @@
+//! 会话数据的 rusqlite 物化层（方案B：文件级增量同步 + 索引查询）。
+//!
+//! 一个库装本机 + 所有远程源（按 `source` 区分）。聊天记录只增、按时间追加，
+//! 故用文件级增量：未变的文件跳过，变化/新增的整文件重解析后替换其行。
+//! DB 持久化在 `<LocalAppData>/claude-usage-monitor/sessions.db`，服务重启
+//! 不再冷启动全量重解析。查询全部走索引。
+//!
+//! Phase 1：只同步本机文件系统（`~/.claude/projects`）。远程源在 Phase 2 接入。
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use chrono::{Local, TimeZone, Timelike};
+use rusqlite::{params, Connection, OptionalExtension, Result};
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::session_parse::parse_session;
+use crate::state::AppState;
+
+pub const LOCAL_SOURCE: &str = "local";
+
+/// 一个会话数据源（远程机器）。本机源是隐式的，不进此列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSource {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
+}
+
+/// 薄中继 /raw/list 的一项
+#[derive(Debug, Deserialize)]
+struct RawFileEntry {
+    key: String,
+    session_id: String,
+    mtime: i64,
+    size: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawListResponse {
+    files: Vec<RawFileEntry>,
+}
+
+fn blocking_client(timeout_secs: u64) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .no_proxy() // 局域网请求不该走 7890 代理
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .unwrap_or_default()
+}
+
+fn join_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if path.starts_with('/') {
+        format!("{base}{path}")
+    } else {
+        format!("{base}/{path}")
+    }
+}
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS files (
+    source TEXT NOT NULL,
+    path   TEXT NOT NULL,
+    mtime  INTEGER NOT NULL,
+    size   INTEGER NOT NULL,
+    PRIMARY KEY(source, path)
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    source       TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    file_path    TEXT NOT NULL,
+    project_path TEXT,
+    project_name TEXT,
+    title        TEXT,
+    git_branch   TEXT,
+    last_unix    INTEGER,
+    PRIMARY KEY(source, session_id)
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    file_path   TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    ts          TEXT,
+    ts_unix     INTEGER,
+    local_date  TEXT,
+    text        TEXT,
+    chars       INTEGER,
+    reply       TEXT,
+    reply_chars INTEGER,
+    images      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_msg_ts      ON messages(ts_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_msg_date    ON messages(local_date);
+CREATE INDEX IF NOT EXISTS idx_msg_srcfile ON messages(source, file_path);
+CREATE INDEX IF NOT EXISTS idx_msg_srcsess ON messages(source, session_id);
+";
+
+#[derive(Serialize)]
+pub struct MyMessage {
+    pub session_id: String,
+    pub source_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    pub ts: String,
+    pub ts_unix: Option<i64>,
+    pub local_date: String,
+    pub text: String,
+    pub chars: i64,
+    pub reply: String,
+    pub reply_chars: i64,
+    pub images: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct TimelineBucket {
+    pub b: i64,
+    pub n: i64,
+}
+
+#[derive(Serialize)]
+pub struct TimelineRow {
+    pub session_id: String,
+    pub source_id: String,
+    pub title: String,
+    pub project_name: String,
+    pub project_path: String,
+    pub first_unix: Option<i64>,
+    pub last_unix: Option<i64>,
+    pub count: i64,
+    pub buckets: Vec<TimelineBucket>,
+}
+
+#[derive(Serialize)]
+pub struct DailyStat {
+    pub date: String,
+    pub count: i64,
+    pub chars: i64,
+}
+
+pub struct SessionStore {
+    conn: Mutex<Connection>,
+    syncing: AtomicBool,
+}
+
+fn db_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("claude-usage-monitor")
+        .join("sessions.db")
+}
+
+fn projects_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// 取路径最后一段作为项目名
+fn basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 当天第几个 10 分钟（本地时区）
+fn bucket_of(ts_unix: i64) -> i64 {
+    match Local.timestamp_opt(ts_unix, 0).single() {
+        Some(dt) => (dt.hour() as i64 * 60 + dt.minute() as i64) / 10,
+        None => 0,
+    }
+}
+
+/// 行 → MyMessage（列序固定，最后一列 images 为 JSON 数组）
+fn map_my_message(row: &rusqlite::Row) -> Result<MyMessage> {
+    let images = row
+        .get::<_, Option<String>>(11)?
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    Ok(MyMessage {
+        session_id: row.get(0)?,
+        source_id: row.get(1)?,
+        project_name: row.get(2)?,
+        project_path: row.get(3)?,
+        ts: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        ts_unix: row.get(5)?,
+        local_date: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "未知".into()),
+        text: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        chars: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+        reply: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        reply_chars: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
+        images,
+    })
+}
+
+impl SessionStore {
+    pub fn open() -> Result<Self> {
+        let path = db_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            syncing: AtomicBool::new(false),
+        })
+    }
+
+    /// 一次完整同步（本机文件系统 + 各远程薄中继）。AtomicBool 防并发重入：
+    /// 已有同步在跑则立即返回，绝不阻塞查询命令。供后台循环调用。
+    pub fn sync_all(&self, remotes: &[SessionSource]) {
+        if self.syncing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.sync_local();
+        for src in remotes {
+            // 单个远程失败（离线/超时）不影响其余源与本机
+            let _ = self.sync_remote(&src.id, &src.base_url);
+        }
+        self.syncing.store(false, Ordering::SeqCst);
+    }
+
+    /// 后台循环用：读已保存远程源后做一次完整同步
+    pub fn sync_tick(&self, db: &crate::db::Database) {
+        let remotes = remotes_from_db(db);
+        self.sync_all(&remotes);
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        self.syncing.load(Ordering::Relaxed)
+    }
+
+    pub fn total_messages(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+    }
+
+    /// 远程薄中继增量同步：拉 /raw/list，对变化的文件拉 /raw/file 原始字节后本地解析入库。
+    /// 网络请求期间不持有 DB 锁。
+    pub fn sync_remote(&self, source_id: &str, base_url: &str) -> Result<()> {
+        let client = blocking_client(20);
+        let list: RawListResponse = match client
+            .get(join_url(base_url, "/raw/list"))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json())
+        {
+            Ok(v) => v,
+            Err(_) => return Ok(()), // 离线/出错：跳过，保留已有数据
+        };
+
+        let mut seen: Vec<String> = Vec::new();
+        for f in &list.files {
+            seen.push(f.key.clone());
+            let existing: Option<(i64, i64)> = {
+                let conn = self.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT mtime, size FROM files WHERE source=?1 AND path=?2",
+                    params![source_id, f.key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+            };
+            if existing == Some((f.mtime, f.size)) {
+                continue;
+            }
+            let content = match client
+                .get(join_url(base_url, "/raw/file"))
+                .query(&[("key", &f.key)])
+                .send()
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.text())
+            {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let conn = self.conn.lock().unwrap();
+            ingest(&conn, source_id, &f.session_id, &f.key, &content)?;
+            conn.execute(
+                "INSERT INTO files(source,path,mtime,size) VALUES(?1,?2,?3,?4) \
+                 ON CONFLICT(source,path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size",
+                params![source_id, f.key, f.mtime, f.size],
+            )?;
+        }
+
+        // 清理远程已删除的文件
+        let known: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT path FROM files WHERE source=?1")?;
+            let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for p in known {
+            if !seen.contains(&p) {
+                let conn = self.conn.lock().unwrap();
+                conn.execute(
+                    "DELETE FROM messages WHERE source=?1 AND file_path=?2",
+                    params![source_id, p],
+                )?;
+                conn.execute(
+                    "DELETE FROM sessions WHERE source=?1 AND file_path=?2",
+                    params![source_id, p],
+                )?;
+                conn.execute(
+                    "DELETE FROM files WHERE source=?1 AND path=?2",
+                    params![source_id, p],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 远程心跳：连得上且 2xx 即在线
+    pub fn ping_remote(base_url: &str) -> bool {
+        blocking_client(3)
+            .get(join_url(base_url, "/api/ping"))
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
+    /// 本机文件系统增量同步
+    pub fn sync_local(&self) -> Result<()> {
+        let Some(root) = projects_dir() else {
+            return Ok(());
+        };
+        if !root.exists() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut seen: Vec<String> = Vec::new();
+
+        for dir_entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let dir = dir_entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            for file_entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let fp = file_entry.path();
+                if fp.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let p = fp.to_string_lossy().to_string();
+                seen.push(p.clone());
+
+                let Ok(meta) = std::fs::metadata(&fp) else {
+                    continue;
+                };
+                let size = meta.len() as i64;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                let existing: Option<(i64, i64)> = conn
+                    .query_row(
+                        "SELECT mtime, size FROM files WHERE source=?1 AND path=?2",
+                        params![LOCAL_SOURCE, p],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if existing == Some((mtime, size)) {
+                    continue; // 未变
+                }
+
+                let content = std::fs::read_to_string(&fp).unwrap_or_default();
+                let session_id = fp
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                ingest(&conn, LOCAL_SOURCE, &session_id, &p, &content)?;
+                conn.execute(
+                    "INSERT INTO files(source,path,mtime,size) VALUES(?1,?2,?3,?4) \
+                     ON CONFLICT(source,path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size",
+                    params![LOCAL_SOURCE, p, mtime, size],
+                )?;
+            }
+        }
+
+        // 清理已删除的本机文件
+        let known: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT path FROM files WHERE source=?1")?;
+            let rows = stmt.query_map(params![LOCAL_SOURCE], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        for p in known {
+            if !seen.contains(&p) {
+                conn.execute(
+                    "DELETE FROM messages WHERE source=?1 AND file_path=?2",
+                    params![LOCAL_SOURCE, p],
+                )?;
+                conn.execute(
+                    "DELETE FROM sessions WHERE source=?1 AND file_path=?2",
+                    params![LOCAL_SOURCE, p],
+                )?;
+                conn.execute(
+                    "DELETE FROM files WHERE source=?1 AND path=?2",
+                    params![LOCAL_SOURCE, p],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 发言流：按时间倒序平铺
+    pub fn my_messages(
+        &self,
+        limit: i64,
+        offset: i64,
+        source: Option<String>,
+        session: Option<String>,
+        since: Option<i64>,
+        until: Option<i64>,
+    ) -> Result<(i64, Vec<MyMessage>)> {
+        use rusqlite::types::Value;
+        let conn = self.conn.lock().unwrap();
+
+        // 动态拼 WHERE：来源 / 单会话 / 时间区间（时间区间用于「1 小时单元格」过滤）
+        let mut conds: Vec<&str> = Vec::new();
+        let mut args: Vec<Value> = Vec::new();
+        if let Some(s) = &source {
+            conds.push("m.source = ?");
+            args.push(Value::Text(s.clone()));
+        }
+        if let Some(s) = &session {
+            conds.push("m.session_id = ?");
+            args.push(Value::Text(s.clone()));
+        }
+        if let Some(a) = since {
+            conds.push("m.ts_unix >= ?");
+            args.push(Value::Integer(a));
+        }
+        if let Some(b) = until {
+            conds.push("m.ts_unix <= ?");
+            args.push(Value::Integer(b));
+        }
+        let where_sql = if conds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conds.join(" AND "))
+        };
+
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM messages m {where_sql}"),
+            rusqlite::params_from_iter(args.iter()),
+            |r| r.get(0),
+        )?;
+
+        let base = "SELECT m.session_id, m.source, COALESCE(s.project_name,''), \
+             COALESCE(s.project_path,''), m.ts, m.ts_unix, m.local_date, m.text, m.chars, \
+             m.reply, m.reply_chars, m.images FROM messages m \
+             LEFT JOIN sessions s ON s.source=m.source AND s.session_id=m.session_id";
+        let sql =
+            format!("{base} {where_sql} ORDER BY m.ts_unix DESC, m.id DESC LIMIT ? OFFSET ?");
+        let mut sel_args = args;
+        sel_args.push(Value::Integer(limit));
+        sel_args.push(Value::Integer(offset));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut items = Vec::new();
+        for r in stmt.query_map(rusqlite::params_from_iter(sel_args.iter()), map_my_message)? {
+            items.push(r?);
+        }
+        Ok((total, items))
+    }
+
+    /// 会话时间轴：某本地日期，每会话一行 + 10 分钟分桶
+    pub fn timeline(&self, date: &str, source: Option<String>) -> Result<Vec<TimelineRow>> {
+        let conn = self.conn.lock().unwrap();
+        let base = "SELECT m.session_id, m.source, COALESCE(s.title,''), \
+             COALESCE(s.project_name,''), COALESCE(s.project_path,''), m.ts_unix \
+             FROM messages m LEFT JOIN sessions s ON s.source=m.source AND s.session_id=m.session_id \
+             WHERE m.local_date=?1 AND m.ts_unix IS NOT NULL";
+
+        // (session_id, source, title, project_name, project_path, ts_unix)
+        let collect = |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<(String, String, String, String, String, i64)>> {
+            let rows = stmt.query_map(p, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?;
+            rows.collect()
+        };
+
+        let raw: Vec<(String, String, String, String, String, i64)> = match &source {
+            Some(s) => {
+                let sql = format!("{base} AND m.source=?2 ORDER BY m.ts_unix");
+                let mut stmt = conn.prepare(&sql)?;
+                collect(&mut stmt, params![date, s])?
+            }
+            None => {
+                let sql = format!("{base} ORDER BY m.ts_unix");
+                let mut stmt = conn.prepare(&sql)?;
+                collect(&mut stmt, params![date])?
+            }
+        };
+
+        // 按 (source, session_id) 聚合
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut map: std::collections::HashMap<(String, String), TimelineRow> =
+            std::collections::HashMap::new();
+        let mut buckets: std::collections::HashMap<(String, String), std::collections::HashMap<i64, i64>> =
+            std::collections::HashMap::new();
+
+        for (sid, src, title, pname, ppath, ts_unix) in raw {
+            let key = (src.clone(), sid.clone());
+            let row = map.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                TimelineRow {
+                    session_id: sid.clone(),
+                    source_id: src.clone(),
+                    title: if title.is_empty() {
+                        sid.chars().take(8).collect()
+                    } else {
+                        title.clone()
+                    },
+                    project_name: pname.clone(),
+                    project_path: ppath.clone(),
+                    first_unix: Some(ts_unix),
+                    last_unix: Some(ts_unix),
+                    count: 0,
+                    buckets: Vec::new(),
+                }
+            });
+            row.count += 1;
+            if row.first_unix.map(|f| ts_unix < f).unwrap_or(true) {
+                row.first_unix = Some(ts_unix);
+            }
+            if row.last_unix.map(|l| ts_unix > l).unwrap_or(true) {
+                row.last_unix = Some(ts_unix);
+            }
+            let b = bucket_of(ts_unix);
+            *buckets.entry(key).or_default().entry(b).or_insert(0) += 1;
+        }
+
+        let mut out: Vec<TimelineRow> = Vec::new();
+        for key in &order {
+            let mut row = map.remove(key).unwrap();
+            if let Some(bm) = buckets.remove(key) {
+                let mut bs: Vec<(i64, i64)> = bm.into_iter().collect();
+                bs.sort_by_key(|(b, _)| *b);
+                row.buckets = bs
+                    .into_iter()
+                    .map(|(b, n)| TimelineBucket { b, n })
+                    .collect();
+            }
+            out.push(row);
+        }
+        out.sort_by_key(|r| r.first_unix.unwrap_or(0));
+        Ok(out)
+    }
+
+    /// 按天发言统计
+    pub fn daily_stats(&self, source: Option<String>) -> Result<Vec<DailyStat>> {
+        let conn = self.conn.lock().unwrap();
+        let base = "SELECT local_date, COUNT(*), COALESCE(SUM(chars),0) FROM messages \
+             WHERE local_date IS NOT NULL AND local_date != '未知'";
+        let map = |row: &rusqlite::Row| -> Result<DailyStat> {
+            Ok(DailyStat {
+                date: row.get(0)?,
+                count: row.get(1)?,
+                chars: row.get(2)?,
+            })
+        };
+        let mut out = Vec::new();
+        match &source {
+            Some(s) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{base} AND source=?1 GROUP BY local_date ORDER BY local_date"
+                ))?;
+                for r in stmt.query_map(params![s], map)? {
+                    out.push(r?);
+                }
+            }
+            None => {
+                let mut stmt =
+                    conn.prepare(&format!("{base} GROUP BY local_date ORDER BY local_date"))?;
+                for r in stmt.query_map([], map)? {
+                    out.push(r?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 某来源的 (会话数, 项目数)
+    pub fn counts(&self, source: &str) -> Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let sc: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE source=?1",
+            params![source],
+            |r| r.get(0),
+        )?;
+        let pc: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT project_path) FROM sessions WHERE source=?1 AND project_path IS NOT NULL AND project_path != ''",
+            params![source],
+            |r| r.get(0),
+        )?;
+        Ok((sc, pc))
+    }
+
+}
+
+/// 整文件重解析后替换其行（+ 更新会话元信息）
+fn ingest(
+    conn: &Connection,
+    source: &str,
+    session_id: &str,
+    file_path: &str,
+    content: &str,
+) -> Result<()> {
+    let meta = parse_session(content, session_id);
+    let project_name = basename(&meta.cwd);
+
+    conn.execute(
+        "DELETE FROM messages WHERE source=?1 AND file_path=?2",
+        params![source, file_path],
+    )?;
+    for (seq, t) in meta.turns.iter().enumerate() {
+        let images_json = serde_json::to_string(&t.images).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                source,
+                session_id,
+                file_path,
+                seq as i64,
+                t.ts,
+                t.ts_unix,
+                t.local_date,
+                t.text,
+                t.chars,
+                t.reply,
+                t.reply_chars,
+                images_json
+            ],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO sessions(source,session_id,file_path,project_path,project_name,title,git_branch,last_unix) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8) \
+         ON CONFLICT(source,session_id) DO UPDATE SET \
+            file_path=excluded.file_path, project_path=excluded.project_path, \
+            project_name=excluded.project_name, title=excluded.title, \
+            git_branch=excluded.git_branch, last_unix=excluded.last_unix",
+        params![
+            source,
+            session_id,
+            file_path,
+            meta.cwd,
+            project_name,
+            meta.title,
+            meta.git_branch,
+            meta.last_unix
+        ],
+    )?;
+    Ok(())
+}
+
+// ---------- Tauri 命令（异步 + spawn_blocking 跑阻塞的 fs/sqlite） ----------
+
+#[derive(Serialize)]
+pub struct MyMessagesResponse {
+    pub total: i64,
+    pub offset: i64,
+    pub limit: i64,
+    pub items: Vec<MyMessage>,
+}
+
+#[derive(Serialize)]
+pub struct TimelineResponse {
+    pub date: String,
+    pub sessions: Vec<TimelineRow>,
+}
+
+#[derive(Serialize)]
+pub struct StatsResponse {
+    pub days: Vec<DailyStat>,
+}
+
+#[derive(Serialize)]
+pub struct SourceStatus {
+    pub id: String,
+    pub label: String,
+    pub online: bool,
+    pub hostname: String,
+    pub os: String,
+    pub session_count: i64,
+    pub project_count: i64,
+}
+
+fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
+/// 读取已保存的远程源列表（过滤掉保留 id `local`：本机是隐式源，
+/// 历史脏数据里可能残留一条 id=local 的"本机"，会导致重复采集 + 双芯片）
+fn remotes_from_db(db: &crate::db::Database) -> Vec<SessionSource> {
+    let list: Vec<SessionSource> = match db.get_setting("session_sources") {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    list.into_iter().filter(|s| s.id != LOCAL_SOURCE).collect()
+}
+
+#[tauri::command]
+pub fn session_sources_get(state: State<AppState>) -> Vec<SessionSource> {
+    remotes_from_db(&state.db)
+}
+
+#[tauri::command]
+pub fn session_sources_save(
+    sources: Vec<SessionSource>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let json = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_setting("session_sources", &json)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_my_messages(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    source: Option<String>,
+    session: Option<String>,
+    since: Option<i64>,
+    until: Option<i64>,
+) -> Result<MyMessagesResponse, String> {
+    let store = state.sessions.clone();
+    let limit = limit.unwrap_or(400).clamp(1, 5000);
+    let offset = offset.unwrap_or(0).max(0);
+    let (total, items) = tokio::task::spawn_blocking(move || {
+        store.my_messages(limit, offset, source, session, since, until)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(MyMessagesResponse {
+        total,
+        offset,
+        limit,
+        items,
+    })
+}
+
+#[tauri::command]
+pub async fn session_timeline(
+    state: State<'_, AppState>,
+    date: Option<String>,
+    source: Option<String>,
+) -> Result<TimelineResponse, String> {
+    let store = state.sessions.clone();
+    let date = date
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+    let d = date.clone();
+    let sessions = tokio::task::spawn_blocking(move || {
+        store.timeline(&d, source)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(TimelineResponse { date, sessions })
+}
+
+#[tauri::command]
+pub async fn session_stats(
+    state: State<'_, AppState>,
+    source: Option<String>,
+) -> Result<StatsResponse, String> {
+    let store = state.sessions.clone();
+    let days = tokio::task::spawn_blocking(move || {
+        store.daily_stats(source)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(StatsResponse { days })
+}
+
+#[tauri::command]
+pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStatus>, String> {
+    let store = state.sessions.clone();
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let remotes = remotes_from_db(&db);
+
+        let (sc, pc) = store.counts(LOCAL_SOURCE).unwrap_or((0, 0));
+        let mut out = vec![SourceStatus {
+            id: LOCAL_SOURCE.to_string(),
+            label: "本机".to_string(),
+            online: true,
+            hostname: local_hostname(),
+            os: "windows".to_string(),
+            session_count: sc,
+            project_count: pc,
+        }];
+        for s in remotes {
+            let online = SessionStore::ping_remote(&s.base_url);
+            let (rsc, rpc) = if online {
+                store.counts(&s.id).unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
+            out.push(SourceStatus {
+                id: s.id,
+                label: s.label,
+                online,
+                hostname: String::new(),
+                os: String::new(),
+                session_count: rsc,
+                project_count: rpc,
+            });
+        }
+        Ok::<Vec<SourceStatus>, String>(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+pub struct SyncState {
+    pub syncing: bool,
+    pub total: i64,
+}
+
+/// 读取本机图片文件转 data URL（供 [Image #N] 悬浮预览）
+#[tauri::command]
+pub async fn session_image(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            _ => return Err(format!("不支持的图片类型: {ext}")),
+        };
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {e}"))?;
+        if bytes.len() > 25 * 1024 * 1024 {
+            return Err("图片过大（>25MB）".to_string());
+        }
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok::<String, String>(format!("data:{mime};base64,{b64}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn session_sync_state(state: State<'_, AppState>) -> Result<SyncState, String> {
+    let store = state.sessions.clone();
+    tokio::task::spawn_blocking(move || {
+        let total = store.total_messages().unwrap_or(0);
+        Ok::<SyncState, String>(SyncState {
+            syncing: store.is_syncing(),
+            total,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

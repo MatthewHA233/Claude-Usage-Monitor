@@ -8,6 +8,7 @@
     "core:window:allow-create",
     "core:window:allow-set-focus",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:webview:allow-create-webview-window"
   ]
 }

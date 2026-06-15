@@ -52,6 +52,11 @@ export interface PluginUsageStatus {
   updated_at: string;
 }
 
+export interface ProxySettings {
+  enabled: boolean;
+  url: string;
+}
+
 export interface AccountSummary {
   provider: "claude_code" | "codex" | string;
   key: string;

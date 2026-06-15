@@ -8,6 +8,7 @@ import type {
   AccountPauseState,
   LocalUsageStatus,
   PluginUsageStatus,
+  ProxySettings,
   TokenUsageReport,
 } from "../types";
 
@@ -302,4 +303,40 @@ export function useTokenUsageReport(sinceDays = 14, autoFetch = false) {
   }, [autoFetch, refresh]);
 
   return { report, loading, error, refetch: refresh, loadCached };
+}
+
+export function useProxySettings() {
+  const [settings, setSettings] = useState<ProxySettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetch = useCallback(async () => {
+    try {
+      const data = await invoke<ProxySettings>("get_proxy_settings");
+      setSettings(data);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetch();
+  }, [fetch]);
+
+  const save = useCallback(async (enabled: boolean, url: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const data = await invoke<ProxySettings>("set_proxy_settings", { enabled, url });
+      setSettings(data);
+      return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  return { settings, saving, error, refetch: fetch, save };
 }

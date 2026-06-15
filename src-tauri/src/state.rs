@@ -1,11 +1,13 @@
 use crate::db::Database;
 use crate::models::PluginUsageStatus;
+use crate::session_store::SessionStore;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub struct AppState {
     pub db: Arc<Database>,
     pub runtime: Arc<RuntimeStatus>,
+    pub sessions: Arc<SessionStore>,
 }
 
 #[derive(Default)]
@@ -35,9 +37,11 @@ impl RuntimeStatus {
 impl AppState {
     pub fn new() -> Result<Self, String> {
         let db = Database::open().map_err(|e| e.to_string())?;
+        let sessions = SessionStore::open().map_err(|e| e.to_string())?;
         Ok(Self {
             db: Arc::new(db),
             runtime: Arc::new(RuntimeStatus::default()),
+            sessions: Arc::new(sessions),
         })
     }
 }

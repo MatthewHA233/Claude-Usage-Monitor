@@ -5,7 +5,8 @@ mod http_server;
 mod local_usage;
 mod models;
 mod recommender;
-mod session_remote;
+mod session_parse;
+mod session_store;
 mod state;
 mod token_usage;
 
@@ -34,6 +35,17 @@ pub fn run() {
             .flatten()
             .unwrap_or_else(|| local_usage::DEFAULT_PROXY_URL.to_string());
         local_usage::set_proxy_config(enabled, url);
+    }
+
+    // 会话物化库后台同步循环：每 4s 增量同步本机 + 远程，查询命令只读不阻塞。
+    // 首次为空时全量解析较慢，期间 is_syncing 为真，前端据此显示「初始化中」。
+    {
+        let store = std::sync::Arc::clone(&app_state.sessions);
+        let db = std::sync::Arc::clone(&app_state.db);
+        std::thread::spawn(move || loop {
+            store.sync_tick(&db);
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        });
     }
 
     let db_for_http = std::sync::Arc::clone(&app_state.db);
@@ -75,12 +87,14 @@ pub fn run() {
             commands::refresh_local_usage,
             commands::get_proxy_settings,
             commands::set_proxy_settings,
-            session_remote::session_sources_get,
-            session_remote::session_sources_save,
-            session_remote::session_ping,
-            session_remote::session_api_get,
-            session_remote::session_local_ensure,
-            session_remote::session_local_stop,
+            session_store::session_sources_get,
+            session_store::session_sources_save,
+            session_store::session_my_messages,
+            session_store::session_timeline,
+            session_store::session_stats,
+            session_store::session_status,
+            session_store::session_sync_state,
+            session_store::session_image,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

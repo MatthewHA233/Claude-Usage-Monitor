@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, BarChart3, CheckCircle2, Flame, X } from "lucide-react";
+import { Activity, BarChart3, CheckCircle2, Flame, MessagesSquare, Settings, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import logoUrl from "./assets/logo.png";
+import SettingsModal from "./components/SettingsModal";
 import segmentCompleteSoundUrl from "./assets/quota-segment-complete.wav";
 import restFinishedSoundUrl from "./assets/quota-rest-finished.wav";
 import {
@@ -37,6 +39,24 @@ interface SegmentToast extends QuotaSegmentCompletedDetail {
   toastId: string;
 }
 
+async function openSessionsWindow() {
+  const existing = await WebviewWindow.getByLabel("sessions");
+  if (existing) {
+    await existing.setFocus().catch(() => undefined);
+    return;
+  }
+  const win = new WebviewWindow("sessions", {
+    url: "index.html",
+    title: "会话时间轴",
+    width: 1280,
+    height: 820,
+    minWidth: 960,
+    minHeight: 600,
+    center: true,
+  });
+  win.once("tauri://error", (e) => console.error("打开会话窗口失败", e));
+}
+
 interface RaceBurst extends QuotaRaceSettledDetail {
   burstId: string;
 }
@@ -48,6 +68,7 @@ export default function App() {
   });
   const [segmentToasts, setSegmentToasts] = useState<SegmentToast[]>([]);
   const [raceBurst, setRaceBurst] = useState<RaceBurst | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const raceBurstTimerRef = useRef<number | null>(null);
   const { snapshots, loading: snapsLoading, refetch: refetchSnaps } = useLatestSnapshots(30_000);
   const { recommendation, refetch: refetchRec } = useRecommendation();
@@ -152,10 +173,30 @@ export default function App() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-1" style={{ background: "#202020", border: "1px solid #333", borderRadius: 8, padding: 3 }}>
-          <TabButton active={tab === "accounts"} onClick={() => setTab("accounts")} icon={<Activity size={14} />} label="用量" />
-          <TabButton active={tab === "race"} onClick={() => setTab("race")} icon={<Flame size={14} />} label="竞赛" />
-          <TabButton active={tab === "tokens"} onClick={() => setTab("tokens")} icon={<BarChart3 size={14} />} label="Token" />
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1" style={{ background: "#202020", border: "1px solid #333", borderRadius: 8, padding: 3 }}>
+            <TabButton active={tab === "accounts"} onClick={() => setTab("accounts")} icon={<Activity size={14} />} label="用量" />
+            <TabButton active={tab === "race"} onClick={() => setTab("race")} icon={<Flame size={14} />} label="竞赛" />
+            <TabButton active={tab === "tokens"} onClick={() => setTab("tokens")} icon={<BarChart3 size={14} />} label="Token" />
+          </div>
+          <button
+            type="button"
+            title="会话时间轴"
+            onClick={() => void openSessionsWindow()}
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, color: "#9ca3af", background: "#202020", border: "1px solid #333", cursor: "pointer" }}
+          >
+            <MessagesSquare size={15} />
+          </button>
+          <button
+            type="button"
+            title="设置"
+            onClick={() => setSettingsOpen(true)}
+            className="inline-flex items-center justify-center"
+            style={{ width: 30, height: 30, borderRadius: 7, color: "#9ca3af", background: "#202020", border: "1px solid #333", cursor: "pointer" }}
+          >
+            <Settings size={15} />
+          </button>
         </div>
       </header>
 
@@ -190,6 +231,9 @@ export default function App() {
       </main>
       <SegmentToastStack toasts={segmentToasts} onDismiss={dismissSegmentToast} onOpen={openSegmentToast} />
       <GlobalRaceSettlementBurst burst={raceBurst} />
+      {settingsOpen && (
+        <SettingsModal onClose={() => setSettingsOpen(false)} onSaved={() => void refresh()} />
+      )}
     </div>
   );
 }
