@@ -94,3 +94,8 @@ Claude Pro 三账号用量追踪与调度推荐工具。
 **前端取数**：全部走 Tauri 命令 `invoke`（`session_my_messages` / `session_timeline` / `session_stats` /
 `session_status` / `session_sync_state` / `session_image` / `session_sources_get|save` 等），**不直接发 HTTP**。
 远程源地址（中继的局域网 URL）由用户在「会话」窗口手动添加，存在 `app_settings` 的 `session_sources`。
+
+**局域网发现（mDNS，零配置加源）**：对端中继用系统原生 Bonjour 广播 `_claude-relay._tcp`
+（macOS `dns-sd -R` / Linux `avahi-publish`，relay 退出即终止）；本项目用 `mdns-sd` crate 浏览，
+命令 `session_discover_relays`（独立模块 `src-tauri/src/discovery.rs`，前端 `src/sessions/discovery.ts`）。
+「添加会话来源」对话框打开即扫描，列出在线中继，点一下直接添加（免手输 IP）。仅能发现**正在运行**的中继。
