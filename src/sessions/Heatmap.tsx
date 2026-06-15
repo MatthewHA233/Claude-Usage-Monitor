@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DailyStat } from "./types";
-import { ymdLocal, todayYmd } from "./format";
+import { ymdLocal, todayYmd, shiftYmd } from "./format";
 
 const DEFAULT_WEEKS = 16; // 至少展示约 4 个月
 const CELL = 12;
@@ -39,6 +39,8 @@ function parseYmd(s: string): Date {
 export default function Heatmap({ days, selectedDate, onSelect }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrolledRef = useRef(false);
+  // 悬浮某天格子时的美化浮层（替代原生 title，与时间轴面板同款）
+  const [tip, setTip] = useState<{ cx: number; top: number; bottom: number; count: number; ymd: string } | null>(null);
 
   const counts = new Map<string, number>();
   let minDate = todayYmd();
@@ -84,6 +86,7 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
   }, [days.length]);
 
   return (
+    <>
     <div ref={scrollRef} className="heatmap-scroll" style={{ display: "flex", gap: MONTH_GAP }}>
       {groups.map((g, gi) => (
         <div key={gi} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -100,7 +103,11 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
                     <button
                       key={cell.ymd}
                       type="button"
-                      title={`${(counts.get(cell.ymd) || 0) > 0 ? `${counts.get(cell.ymd)} 句` : "无发言"} · ${cell.ymd}`}
+                      onMouseEnter={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setTip({ cx: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom, count: counts.get(cell.ymd) || 0, ymd: cell.ymd });
+                      }}
+                      onMouseLeave={() => setTip(null)}
                       onClick={() => onSelect(cell.ymd)}
                       style={{
                         width: CELL,
@@ -120,6 +127,56 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
           </div>
         </div>
       ))}
+    </div>
+    {tip && <HeatmapTip tip={tip} todayStr={todayStr} />}
+    </>
+  );
+}
+
+// 悬浮浮层：大数字句数 + 日期，与时间轴表头/单元格 hover 面板同款
+function HeatmapTip({
+  tip,
+  todayStr,
+}: {
+  tip: { cx: number; top: number; bottom: number; count: number; ymd: string };
+  todayStr: string;
+}) {
+  const dt = parseYmd(tip.ymd);
+  const wd = "日一二三四五六"[dt.getDay()];
+  const parts = tip.ymd.split("-");
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  const special = tip.ymd === todayStr ? "今天" : tip.ymd === shiftYmd(todayStr, -1) ? "昨天" : "";
+  const label = `${m}月${d}日 周${wd}${special ? ` · ${special}` : ""}`;
+  const above = tip.top > 84;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: Math.min(Math.max(tip.cx, 72), window.innerWidth - 72),
+        top: above ? tip.top - 8 : tip.bottom + 8,
+        transform: above ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+        zIndex: 60,
+        pointerEvents: "none",
+        background: "#22232b",
+        border: "1px solid #3a3b46",
+        borderRadius: 10,
+        boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
+        padding: "10px 18px",
+        textAlign: "center",
+        minWidth: 92,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {tip.count > 0 ? (
+        <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "#48c66b", fontFamily: "ui-monospace, monospace" }}>
+          {tip.count}
+          <span style={{ fontSize: 13, fontWeight: 500, color: "#c7ccd1", marginLeft: 3 }}>句</span>
+        </div>
+      ) : (
+        <div style={{ fontSize: 15, fontWeight: 600, color: "#8b9298", lineHeight: 1.1, padding: "4px 0" }}>无发言</div>
+      )}
+      <div style={{ fontSize: 11, color: "#d3d7dc", marginTop: 6, letterSpacing: "0.3px" }}>{label}</div>
     </div>
   );
 }

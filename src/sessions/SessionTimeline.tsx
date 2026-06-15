@@ -31,8 +31,10 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 
 export default function SessionTimeline({ date, rows, loading, collapsed, activeFilter, onToggleCollapse, onFilter }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  // 悬浮某单元格时显示的大数字浮层
-  const [hover, setHover] = useState<{ cx: number; top: number; bottom: number; hour: number; count: number } | null>(null);
+  // 悬浮单元格 / 小时表头 / 会话名 时显示的统一美化浮层（替代原生 title 提示）
+  const [tip, setTip] = useState<
+    { cx: number; top: number; bottom: number; big: number; title: string; sub?: string; hint?: string } | null
+  >(null);
 
   let minB = Infinity;
   let maxB = -Infinity;
@@ -109,7 +111,19 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                       type="button"
                       disabled={total === 0}
                       onClick={() => onFilter({ since, until, label: `${date} ${pad2(h)}:00–${pad2(h)}:59 · 全部会话` })}
-                      title={total > 0 ? `${pad2(h)} 时 · ${total} 句（点击筛这一小时全部会话）` : isNow ? "当前小时" : undefined}
+                      onMouseEnter={(e) => {
+                        if (total === 0) return;
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setTip({
+                          cx: rect.left + rect.width / 2,
+                          top: rect.top,
+                          bottom: rect.bottom,
+                          big: total,
+                          title: `${pad2(h)}:00–${pad2(h)}:59 · 全部会话`,
+                          hint: "点击筛这一小时全部会话",
+                        });
+                      }}
+                      onMouseLeave={() => setTip(null)}
                       className="tl-hour flex items-center justify-center font-mono"
                       style={{
                         width: HOUR_W,
@@ -141,7 +155,19 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                   <button
                     type="button"
                     onClick={() => onFilter({ source: r.source_id, session: r.session_id, label: r.title })}
-                    title={`${r.title} · ${r.count} 句（点击只看该会话）`}
+                    onMouseEnter={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setTip({
+                        cx: rect.left + rect.width / 2,
+                        top: rect.top,
+                        bottom: rect.bottom,
+                        big: r.count,
+                        title: r.title,
+                        sub: `${r.project_name || "—"} · ${r.source_label}`,
+                        hint: "点击只看该会话",
+                      });
+                    }}
+                    onMouseLeave={() => setTip(null)}
                     className="shrink-0 px-3 py-2 text-left tl-label"
                     style={{
                       width: LABEL_W,
@@ -200,9 +226,16 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                           onMouseEnter={(e) => {
                             if (hourCount === 0) return;
                             const rect = e.currentTarget.getBoundingClientRect();
-                            setHover({ cx: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom, hour: h, count: hourCount });
+                            setTip({
+                              cx: rect.left + rect.width / 2,
+                              top: rect.top,
+                              bottom: rect.bottom,
+                              big: hourCount,
+                              title: `${pad2(h)}:00–${pad2(h)}:59`,
+                              hint: "点击只看该会话这一小时",
+                            });
                           }}
-                          onMouseLeave={() => setHover(null)}
+                          onMouseLeave={() => setTip(null)}
                           className="flex items-center tl-hour"
                           style={{
                             width: HOUR_W,
@@ -242,32 +275,51 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
         </div>
       )}
 
-      {hover && !collapsed && (
+      {tip && !collapsed && (
         <div
           style={{
             position: "fixed",
-            left: hover.cx,
-            top: hover.top > 84 ? hover.top - 8 : hover.bottom + 8,
-            transform: hover.top > 84 ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+            left: tip.cx,
+            top: tip.top > 84 ? tip.top - 8 : tip.bottom + 8,
+            transform: tip.top > 84 ? "translate(-50%, -100%)" : "translate(-50%, 0)",
             zIndex: 60,
             pointerEvents: "none",
             background: "#22232b",
             border: "1px solid #3a3b46",
             borderRadius: 10,
             boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
-            padding: "9px 18px",
+            padding: "10px 18px",
             textAlign: "center",
-            minWidth: 72,
-            whiteSpace: "nowrap",
+            minWidth: 86,
+            maxWidth: 280,
           }}
         >
           <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "#e08a6a", fontFamily: "ui-monospace, monospace" }}>
-            {hover.count}
+            {tip.big}
             <span style={{ fontSize: 13, fontWeight: 500, color: "#c7ccd1", marginLeft: 3 }}>句</span>
           </div>
-          <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, letterSpacing: "0.5px" }}>
-            {pad2(hover.hour)}:00–{pad2(hover.hour)}:59
+          <div
+            style={{ fontSize: 11.5, color: "#d3d7dc", marginTop: 6, lineHeight: 1.4, letterSpacing: "0.3px", wordBreak: "break-word" }}
+          >
+            {tip.title}
           </div>
+          {tip.sub && (
+            <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 3, wordBreak: "break-word" }}>{tip.sub}</div>
+          )}
+          {tip.hint && (
+            <div
+              style={{
+                fontSize: 10,
+                color: "#8fb3d3",
+                marginTop: 7,
+                paddingTop: 6,
+                borderTop: "1px solid #34353f",
+                letterSpacing: "0.3px",
+              }}
+            >
+              {tip.hint}
+            </div>
+          )}
         </div>
       )}
     </div>
