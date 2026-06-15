@@ -14,7 +14,8 @@ import {
   fetchTimeline,
   fetchStats,
   getDrafts,
-  saveDrafts,
+  upsertDraft,
+  deleteDraft,
   normalizeBaseUrl,
 } from "./api";
 import type {
@@ -45,15 +46,34 @@ export default function SessionsApp() {
   const [rows, setRows] = useState<TimelineRowWithSource[]>([]);
   const [statsDays, setStatsDays] = useState<DailyStat[]>([]);
 
-  // 预备发言/待办（仅本机私有，用户产生，不随轮询刷新——仅本窗口编辑）
+  // 预备发言/待办（仅本机私有，用户产生，不随轮询刷新——仅本窗口编辑）。
+  // 落库走「差异化按行 CRUD」：对比新旧数组，只 upsert 变化的、只 delete 真正移除的，
+  // 绝不整表覆盖——即使加载扑空(drafts=[])，新增也只 upsert 一条，不会误删库里已有行。
   const [drafts, setDrafts] = useState<SessionDraft[]>([]);
-  useEffect(() => {
-    void getDrafts().then(setDrafts).catch(() => undefined);
-  }, []);
-  const persistDrafts = useCallback((next: SessionDraft[]) => {
+  const draftsRef = useRef<SessionDraft[]>([]);
+  const setDraftsBoth = useCallback((next: SessionDraft[]) => {
+    draftsRef.current = next;
     setDrafts(next);
-    void saveDrafts(next).catch(() => undefined);
   }, []);
+  useEffect(() => {
+    void getDrafts().then(setDraftsBoth).catch(() => undefined);
+  }, [setDraftsBoth]);
+  const persistDrafts = useCallback(
+    (next: SessionDraft[]) => {
+      const prev = draftsRef.current;
+      setDraftsBoth(next);
+      const prevById = new Map(prev.map((d) => [d.id, d] as const));
+      const nextIds = new Set(next.map((d) => d.id));
+      for (const d of next) {
+        const p = prevById.get(d.id);
+        if (!p || JSON.stringify(p) !== JSON.stringify(d)) void upsertDraft(d).catch(() => undefined);
+      }
+      for (const d of prev) {
+        if (!nextIds.has(d.id)) void deleteDraft(d.id).catch(() => undefined);
+      }
+    },
+    [setDraftsBoth]
+  );
 
   // 会话时间轴点击产生的过滤（会话 / 小时），在当天范围内进一步收窄卡片
   const [streamFilter, setStreamFilter] = useState<StreamFilter | null>(null);
@@ -280,13 +300,6 @@ export default function SessionsApp() {
           onFilter={handleTimelineFilter}
         />
 
-        <DraftBar
-          drafts={drafts}
-          onChange={persistDrafts}
-          sessions={sessionOptions}
-          defaultTarget={draftTarget}
-        />
-
         {streamFilter && (
           <div
             className="flex items-center gap-2 px-5 py-1.5 shrink-0 text-xs"
@@ -321,6 +334,14 @@ export default function SessionsApp() {
       </div>
 
       {addOpen && <AddSourceDialog onCancel={() => setAddOpen(false)} onConfirm={handleAdd} />}
+
+      {/* 预备发言：左下角悬浮 HUD（position:fixed，不占文档流） */}
+      <DraftBar
+        drafts={drafts}
+        onChange={persistDrafts}
+        sessions={sessionOptions}
+        defaultTarget={draftTarget}
+      />
     </div>
   );
 }

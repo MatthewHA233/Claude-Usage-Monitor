@@ -26,9 +26,19 @@ export function getDrafts(): Promise<SessionDraft[]> {
   return invoke<SessionDraft[]>("session_drafts_get");
 }
 
-/** 整体覆盖保存「预备发言/待办」清单 */
-export function saveDrafts(drafts: SessionDraft[]): Promise<void> {
-  return invoke<void>("session_drafts_save", { drafts });
+/** 新增或更新一条待办（按行 upsert，只动这一行——不会整表覆盖） */
+export function upsertDraft(draft: SessionDraft): Promise<void> {
+  return invoke<void>("session_draft_upsert", { draft });
+}
+
+/** 删除一条待办（按 id） */
+export function deleteDraft(id: string): Promise<void> {
+  return invoke<void>("session_draft_delete", { id });
+}
+
+/** 把一条预备发言推送到 claude启动器队列（启动器进入该会话时逐字符填入输入框，不自动发送） */
+export function pushDraft(draft: SessionDraft): Promise<void> {
+  return invoke<void>("session_draft_push", { draft });
 }
 
 /** 各来源在线状态 + 计数（本机恒在线，远程实时心跳） */

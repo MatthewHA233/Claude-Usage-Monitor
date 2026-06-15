@@ -155,3 +155,66 @@
 .heatmap-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 .heatmap-scroll::-webkit-scrollbar-thumb:hover { background: #444; }
 .heatmap-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ───────────── 预备发言 · 科幻 HUD（左下角悬浮、向右伸展） ───────────── */
+:root { --hud-accent: 95, 211, 224; } /* #5fd3e0 青色 */
+
+/* 收起态：左下角常驻 handle */
+.draft-hud-handle {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 13px; border-radius: 11px; cursor: pointer;
+  color: #cdeef3; font-size: 13px; font-weight: 600; letter-spacing: .3px;
+  background: linear-gradient(135deg, rgba(18,26,30,.96), rgba(14,18,22,.96));
+  border: 1px solid rgba(var(--hud-accent), .38);
+  box-shadow: 0 0 0 1px rgba(var(--hud-accent), .08),
+              0 4px 18px rgba(0,0,0,.5),
+              0 0 16px rgba(var(--hud-accent), .12);
+  backdrop-filter: blur(8px);
+  transition: border-color .18s ease, box-shadow .22s ease, transform .12s ease;
+}
+.draft-hud-handle:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--hud-accent), .7);
+  box-shadow: 0 0 0 1px rgba(var(--hud-accent), .16),
+              0 6px 22px rgba(0,0,0,.55),
+              0 0 26px rgba(var(--hud-accent), .28);
+}
+
+/* 展开态：HUD 面板，从左下角 clip 向右"伸展"展开 */
+.draft-hud-panel {
+  position: absolute; left: 0; bottom: 0; transform-origin: left bottom;
+  background: linear-gradient(150deg, rgba(17,23,27,.95), rgba(12,15,19,.96));
+  border: 1px solid rgba(var(--hud-accent), .34);
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px rgba(var(--hud-accent), .07),
+              0 18px 50px rgba(0,0,0,.62),
+              0 0 30px rgba(var(--hud-accent), .14);
+  backdrop-filter: blur(13px);
+  transition: clip-path .3s cubic-bezier(.16,.84,.27,1), opacity .22s ease, transform .3s cubic-bezier(.16,.84,.27,1);
+  overflow: hidden;
+}
+.draft-hud-panel.closed {
+  clip-path: inset(0 100% 0 0 round 14px);
+  opacity: 0; transform: translateX(-8px); pointer-events: none;
+}
+.draft-hud-panel.open {
+  clip-path: inset(0 0 0 0 round 14px);
+  opacity: 1; transform: none; pointer-events: auto;
+}
+/* 顶部一条扫描光带，强化 HUD 质感 */
+.draft-hud-panel::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--hud-accent), .8), transparent);
+}
+/* 四角直角支架 */
+.draft-hud-corner { position: absolute; width: 12px; height: 12px; pointer-events: none; }
+.draft-hud-corner.tl { top: 5px; left: 5px; border-top: 1.5px solid rgba(var(--hud-accent), .65); border-left: 1.5px solid rgba(var(--hud-accent), .65); }
+.draft-hud-corner.tr { top: 5px; right: 5px; border-top: 1.5px solid rgba(var(--hud-accent), .65); border-right: 1.5px solid rgba(var(--hud-accent), .65); }
+.draft-hud-corner.bl { bottom: 5px; left: 5px; border-bottom: 1.5px solid rgba(var(--hud-accent), .4); border-left: 1.5px solid rgba(var(--hud-accent), .4); }
+.draft-hud-corner.br { bottom: 5px; right: 5px; border-bottom: 1.5px solid rgba(var(--hud-accent), .4); border-right: 1.5px solid rgba(var(--hud-accent), .4); }
+
+.draft-hud-body { overflow-y: auto; overflow-x: hidden; }
+.draft-hud-body::-webkit-scrollbar { width: 6px; }
+.draft-hud-body::-webkit-scrollbar-thumb { background: rgba(var(--hud-accent), .25); border-radius: 3px; }
+.draft-hud-body::-webkit-scrollbar-thumb:hover { background: rgba(var(--hud-accent), .4); }
+.draft-hud-body::-webkit-scrollbar-track { background: transparent; }
