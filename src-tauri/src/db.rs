@@ -2,6 +2,7 @@ use crate::models::{
     AccountColor, AccountPauseState, InboxItem, LocalUsageStatus, TokenUsageDay,
     TokenUsageFileCache, UsageSnapshot,
 };
+use crate::session_store::SessionDraft;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -100,6 +101,7 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        db.migrate_drafts_from_settings()?;
         db.import_legacy_database()?;
         db.normalize_pct_scale()?;
         db.normalize_codex_pro_scale()?;
@@ -196,6 +198,19 @@ impl Database {
                 value      TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS session_drafts (
+                id            TEXT PRIMARY KEY,
+                text          TEXT    NOT NULL,
+                source_id     TEXT,
+                session_id    TEXT,
+                session_title TEXT    NOT NULL DEFAULT '',
+                project_name  TEXT    NOT NULL DEFAULT '',
+                done          INTEGER NOT NULL DEFAULT 0,
+                created_unix  INTEGER NOT NULL DEFAULT 0,
+                done_unix     INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_session_drafts_created
+                ON session_drafts(created_unix DESC);
         ",
         )?;
         drop(conn);
@@ -260,6 +275,95 @@ impl Database {
                 updated_at = excluded.updated_at",
             params![key, value, chrono::Utc::now().to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    // ---- 预备发言/待办（独立表，按行 CRUD） ----
+
+    /// 一次性迁移：旧实现把整个待办数组塞进 `app_settings['session_drafts']`（整数组覆盖式，
+    /// 易在前端状态扑空时被清空）。改用独立表后，把旧 blob 导入新表并删掉该 setting。
+    /// 仅当新表为空时导入，避免覆盖新数据；解析失败不动 setting 以免误删。
+    fn migrate_drafts_from_settings(&self) -> Result<()> {
+        let Some(json) = self.get_setting("session_drafts")? else {
+            return Ok(());
+        };
+        let table_empty = {
+            let conn = self.conn.lock().unwrap();
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM session_drafts", [], |r| r.get(0))?;
+            n == 0
+        };
+        if table_empty {
+            if let Ok(list) = serde_json::from_str::<Vec<SessionDraft>>(&json) {
+                for d in &list {
+                    self.draft_upsert(d)?;
+                }
+            }
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM app_settings WHERE key = 'session_drafts'", [])?;
+        Ok(())
+    }
+
+    pub fn drafts_list(&self) -> Result<Vec<SessionDraft>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, text, source_id, session_id, session_title, project_name,
+                    done, created_unix, done_unix
+             FROM session_drafts
+             ORDER BY created_unix DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let done_int: i64 = row.get(6)?;
+            Ok(SessionDraft {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                source_id: row.get(2)?,
+                session_id: row.get(3)?,
+                session_title: row.get(4)?,
+                project_name: row.get(5)?,
+                done: done_int != 0,
+                created_unix: row.get(7)?,
+                done_unix: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 新增或更新一条草稿（按 id 主键 upsert，只动这一行）。
+    pub fn draft_upsert(&self, d: &SessionDraft) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_drafts
+             (id, text, source_id, session_id, session_title, project_name, done, created_unix, done_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                text = excluded.text,
+                source_id = excluded.source_id,
+                session_id = excluded.session_id,
+                session_title = excluded.session_title,
+                project_name = excluded.project_name,
+                done = excluded.done,
+                created_unix = excluded.created_unix,
+                done_unix = excluded.done_unix",
+            params![
+                d.id,
+                d.text,
+                d.source_id,
+                d.session_id,
+                d.session_title,
+                d.project_name,
+                if d.done { 1 } else { 0 },
+                d.created_unix,
+                d.done_unix,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 删除一条草稿（只动这一行）。
+    pub fn draft_delete(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM session_drafts WHERE id = ?1", params![id])?;
         Ok(())
     }
 

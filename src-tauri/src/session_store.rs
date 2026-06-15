@@ -763,26 +763,117 @@ pub fn session_sources_save(
         .map_err(|e| e.to_string())
 }
 
-/// 读取本机的「预备发言/待办」清单（仅本机，存 settings JSON）。
+/// 读取本机的「预备发言/待办」清单（独立表 session_drafts，按 created_unix 倒序）。
 #[tauri::command]
 pub fn session_drafts_get(state: State<AppState>) -> Vec<SessionDraft> {
-    match state.db.get_setting("session_drafts") {
-        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
-        _ => Vec::new(),
-    }
+    state.db.drafts_list().unwrap_or_default()
 }
 
-/// 整体覆盖保存「预备发言/待办」清单（前端持完整数组、不可变更新后回存）。
+/// 新增或更新一条待办（按行 upsert，只动这一行——不会整表覆盖）。
 #[tauri::command]
-pub fn session_drafts_save(
-    drafts: Vec<SessionDraft>,
-    state: State<AppState>,
+pub fn session_draft_upsert(draft: SessionDraft, state: State<AppState>) -> Result<(), String> {
+    state.db.draft_upsert(&draft).map_err(|e| e.to_string())
+}
+
+/// 删除一条待办（按 id，只动这一行）。
+#[tauri::command]
+pub fn session_draft_delete(id: String, state: State<AppState>) -> Result<(), String> {
+    state.db.draft_delete(&id).map_err(|e| e.to_string())
+}
+
+/// 把一条「预备发言」推送到 claude启动器的队列，由启动器进入该会话时逐字符打入输入框。
+/// - 本机会话（source_id 为空/local）：直接写 `~/.claude/launcher_queue.json`（不依赖中继是否在跑）。
+/// - 远程会话：POST 到该来源中继的 `/queue/push`，由中继写它本机的同名队列文件。
+#[tauri::command]
+pub async fn session_draft_push(
+    state: State<'_, AppState>,
+    draft: SessionDraft,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(&drafts).map_err(|e| e.to_string())?;
-    state
-        .db
-        .set_setting("session_drafts", &json)
-        .map_err(|e| e.to_string())
+    let session_id = draft
+        .session_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "该待办未挂靠会话，无法推送到启动器".to_string())?;
+    let text = draft.text.clone();
+    if text.trim().is_empty() {
+        return Err("待办内容为空".to_string());
+    }
+    let draft_id = draft.id.clone();
+    let source = draft.source_id.clone();
+    let db = state.db.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let is_local = matches!(source.as_deref(), None | Some("") | Some(LOCAL_SOURCE));
+        if is_local {
+            push_local_queue(&session_id, &draft_id, &text)
+        } else {
+            let src = source.unwrap_or_default();
+            let base = remotes_from_db(&db)
+                .into_iter()
+                .find(|s| s.id == src)
+                .map(|s| s.base_url)
+                .ok_or_else(|| format!("未找到来源 {src} 的中继地址"))?;
+            push_remote_queue(&base, &session_id, &draft_id, &text)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn launcher_queue_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|h| h.join(".claude").join("launcher_queue.json"))
+        .ok_or_else(|| "无法定位用户主目录".to_string())
+}
+
+/// 本机直写队列文件：读改写 + 临时文件 rename 原子替换；同 draft_id 去重。
+fn push_local_queue(session_id: &str, draft_id: &str, text: &str) -> Result<(), String> {
+    let path = launcher_queue_path()?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.get("queue").map(|q| q.is_object()).unwrap_or(false))
+        .unwrap_or_else(|| serde_json::json!({ "version": 1, "queue": {} }));
+
+    let queue = root
+        .get_mut("queue")
+        .and_then(|q| q.as_object_mut())
+        .ok_or("队列结构损坏")?;
+    let arr = queue
+        .entry(session_id.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let list = arr.as_array_mut().ok_or("队列结构损坏")?;
+    list.retain(|it| it.get("id").and_then(|v| v.as_str()) != Some(draft_id));
+    list.push(serde_json::json!({ "id": draft_id, "text": text }));
+
+    let body = serde_json::to_string(&root).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|e| format!("写入队列失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换队列失败: {e}"))?;
+    Ok(())
+}
+
+/// 远程：POST 到中继 /queue/push（局域网，不走代理）。
+fn push_remote_queue(
+    base_url: &str,
+    session_id: &str,
+    draft_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let url = join_url(base_url, "/queue/push");
+    let client = blocking_client(5);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "session_id": session_id, "id": draft_id, "text": text }))
+        .send()
+        .map_err(|e| format!("推送到中继失败（对方启动器可能未运行）: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("中继返回 {}", resp.status()));
+    }
+    Ok(())
 }
 
 #[tauri::command]
