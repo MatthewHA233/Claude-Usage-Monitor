@@ -98,30 +98,70 @@ fn extract_user_text(obj: &Value) -> Option<String> {
     Some(t.to_string())
 }
 
-/// 从「图片来源注释」事件提取本机路径：整条 user 文本形如 `[Image: source: <路径>]`
-fn extract_image_source(obj: &Value) -> Option<String> {
+/// 从「图片来源注释」事件提取本机路径。一条注释可含多行（多图各一行），
+/// 每行形如 `[Image: source: <路径>]`，按行解析返回全部路径。
+fn extract_image_sources(obj: &Value) -> Vec<String> {
     if obj.get("type").and_then(|v| v.as_str()) != Some("user") {
-        return None;
+        return Vec::new();
     }
     if obj.get("isSidechain").and_then(|v| v.as_bool()) == Some(true) {
-        return None;
+        return Vec::new();
     }
-    let content = obj.get("message").and_then(|m| m.get("content"))?;
+    let Some(content) = obj.get("message").and_then(|m| m.get("content")) else {
+        return Vec::new();
+    };
     let text = if let Some(arr) = content.as_array() {
         join_text_blocks(arr)
     } else if let Some(s) = content.as_str() {
         s.to_string()
     } else {
-        return None;
+        return Vec::new();
     };
     let t = text.trim();
-    let inner = t.strip_prefix("[Image: source:")?.strip_suffix(']')?;
-    let path = inner.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
+    if !t.starts_with("[Image: source:") {
+        return Vec::new();
     }
+    let mut paths = Vec::new();
+    for line in t.lines() {
+        if let Some(inner) = line
+            .trim()
+            .strip_prefix("[Image: source:")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            let path = inner.trim();
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// 「工作中排队插话」：type=attachment 且 attachment.type=queued_command，
+/// 用户真实输入在 attachment.prompt（这类不是 type=user，普通解析会漏掉）
+fn extract_queued_prompt(obj: &Value) -> Option<String> {
+    if obj.get("type").and_then(|v| v.as_str()) != Some("attachment") {
+        return None;
+    }
+    let att = obj.get("attachment")?;
+    if att.get("type").and_then(|v| v.as_str()) != Some("queued_command") {
+        return None;
+    }
+    let prompt = att.get("prompt").and_then(|v| v.as_str())?;
+    let t = prompt.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let head: String = t.chars().take(60).collect();
+    if t.starts_with('<')
+        || t.starts_with("Caveat:")
+        || head.contains("local-command")
+        || t.starts_with("[Request interrupted")
+        || t.starts_with("[Image: source:")
+    {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 /// 从 assistant 行提取回复正文（仅 text 块）
@@ -206,11 +246,32 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
             }
         }
 
-        // 图片来源注释：不算一句发言，把路径挂到当前这条消息上
-        if let Some(path) = extract_image_source(&obj) {
+        // 图片来源注释（可能多行/多图）：把路径挂到当前这条消息上
+        let imgs = extract_image_sources(&obj);
+        if !imgs.is_empty() {
             if let Some(c) = cur.as_mut() {
-                c.images.push(path);
+                c.images.extend(imgs);
             }
+            continue;
+        }
+
+        // 工作中排队插话（attachment/queued_command）：算作我的一条发言
+        if let Some(qp) = extract_queued_prompt(&obj) {
+            flush(&mut cur, &mut reply_parts, &mut turns);
+            if first_prompt.is_none() {
+                first_prompt = Some(qp.lines().next().unwrap_or("").trim().to_string());
+            }
+            let ts = obj.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            cur = Some(UserTurn {
+                ts_unix: iso_to_unix(&ts),
+                local_date: iso_to_local_date(&ts),
+                chars: qp.chars().count() as i64,
+                text: qp,
+                ts,
+                reply: String::new(),
+                reply_chars: 0,
+                images: Vec::new(),
+            });
             continue;
         }
 

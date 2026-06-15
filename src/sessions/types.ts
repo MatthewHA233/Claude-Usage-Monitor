@@ -97,9 +97,9 @@ export interface SyncState {
 // ---- 发言流过滤器（来自会话时间轴的点击） ----
 
 export interface StreamFilter {
-  source: string; // 来源 id
+  source?: string; // 来源 id（小时表头=全局，不限来源时省略）
   session?: string; // 单会话过滤
-  since?: number; // 时间区间（1 小时单元格）
+  since?: number; // 时间区间（1 小时单元格 / 整列）
   until?: number;
   label: string; // 顶部 banner 展示
 }

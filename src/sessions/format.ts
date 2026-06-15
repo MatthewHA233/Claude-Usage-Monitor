@@ -48,3 +48,10 @@ export function dayLabel(ymdStr: string): string {
 export function nfmt(n: number): string {
   return n.toLocaleString("zh-CN");
 }
+
+/** 某本地日期 YYYY-MM-DD 的当天 [起, 止] unix 秒（本地时区） */
+export function dayRange(ymdStr: string): { since: number; until: number } {
+  const [y, m, d] = ymdStr.split("-").map(Number);
+  const since = Math.floor(new Date(y, (m || 1) - 1, d || 1, 0, 0, 0).getTime() / 1000);
+  return { since, until: since + 86399 };
+}
