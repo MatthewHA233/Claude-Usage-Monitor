@@ -129,6 +129,11 @@ export default function SessionsApp() {
     () => (activeProject ? rows.filter((r) => (r.project_name || "—") === activeProject) : rows),
     [rows, activeProject]
   );
+  // 会话 id → 标题（卡片的会话标签用）
+  const sessionTitles = useMemo(
+    () => Object.fromEntries(rows.map((r) => [r.session_id, r.title])) as Record<string, string>,
+    [rows]
+  );
 
   const selectDate = useCallback((ymd: string) => {
     setDate(ymd);
@@ -162,6 +167,13 @@ export default function SessionsApp() {
     );
     setActiveProject(null);
   }, []);
+
+  // 卡片上的会话标签 → 等同时间轴点会话名（toggle）
+  const onFilterSession = useCallback(
+    (sourceId: string, sessionId: string, title: string) =>
+      handleTimelineFilter({ source: sourceId, session: sessionId, label: title }),
+    [handleTimelineFilter]
+  );
 
   const handleAdd = useCallback(
     async (label: string, address: string) => {
@@ -252,7 +264,17 @@ export default function SessionsApp() {
         )}
 
         <div className="flex-1 min-h-0">
-          <MessageStream messages={visibleCards} loading={(syncing || refreshing) && stream.length === 0} />
+          <MessageStream
+            messages={visibleCards}
+            loading={(syncing || refreshing) && stream.length === 0}
+            sessionTitles={sessionTitles}
+            activeSourceId={activeSourceId}
+            activeProject={activeProject}
+            activeSession={streamFilter?.session ?? null}
+            onFilterSource={selectSource}
+            onFilterProject={selectProject}
+            onFilterSession={onFilterSession}
+          />
         </div>
       </div>
 

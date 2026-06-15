@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ChevronRight, FolderGit2, Monitor } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ChevronRight, FolderGit2, Monitor, MessagesSquare } from "lucide-react";
 import type { StreamMessage } from "./types";
 import { clock, nfmt } from "./format";
 import MessageText from "./MessageText";
@@ -8,10 +8,27 @@ import Markdown from "./Markdown";
 interface Props {
   messages: StreamMessage[];
   loading: boolean;
+  sessionTitles: Record<string, string>;
+  activeSourceId: string | null;
+  activeProject: string | null;
+  activeSession: string | null;
+  onFilterSource: (id: string) => void;
+  onFilterProject: (name: string) => void;
+  onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
 }
 
 /** flomo 风格卡片流：当天我的发言，时间倒序，每条一张卡片 */
-export default function MessageStream({ messages, loading }: Props) {
+export default function MessageStream({
+  messages,
+  loading,
+  sessionTitles,
+  activeSourceId,
+  activeProject,
+  activeSession,
+  onFilterSource,
+  onFilterProject,
+  onFilterSession,
+}: Props) {
   if (loading && messages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 animate-pulse" style={{ color: "#8b9298" }}>
@@ -33,14 +50,42 @@ export default function MessageStream({ messages, loading }: Props) {
     <div className="overflow-auto h-full px-5 py-4">
       <div className="mx-auto space-y-2.5" style={{ maxWidth: 760 }}>
         {messages.map((m, i) => (
-          <StreamCard key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${i}`} m={m} />
+          <StreamCard
+            key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${i}`}
+            m={m}
+            sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
+            activeSourceId={activeSourceId}
+            activeProject={activeProject}
+            activeSession={activeSession}
+            onFilterSource={onFilterSource}
+            onFilterProject={onFilterProject}
+            onFilterSession={onFilterSession}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function StreamCard({ m }: { m: StreamMessage }) {
+function StreamCard({
+  m,
+  sessionTitle,
+  activeSourceId,
+  activeProject,
+  activeSession,
+  onFilterSource,
+  onFilterProject,
+  onFilterSession,
+}: {
+  m: StreamMessage;
+  sessionTitle: string;
+  activeSourceId: string | null;
+  activeProject: string | null;
+  activeSession: string | null;
+  onFilterSource: (id: string) => void;
+  onFilterProject: (name: string) => void;
+  onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const hasReply = m.reply_chars > 0;
 
@@ -52,18 +97,34 @@ function StreamCard({ m }: { m: StreamMessage }) {
         <MessageText text={m.text} images={m.images} />
       </div>
 
-      <div className="flex items-center gap-2 mt-2 text-[10px] flex-wrap" style={{ color: "#8b9298" }}>
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded" style={{ background: "#262626" }}>
-          <FolderGit2 size={10} /> {m.project_name || "—"}
-        </span>
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded" style={{ background: "#262626" }}>
-          <Monitor size={10} /> {m.source_label}
-        </span>
+      <div className="flex items-center gap-1.5 mt-2 text-[10px] flex-wrap">
+        <Tag
+          icon={<FolderGit2 size={10} />}
+          label={m.project_name || "—"}
+          active={activeProject === (m.project_name || "—")}
+          accent="green"
+          onClick={() => onFilterProject(m.project_name || "—")}
+        />
+        <Tag
+          icon={<MessagesSquare size={10} />}
+          label={sessionTitle}
+          active={activeSession === m.session_id}
+          accent="orange"
+          onClick={() => onFilterSession(m.source_id, m.session_id, sessionTitle)}
+        />
+        <Tag
+          icon={<Monitor size={10} />}
+          label={m.source_label}
+          active={activeSourceId === m.source_id}
+          accent="green"
+          onClick={() => onFilterSource(m.source_id)}
+        />
+
         {hasReply ? (
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className="inline-flex items-center gap-0.5"
+            className="inline-flex items-center gap-0.5 ml-0.5"
             style={{ color: "#8fb3d3", background: "transparent", border: 0, cursor: "pointer" }}
           >
             <ChevronRight size={11} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }} />
@@ -83,5 +144,42 @@ function StreamCard({ m }: { m: StreamMessage }) {
         </div>
       )}
     </div>
+  );
+}
+
+function Tag({
+  icon,
+  label,
+  active,
+  accent,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active: boolean;
+  accent: "green" | "orange";
+  onClick: () => void;
+}) {
+  const activeBg = accent === "green" ? "#2f6f4f" : "#9c5a43";
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="card-tag inline-flex items-center gap-1 px-1.5 py-0.5 rounded"
+      style={{
+        background: active ? activeBg : "#2c2c2c",
+        color: active ? "#f9fafb" : "#c7ccd1",
+        border: 0,
+        cursor: "pointer",
+        maxWidth: 190,
+      }}
+      title={label}
+    >
+      <span className="shrink-0 inline-flex">{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
