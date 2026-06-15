@@ -1,6 +1,7 @@
 mod analyzer;
 mod commands;
 mod db;
+mod discovery;
 mod http_server;
 mod local_usage;
 mod models;
@@ -93,6 +94,7 @@ pub fn run() {
             session_store::session_draft_upsert,
             session_store::session_draft_delete,
             session_store::session_draft_push,
+            discovery::session_discover_relays,
             session_store::session_my_messages,
             session_store::session_timeline,
             session_store::session_stats,
