@@ -203,6 +203,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
 
     let mut cwd = String::new();
     let mut ai_title: Option<String> = None;
+    let mut custom_title: Option<String> = None;
     let mut first_prompt: Option<String> = None;
     let mut git_branch = String::new();
     let mut last_unix: i64 = 0;
@@ -228,6 +229,15 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
             if let Some(t) = obj.get("aiTitle").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
                     ai_title = Some(t.to_string());
+                }
+            }
+        }
+        // 用户 /rename 写入的自定义标题（type:"custom-title"，字段 customTitle）。
+        // 可能多次重命名，不加 is_none 守卫 = 后覆盖前，取最新一次；优先级高于 ai-title。
+        if obj.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
+            if let Some(t) = obj.get("customTitle").and_then(|v| v.as_str()) {
+                if !t.is_empty() {
+                    custom_title = Some(t.to_string());
                 }
             }
         }
@@ -303,7 +313,8 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
     }
     flush(&mut cur, &mut reply_parts, &mut turns);
 
-    let title = ai_title
+    let title = custom_title
+        .or(ai_title)
         .or_else(|| first_prompt.filter(|s| !s.is_empty()))
         .unwrap_or_else(|| session_id.chars().take(8).collect());
 
