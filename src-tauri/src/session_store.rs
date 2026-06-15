@@ -21,6 +21,9 @@ use crate::session_parse::parse_session;
 use crate::state::AppState;
 
 pub const LOCAL_SOURCE: &str = "local";
+/// 本机「输入历史」回填源：~/.claude/history.jsonl（你打过的每条 prompt，无 AI 回复）。
+/// 完整 transcript 受 cleanupPeriodDays 滚动清理，history.jsonl 永久保留，故用它补早期发言。
+pub const HISTORY_SOURCE: &str = "history";
 
 /// 一个会话数据源（远程机器）。本机源是隐式的，不进此列表。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_ts      ON messages(ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_date    ON messages(local_date);
 CREATE INDEX IF NOT EXISTS idx_msg_srcfile ON messages(source, file_path);
 CREATE INDEX IF NOT EXISTS idx_msg_srcsess ON messages(source, session_id);
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 ";
 
 #[derive(Serialize)]
@@ -181,6 +185,90 @@ fn db_path() -> PathBuf {
 
 fn projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// ~/.claude/history.jsonl —— 你输入过的每条 prompt 的全局索引（只增、永久）
+fn history_file() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude").join("history.jsonl"))
+}
+
+/// unix 秒 → 本地日期 YYYY-MM-DD（无效返回「未知」）
+fn local_date_of(ts_unix: i64) -> String {
+    Local
+        .timestamp_opt(ts_unix, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "未知".into())
+}
+
+/// unix 秒 → 本地 ISO 字符串（messages.ts 列用）
+fn local_iso_of(ts_unix: i64) -> String {
+    Local
+        .timestamp_opt(ts_unix, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string())
+        .unwrap_or_default()
+}
+
+fn get_meta(conn: &Connection, k: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT v FROM meta WHERE k=?1", params![k], |r| r.get(0))
+        .optional()
+}
+
+fn set_meta(conn: &Connection, k: &str, v: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k,v) VALUES(?1,?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        params![k, v],
+    )?;
+    Ok(())
+}
+
+/// 解析 history.jsonl：每行 {display, timestamp(ms), project}。
+/// 只取「cutoff 之前」的条目（cutoff = 本机完整 transcript 最早日期，避免与之重叠重复）。
+/// 返回 (ts_unix, local_date, text, project_path)，按时间升序。
+fn parse_history(content: &str, cutoff: Option<&str>) -> Vec<(i64, String, String, String)> {
+    let mut out: Vec<(i64, String, String, String)> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let text = v
+            .get("display")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let ts_ms = v.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0);
+        if ts_ms <= 0 {
+            continue;
+        }
+        let ts_unix = ts_ms / 1000;
+        let date = local_date_of(ts_unix);
+        if date == "未知" {
+            continue;
+        }
+        // 只回填 cutoff 之前；cutoff 之后由完整 transcript 覆盖
+        if let Some(c) = cutoff {
+            if date.as_str() >= c {
+                continue;
+            }
+        }
+        let project = v
+            .get("project")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push((ts_unix, date, text, project));
+    }
+    out.sort_by_key(|e| e.0);
+    out
 }
 
 /// 取路径最后一段作为项目名
@@ -245,6 +333,7 @@ impl SessionStore {
             return;
         }
         let _ = self.sync_local();
+        let _ = self.sync_history(); // 在本机 transcript 之后，cutoff 才准
         for src in remotes {
             // 单个远程失败（离线/超时）不影响其余源与本机
             let _ = self.sync_remote(&src.id, &src.base_url);
@@ -434,6 +523,90 @@ impl SessionStore {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// 回填本机输入历史（~/.claude/history.jsonl）为独立源 `history`，
+    /// 只补「本机完整 transcript 最早日期之前」的发言，按项目合成会话。
+    /// 仅在 cutoff 变化 / 尚无历史数据时重建（新打的 prompt 都在 cutoff 之后，不影响回填集，
+    /// 故不必每次打字都重灌 8000+ 行）。
+    pub fn sync_history(&self) -> Result<()> {
+        let Some(fp) = history_file() else {
+            return Ok(());
+        };
+        if !fp.exists() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+
+        // cutoff = 本机 transcript 最早日期；history 只回填它之前
+        let cutoff: Option<String> = conn
+            .query_row(
+                "SELECT MIN(local_date) FROM messages WHERE source=?1 AND local_date IS NOT NULL AND local_date!='未知'",
+                params![LOCAL_SOURCE],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let cutoff_key = cutoff.clone().unwrap_or_else(|| "∅".into());
+
+        // 仅 cutoff 变化 / 尚无历史数据时重建
+        let marker = get_meta(&conn, "history_cutoff")?;
+        let hist_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE source=?1",
+            params![HISTORY_SOURCE],
+            |r| r.get(0),
+        )?;
+        if marker.as_deref() == Some(cutoff_key.as_str()) && hist_count > 0 {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&fp).unwrap_or_default();
+        let entries = parse_history(&content, cutoff.as_deref());
+        let hist_path = fp.to_string_lossy().to_string();
+
+        // 整段重建放进单事务（8000+ 行，逐条 commit 会非常慢）
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM messages WHERE source=?1", params![HISTORY_SOURCE])?;
+        tx.execute("DELETE FROM sessions WHERE source=?1", params![HISTORY_SOURCE])?;
+
+        use std::collections::HashMap;
+        let mut proj_last: HashMap<String, i64> = HashMap::new();
+        for (seq, (ts_unix, date, text, project)) in entries.iter().enumerate() {
+            let sid = format!("hist:{project}");
+            let chars = text.chars().count() as i64;
+            tx.execute(
+                "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    HISTORY_SOURCE, sid, hist_path, seq as i64,
+                    local_iso_of(*ts_unix), *ts_unix, date.as_str(), text.as_str(), chars, "", 0i64, "[]"
+                ],
+            )?;
+            let e = proj_last.entry((*project).clone()).or_insert(0);
+            if *ts_unix > *e {
+                *e = *ts_unix;
+            }
+        }
+        for (project, last_unix) in &proj_last {
+            let sid = format!("hist:{project}");
+            let pname = basename(project);
+            let title = if pname.is_empty() {
+                "历史发言".to_string()
+            } else {
+                format!("历史 · {pname}")
+            };
+            tx.execute(
+                "INSERT INTO sessions(source,session_id,file_path,project_path,project_name,title,git_branch,last_unix) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8) \
+                 ON CONFLICT(source,session_id) DO UPDATE SET \
+                    file_path=excluded.file_path, project_path=excluded.project_path, \
+                    project_name=excluded.project_name, title=excluded.title, last_unix=excluded.last_unix",
+                params![HISTORY_SOURCE, sid, hist_path, project.as_str(), pname.as_str(), title.as_str(), "", *last_unix],
+            )?;
+        }
+        set_meta(&tx, "history_cutoff", &cutoff_key)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -960,6 +1133,19 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
             session_count: sc,
             project_count: pc,
         }];
+        // 本机·历史（输入历史回填，仅当有数据时出现）
+        let (hsc, hpc) = store.counts(HISTORY_SOURCE).unwrap_or((0, 0));
+        if hsc > 0 {
+            out.push(SourceStatus {
+                id: HISTORY_SOURCE.to_string(),
+                label: "本机·历史".to_string(),
+                online: true,
+                hostname: local_hostname(),
+                os: "windows".to_string(),
+                session_count: hsc,
+                project_count: hpc,
+            });
+        }
         for s in remotes {
             let online = SessionStore::ping_remote(&s.base_url);
             let (rsc, rpc) = if online {
