@@ -60,7 +60,29 @@ Claude Pro 三账号用量追踪与调度推荐工具。
 - `GET  /api/info`            本机身份（hostname/os）
 - `GET  /raw/list`            列全部 .jsonl：`{key, session_id, mtime, size}`
 - `GET  /raw/file?key=...`    返回该文件原始字节
+- `GET  /queue/list`          查看本机待发的「预备发言」队列（按 session_id 分组）
+- `POST /queue/push`          推入一条待发草稿 `{session_id, text, id?}`
 - `POST /api/shutdown`        仅本机优雅关闭
+
+**预备发言 / 待办（drafts）+ 启动器自动打字**（用户手写、面向未来、仅本机私有）
+- 草稿存**独立表** `session_drafts`（`db.rs`，列：id/text/source_id/session_id/session_title/project_name/done/created_unix/done_unix）。
+  命令 `session_drafts_get`(列表) / `session_draft_upsert`(按行新增改) / `session_draft_delete`(按行删)。前端组件 `src/sessions/DraftBar.tsx`。
+  - **绝不整表覆盖**：`SessionsApp.persistDrafts` 对比新旧数组，只 upsert 变化行、只 delete 真正移除行；
+    即使加载扑空(drafts=[])，新增也只 upsert 一条，不会误删已有行。
+  - 旧实现曾把整数组塞进 `app_settings['session_drafts']`（整体覆盖式，易在前端状态扑空时被清空导致丢数据），
+    已弃用；`db.rs::migrate_drafts_from_settings` 启动时一次性把旧 blob 迁入新表并删掉该 setting。
+- 「推送到启动器」：Tauri 命令 `session_draft_push(draft)` —— 本机会话由 Rust 直写
+  `~/.claude/launcher_queue.json`；远程会话 POST 到该来源中继 `/queue/push`（中继写它本机同名文件）。
+- **队列文件契约** `~/.claude/launcher_queue.json`：`{"version":1,"queue":{"<session_id>":[{"id","text"}]}}`，
+  同 `draft id` 去重，临时文件 rename 原子替换。
+- **启动器消费（实时注入）**：`claude_launcher.py` 的 `execute_claude_command`（四种进入对话的触发器全汇于此）
+  解析 session_id（`--resume <id>` 直接取；`-c` 反查最近会话；新建/选择器拿不到则跳过）后调用
+  `_start_draft_watcher` 起一个**后台轮询线程**：会话存活期间每秒 `launcher_queue.pop` 一次，有草稿就
+  `console_typer.type_text` **逐字符**写入控制台输入缓冲（`WriteConsoleInputW`，不依赖窗口焦点）。
+  既覆盖「进入前已排队」也覆盖「**常驻对话期间随时推送**」。**只填不发**（不注入回车），用户检查后自行回车。
+  会话退出时主线程 `stop_evt.set()` 停止轮询。
+  **关键前提**：本进程与 claude 共用同一控制台，故 subprocess.run 阻塞主线程时该线程仍能写入；
+  因此**只有经更新后的启动器进入/恢复的会话**才带 watcher——旧启动器拉起的旧会话需重新 `ccrun` 进入一次才生效。
 
 **中继生命周期**：由 launcher 幂等自启 —— `session_api_autostart.py` 的 `ensure_running()`，
 在 `claude_launcher.py` / `codex_launcher.py` 启动时调用；detached、不弹窗、空闲 900s 自动退、多窗口竞态由 bind 失败兜底。
