@@ -49,6 +49,13 @@ export function nfmt(n: number): string {
   return n.toLocaleString("zh-CN");
 }
 
+/** unix → 当天第几个 10 分钟桶（0..143，本地时区）；无效返回 -1 */
+export function bucketOf(unix: number | null): number {
+  if (!unix) return -1;
+  const d = new Date(unix * 1000);
+  return d.getHours() * 6 + Math.floor(d.getMinutes() / 10);
+}
+
 /** 某本地日期 YYYY-MM-DD 的当天 [起, 止] unix 秒（本地时区） */
 export function dayRange(ymdStr: string): { since: number; until: number } {
   const [y, m, d] = ymdStr.split("-").map(Number);

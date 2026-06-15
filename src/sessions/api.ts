@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   SessionSource,
+  SessionDraft,
   MyMessagesResponse,
   TimelineResponse,
   StatsResponse,
@@ -18,6 +19,16 @@ export function getSources(): Promise<SessionSource[]> {
 
 export function saveSources(sources: SessionSource[]): Promise<void> {
   return invoke<void>("session_sources_save", { sources });
+}
+
+/** 读取本机「预备发言/待办」清单（仅本机私有） */
+export function getDrafts(): Promise<SessionDraft[]> {
+  return invoke<SessionDraft[]>("session_drafts_get");
+}
+
+/** 整体覆盖保存「预备发言/待办」清单 */
+export function saveDrafts(drafts: SessionDraft[]): Promise<void> {
+  return invoke<void>("session_drafts_save", { drafts });
 }
 
 /** 各来源在线状态 + 计数（本机恒在线，远程实时心跳） */

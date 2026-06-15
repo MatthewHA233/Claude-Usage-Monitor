@@ -30,6 +30,30 @@ pub struct SessionSource {
     pub base_url: String,
 }
 
+/// 一条「预备发言/待办」——用户手写的、面向未来的草稿提示词。
+/// 与只读的会话历史相反：可变、用户产生、仅本机私有（不走远程中继）。
+/// 可挂靠到某个具体会话（source_id + session_id），title/project 为创建时的快照，
+/// 便于即使该会话不在当前日期视图里也能展示归属。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDraft {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub session_title: String,
+    #[serde(default)]
+    pub project_name: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub created_unix: i64,
+    #[serde(default)]
+    pub done_unix: Option<i64>,
+}
+
 /// 薄中继 /raw/list 的一项
 #[derive(Debug, Deserialize)]
 struct RawFileEntry {
@@ -736,6 +760,28 @@ pub fn session_sources_save(
     state
         .db
         .set_setting("session_sources", &json)
+        .map_err(|e| e.to_string())
+}
+
+/// 读取本机的「预备发言/待办」清单（仅本机，存 settings JSON）。
+#[tauri::command]
+pub fn session_drafts_get(state: State<AppState>) -> Vec<SessionDraft> {
+    match state.db.get_setting("session_drafts") {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// 整体覆盖保存「预备发言/待办」清单（前端持完整数组、不可变更新后回存）。
+#[tauri::command]
+pub fn session_drafts_save(
+    drafts: Vec<SessionDraft>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let json = serde_json::to_string(&drafts).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_setting("session_drafts", &json)
         .map_err(|e| e.to_string())
 }
 

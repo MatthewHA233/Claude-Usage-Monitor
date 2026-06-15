@@ -1,9 +1,11 @@
 import { useState, type ReactNode } from "react";
 import { ChevronRight, FolderGit2, Monitor, MessagesSquare } from "lucide-react";
 import type { StreamMessage } from "./types";
-import { clock, nfmt } from "./format";
+import { clock, nfmt, bucketOf } from "./format";
 import MessageText from "./MessageText";
 import Markdown from "./Markdown";
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
 
 interface Props {
   messages: StreamMessage[];
@@ -48,20 +50,43 @@ export default function MessageStream({
 
   return (
     <div className="overflow-auto h-full px-5 py-4">
-      <div className="mx-auto space-y-2.5" style={{ maxWidth: 760 }}>
-        {messages.map((m, i) => (
-          <StreamCard
-            key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${i}`}
-            m={m}
-            sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
-            activeSourceId={activeSourceId}
-            activeProject={activeProject}
-            activeSession={activeSession}
-            onFilterSource={onFilterSource}
-            onFilterProject={onFilterProject}
-            onFilterSession={onFilterSession}
-          />
-        ))}
+      <div className="mx-auto" style={{ maxWidth: 760 }}>
+        {messages.map((m, i) => {
+          const b = bucketOf(m.ts_unix); // 当天第几个 10 分钟
+          const h = Math.floor(b / 6);
+          const prevB = i > 0 ? bucketOf(messages[i - 1].ts_unix) : -2;
+          const crossHour = i > 0 && Math.floor(prevB / 6) !== h;
+          const cross10 = i > 0 && prevB !== b;
+          return (
+            <div key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${i}`}>
+              {i > 0 &&
+                (crossHour ? (
+                  // 1 小时边界：醒目分界 + 时刻
+                  <div className="flex items-center gap-2" style={{ margin: "13px 6px 11px" }}>
+                    <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
+                    <span className="text-[10px] font-mono" style={{ color: "#9ca3af" }}>{pad2(h)}:00</span>
+                    <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
+                  </div>
+                ) : cross10 ? (
+                  // 10 分钟边界：细分界
+                  <div style={{ height: 1, background: "#2c2c2c", margin: "8px 16px" }} />
+                ) : (
+                  <div style={{ height: 6 }} />
+                ))}
+              <StreamCard
+                m={m}
+                shade={b % 2 === 0}
+                sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
+                activeSourceId={activeSourceId}
+                activeProject={activeProject}
+                activeSession={activeSession}
+                onFilterSource={onFilterSource}
+                onFilterProject={onFilterProject}
+                onFilterSession={onFilterSession}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -69,6 +94,7 @@ export default function MessageStream({
 
 function StreamCard({
   m,
+  shade,
   sessionTitle,
   activeSourceId,
   activeProject,
@@ -78,6 +104,7 @@ function StreamCard({
   onFilterSession,
 }: {
   m: StreamMessage;
+  shade: boolean;
   sessionTitle: string;
   activeSourceId: string | null;
   activeProject: string | null;
@@ -89,13 +116,20 @@ function StreamCard({
   const [open, setOpen] = useState(false);
   const hasReply = m.reply_chars > 0;
 
+  // 按 10 分钟桶奇偶相间的卡片背景（与时间轴斑马同节奏）
   return (
-    <div className="rounded-xl px-4 py-3" style={{ background: "#1d1d1d", border: "1px solid #272727" }}>
-      <div className="text-[11px] font-mono mb-1.5" style={{ color: "#6b7280" }}>{clock(m.ts_unix)}</div>
-
-      <div className="text-sm whitespace-pre-wrap break-words" style={{ color: "#e5e7eb", lineHeight: 1.6 }}>
-        <MessageText text={m.text} images={m.images} />
+    <div className="rounded-xl px-4 py-3 flex gap-3" style={{ background: shade ? "#25252c" : "#191919", border: "1px solid #2a2a2a" }}>
+      <div
+        className="shrink-0 font-mono"
+        style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, width: 46, paddingTop: 1, letterSpacing: "0.3px" }}
+      >
+        {clock(m.ts_unix)}
       </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="text-sm whitespace-pre-wrap break-words" style={{ color: "#e5e7eb", lineHeight: 1.6 }}>
+          <MessageText text={m.text} images={m.images} />
+        </div>
 
       <div className="flex items-center gap-1.5 mt-2 text-[10px] flex-wrap">
         <Tag
@@ -109,7 +143,7 @@ function StreamCard({
           icon={<MessagesSquare size={10} />}
           label={sessionTitle}
           active={activeSession === m.session_id}
-          accent="orange"
+          accent="violet"
           onClick={() => onFilterSession(m.source_id, m.session_id, sessionTitle)}
         />
         <Tag
@@ -143,6 +177,7 @@ function StreamCard({
           <Markdown content={m.reply} />
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -157,10 +192,10 @@ function Tag({
   icon: ReactNode;
   label: string;
   active: boolean;
-  accent: "green" | "orange";
+  accent: "green" | "violet";
   onClick: () => void;
 }) {
-  const activeBg = accent === "green" ? "#2f6f4f" : "#9c5a43";
+  const activeBg = accent === "green" ? "#2f6f4f" : "#5a4a8c";
   return (
     <button
       type="button"

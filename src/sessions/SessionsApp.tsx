@@ -3,6 +3,7 @@ import { Filter, X, PanelLeftOpen } from "lucide-react";
 import Sidebar from "./Sidebar";
 import SessionTimeline from "./SessionTimeline";
 import MessageStream from "./MessageStream";
+import DraftBar, { type SessionOption } from "./DraftBar";
 import AddSourceDialog from "./AddSourceDialog";
 import {
   getSources,
@@ -12,10 +13,13 @@ import {
   fetchMyMessages,
   fetchTimeline,
   fetchStats,
+  getDrafts,
+  saveDrafts,
   normalizeBaseUrl,
 } from "./api";
 import type {
   SessionSource,
+  SessionDraft,
   SourceStatus,
   StreamMessage,
   TimelineRowWithSource,
@@ -40,6 +44,16 @@ export default function SessionsApp() {
   const [stream, setStream] = useState<StreamMessage[]>([]);
   const [rows, setRows] = useState<TimelineRowWithSource[]>([]);
   const [statsDays, setStatsDays] = useState<DailyStat[]>([]);
+
+  // 预备发言/待办（仅本机私有，用户产生，不随轮询刷新——仅本窗口编辑）
+  const [drafts, setDrafts] = useState<SessionDraft[]>([]);
+  useEffect(() => {
+    void getDrafts().then(setDrafts).catch(() => undefined);
+  }, []);
+  const persistDrafts = useCallback((next: SessionDraft[]) => {
+    setDrafts(next);
+    void saveDrafts(next).catch(() => undefined);
+  }, []);
 
   // 会话时间轴点击产生的过滤（会话 / 小时），在当天范围内进一步收窄卡片
   const [streamFilter, setStreamFilter] = useState<StreamFilter | null>(null);
@@ -134,6 +148,27 @@ export default function SessionsApp() {
     () => Object.fromEntries(rows.map((r) => [r.session_id, r.title])) as Record<string, string>,
     [rows]
   );
+
+  // 预备发言「归属」下拉：当天会话（被项目筛选收窄后的）作为可选项
+  const sessionOptions = useMemo<SessionOption[]>(
+    () =>
+      visibleRows.map((r) => ({
+        source_id: r.source_id,
+        session_id: r.session_id,
+        title: r.title,
+        project_name: r.project_name || "",
+      })),
+    [visibleRows]
+  );
+  // 新待办默认归属 = 当前时间轴选中的会话
+  const draftTarget = useMemo<SessionOption | null>(() => {
+    const sid = streamFilter?.session;
+    if (!sid) return null;
+    const r = rows.find((x) => x.session_id === sid);
+    return r
+      ? { source_id: r.source_id, session_id: r.session_id, title: r.title, project_name: r.project_name || "" }
+      : null;
+  }, [streamFilter, rows]);
 
   const selectDate = useCallback((ymd: string) => {
     setDate(ymd);
@@ -243,6 +278,13 @@ export default function SessionsApp() {
           activeFilter={streamFilter}
           onToggleCollapse={() => setTimelineCollapsed((v) => !v)}
           onFilter={handleTimelineFilter}
+        />
+
+        <DraftBar
+          drafts={drafts}
+          onChange={persistDrafts}
+          sessions={sessionOptions}
+          defaultTarget={draftTarget}
         />
 
         {streamFilter && (

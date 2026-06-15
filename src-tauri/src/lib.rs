@@ -89,6 +89,8 @@ pub fn run() {
             commands::set_proxy_settings,
             session_store::session_sources_get,
             session_store::session_sources_save,
+            session_store::session_drafts_get,
+            session_store::session_drafts_save,
             session_store::session_my_messages,
             session_store::session_timeline,
             session_store::session_stats,

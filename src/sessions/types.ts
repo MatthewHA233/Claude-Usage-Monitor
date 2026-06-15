@@ -35,6 +35,20 @@ export interface StreamMessage extends MyMessage {
   source_label: string;
 }
 
+// ---- 预备发言 / 待办（session_drafts，仅本机私有） ----
+
+export interface SessionDraft {
+  id: string;
+  text: string;
+  source_id: string | null; // 挂靠会话所属来源；null = 通用（不挂靠）
+  session_id: string | null; // 挂靠的会话；null = 通用
+  session_title: string; // 创建时的会话标题快照（便于跨日仍可展示归属）
+  project_name: string; // 创建时的项目名快照
+  done: boolean;
+  created_unix: number;
+  done_unix: number | null;
+}
+
 // ---- 会话时间轴（session_timeline，单日对齐） ----
 
 export interface TimelineBucket {

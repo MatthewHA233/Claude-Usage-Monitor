@@ -116,9 +116,9 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                         borderTop: 0,
                         borderRight: 0,
                         borderBottom: 0,
-                        borderLeft: `1px solid ${isNow ? "#3b6ea5" : "#2c2c2c"}`,
-                        background: sel ? "rgba(224,138,106,0.24)" : isNow ? "rgba(96,165,250,0.18)" : "transparent",
-                        color: sel ? "#f0b59e" : isNow ? "#8fb3d3" : total > 0 ? "#c7ccd1" : "#6b7280",
+                        borderLeft: `2px solid ${isNow ? "#3b6ea5" : "#4a4a4a"}`,
+                        background: sel ? "rgba(167,139,250,0.28)" : isNow ? "rgba(96,165,250,0.18)" : "transparent",
+                        color: sel ? "#c4b5fd" : isNow ? "#8fb3d3" : total > 0 ? "#c7ccd1" : "#6b7280",
                         cursor: total > 0 ? "pointer" : "default",
                       }}
                     >
@@ -144,13 +144,13 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                     style={{
                       width: LABEL_W,
                       cursor: "pointer",
-                      background: rowSel ? "#2b2420" : "#202024",
+                      background: rowSel ? "#262338" : "#202024",
                       borderTop: 0,
                       borderBottom: 0,
                       borderLeft: 0,
                       borderRight: "1px solid #303030",
                       boxShadow: rowSel
-                        ? "3px 0 6px rgba(0,0,0,0.3), inset 4px 0 0 #cc785c"
+                        ? "3px 0 6px rgba(0,0,0,0.3), inset 4px 0 0 #a78bfa"
                         : "3px 0 6px rgba(0,0,0,0.3)",
                       position: "sticky",
                       left: 0,
@@ -178,15 +178,15 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                       const highlighted = cellMode ? cellSel : rowMode ? rowSel : colMode ? selHour === h : false;
                       const bg = highlighted
                         ? cellSel
-                          ? "rgba(224,138,106,0.34)"
-                          : "rgba(224,138,106,0.16)"
+                          ? "rgba(167,139,250,0.38)"
+                          : "rgba(167,139,250,0.18)"
                         : isNow
                         ? "rgba(96,165,250,0.13)"
                         : hourCount > 0
                         ? "rgba(224,138,106,0.12)"
                         : h % 2 === 0
-                        ? "rgba(255,255,255,0.015)"
-                        : "transparent";
+                        ? "transparent"
+                        : "rgba(0,0,0,0.1)";
                       return (
                         <button
                           key={h}
@@ -204,18 +204,19 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                             borderTop: 0,
                             borderRight: 0,
                             borderBottom: 0,
-                            borderLeft: `1px solid ${isNow ? "#3b6ea5" : "#2c2c2c"}`,
+                            borderLeft: `2px solid ${isNow ? "#3b6ea5" : "#4a4a4a"}`,
                             cursor: hourCount > 0 ? "pointer" : "default",
                           }}
                         >
                           {[0, 1, 2, 3, 4, 5].map((i) => {
-                            const n = bmap.get(h * 6 + i) || 0;
+                            const sub = h * 6 + i;
+                            const n = bmap.get(sub) || 0;
                             const dots = Math.min(5, n); // 该 10 分钟内的句数，最多叠 5 个
                             return (
                               <span
                                 key={i}
                                 className="flex flex-col items-center justify-center"
-                                style={{ width: CELL, height: "100%", gap: 1.5 }}
+                                style={{ width: CELL, height: "100%", gap: 1.5, background: sub % 2 === 0 ? "transparent" : "rgba(0,0,0,0.28)" }}
                                 title={n > 0 ? `${n} 句` : undefined}
                               >
                                 {Array.from({ length: dots }).map((_, di) => (
