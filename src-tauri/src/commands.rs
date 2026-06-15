@@ -11,6 +11,39 @@ pub fn get_latest_snapshots(state: State<AppState>) -> Vec<UsageSnapshot> {
     state.db.latest_all().unwrap_or_default()
 }
 
+/// 账号「当前档位」手动覆盖：读全部（account_key → 倍率）
+#[tauri::command]
+pub fn get_plan_overrides(state: State<AppState>) -> HashMap<String, f64> {
+    state.db.get_plan_overrides()
+}
+
+/// 设/清账号当前档位倍率（mult<=0 清除）。仅影响今后采集，不重写历史。
+#[tauri::command]
+pub fn set_plan_override(
+    provider: String,
+    alias: String,
+    mult: f64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_plan_override(&provider, &alias, mult)
+        .map_err(|e| e.to_string())
+}
+
+/// 一次性纠错：把选中的历史记录（snapshot id）按所选倍率重写；返回改写行数
+#[tauri::command]
+pub fn correct_history_snapshots(
+    ids: Vec<i64>,
+    mult: f64,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    state
+        .db
+        .correct_history_snapshots(&ids, mult)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_history(
     provider: Option<String>,

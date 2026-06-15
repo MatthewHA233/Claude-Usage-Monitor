@@ -6,6 +6,8 @@ import ProgressBar from "./ProgressBar";
 import { useHistory, useHistorySince, useAllHistories, useAccountColors, useAccountPauseStates } from "../hooks/useData";
 import { useResetAlarm } from "../hooks/useResetAlarm";
 import InboxBadge from "./InboxPanel";
+import PlanOverrideSelect from "./PlanOverrideSelect";
+import { tierPresets } from "../utils/planTiers";
 import { AlarmBell } from "./AlarmBell";
 import { loadStoredQuotaRaces, QUOTA_RACE_UPDATED_EVENT, type StoredQuotaRace } from "../utils/quotaRaceStorage";
 
@@ -686,6 +688,12 @@ function formatCountdownMs(ms: number): string {
   return `${seconds}s`;
 }
 
+/** pct 占其 total 的百分比（0–100）；total 缺省 100。用于 5x/20x 账号的进度条/配色阈值 */
+function ratioPct(pct: number | null | undefined, total: number | null | undefined): number {
+  const t = total && total > 0 ? total : 100;
+  return ((pct ?? 0) / t) * 100;
+}
+
 function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra, preciseCountdown = false, preciseCountdownBelowHours }: {
   label: string; pct: number | null; total?: number | null;
   resetHours: number | null; resetAt: string | null;
@@ -695,6 +703,7 @@ function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra,
   preciseCountdownBelowHours?: number;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [peek, setPeek] = useState(false); // 悬浮临时看「占总%」（仅 5x/20x）
 
   useEffect(() => {
     if ((!preciseCountdown && preciseCountdownBelowHours == null) || !resetAt) return;
@@ -704,6 +713,8 @@ function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra,
 
   const totalPct = total ?? 100;
   const rem = remaining(pct, totalPct);
+  const multiplied = totalPct > 100; // 5x/20x 账号
+  const ofTotal = pct === null ? null : (pct / totalPct) * 100; // 占总额度百分比 0–100
   const resetMs = resetAt ? new Date(resetAt).getTime() - nowMs : null;
   const preciseLimitMs = preciseCountdownBelowHours != null ? preciseCountdownBelowHours * 3_600_000 : null;
   const shouldUsePrecise = preciseCountdown || (resetMs !== null && preciseLimitMs !== null && resetMs <= preciseLimitMs);
@@ -717,7 +728,15 @@ function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra,
       <div className="flex items-center justify-between text-xs mb-1">
         <span style={{ color: "#aaa" }}>{label}</span>
         <div className="flex items-center gap-2">
-          <span className="font-semibold font-mono" style={{ color: "#fff" }}>{formatPct(pct)} / {totalPct.toFixed(0)}%</span>
+          <span
+            className="font-semibold font-mono"
+            style={{ color: "#fff", cursor: multiplied ? "help" : "default" }}
+            onMouseEnter={() => multiplied && setPeek(true)}
+            onMouseLeave={() => setPeek(false)}
+            title={multiplied ? "悬浮：占总额度的百分比" : undefined}
+          >
+            {peek && multiplied ? `${formatPct(ofTotal)} 占总` : `${formatPct(pct)} / ${totalPct.toFixed(0)}%`}
+          </span>
           <span style={{ color: "#bbb" }}>余 {formatPct(rem)}</span>
         </div>
       </div>
@@ -1617,13 +1636,104 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   colors: Record<string, string>;
 }) {
   const { history, loading, loadingMore, hasMore, loadMore, refetch } = useHistory(provider, alias);
-  const { history: statsRecords } = useHistorySince(provider, alias, 31);
-  const { histories, loading: allLoading } = useAllHistories();
+  const { history: statsRecords, refetch: refetchStats } = useHistorySince(provider, alias, 31);
+  const { histories, loading: allLoading, refetch: refetchAllHistories } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [chartMode, setChartMode] = useState<"single" | "total">("single");
   const [metric, setMetric] = useState<"session" | "weekly">(
     () => (localStorage.getItem(CHART_METRIC_KEY) === "weekly" ? "weekly" : "session")
   );
+
+  // 历史记录多选纠错：选中的 snapshot id + 拖拽/范围锚点（在时间列上拖拽或 Shift 选范围）
+  const [selIds, setSelIds] = useState<Set<number>>(new Set());
+  const [correctMult, setCorrectMult] = useState<number>(tierPresets(provider)[1]?.mult ?? 5);
+  const selDragRef = useRef(false);
+  const selAnchorRef = useRef<number | null>(null);
+  const scrollElRef = useRef<HTMLElement | null>(null);
+
+  const selectRange = useCallback((from: number, to: number, additive: boolean) => {
+    const [a, b] = from <= to ? [from, to] : [to, from];
+    setSelIds((prev) => {
+      const next = additive ? new Set(prev) : new Set<number>();
+      for (let k = a; k <= b; k++) {
+        const id = history[k]?.id;
+        if (id != null) next.add(id);
+      }
+      return next;
+    });
+  }, [history]);
+
+  const onRowMouseDown = useCallback((e: React.MouseEvent, idx: number) => {
+    e.preventDefault();
+    if (e.shiftKey && selAnchorRef.current != null) {
+      selectRange(selAnchorRef.current, idx, e.ctrlKey || e.metaKey);
+      return;
+    }
+    selAnchorRef.current = idx;
+    selDragRef.current = true;
+    const id = history[idx]?.id;
+    if (id == null) return;
+    setSelIds((prev) => {
+      if (e.ctrlKey || e.metaKey) {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id); else n.add(id);
+        return n;
+      }
+      return new Set([id]);
+    });
+  }, [history, selectRange]);
+
+  const onRowMouseEnter = useCallback((idx: number) => {
+    if (!selDragRef.current || selAnchorRef.current == null) return;
+    selectRange(selAnchorRef.current, idx, false);
+    if (idx >= history.length - 2 && hasMore) loadMore(); // 拖到已加载列表底部 → 自动加载更多
+  }, [selectRange, history.length, hasMore, loadMore]);
+
+  // 拖拽选择时：鼠标贴近滚动容器上/下边缘自动滚动（贴底再触发加载更多），可一路往下拖
+  useEffect(() => {
+    let raf = 0;
+    let vel = 0;
+    const onMove = (e: MouseEvent) => {
+      if (!selDragRef.current || !scrollElRef.current) { vel = 0; return; }
+      const r = scrollElRef.current.getBoundingClientRect();
+      const edge = 48;
+      if (e.clientY > r.bottom - edge) vel = Math.min(20, (e.clientY - (r.bottom - edge)) * 0.7);
+      else if (e.clientY < r.top + edge) vel = -Math.min(20, (r.top + edge - e.clientY) * 0.7);
+      else vel = 0;
+    };
+    const tick = () => {
+      const el = scrollElRef.current;
+      if (selDragRef.current && vel !== 0 && el) {
+        el.scrollTop += vel;
+        if (vel > 0 && hasMore && el.scrollHeight - el.scrollTop - el.clientHeight < 150) loadMore();
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    const up = () => { selDragRef.current = false; vel = 0; };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", up);
+    raf = requestAnimationFrame(tick);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", up);
+      cancelAnimationFrame(raf);
+    };
+  }, [hasMore, loadMore]);
+
+  const applyCorrection = useCallback(async () => {
+    const ids = Array.from(selIds);
+    if (!ids.length || correctMult <= 0) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke<number>("correct_history_snapshots", { ids, mult: correctMult });
+      setSelIds(new Set());
+      refetch();
+      refetchStats();
+      refetchAllHistories();
+    } catch {
+      /* ignore */
+    }
+  }, [selIds, correctMult, refetch, refetchStats, refetchAllHistories]);
   const [activeGroup, setActiveGroup] = useState<TooltipInfo | null>(null);
   // ref 控制悬浮面板 DOM 位置，mousemove 直接写 style 避免 setState 触发重渲染
   const tooltipElRef = useRef<HTMLDivElement>(null);
@@ -1646,6 +1756,7 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
       node = node.parentElement;
     }
     const scrollEl = node ?? document.documentElement;
+    scrollElRef.current = scrollEl;
     const handleScroll = () => {
       if (scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 150) {
         loadMore();
@@ -1679,9 +1790,39 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   if (history.length === 0) return <div className="text-center py-8 text-sm" style={{ color: "#999" }}>暂无历史数据</div>;
   return (
     <div ref={anchorRef}>
-      <div className="flex justify-end mb-2">
+      <div className="flex justify-end items-center gap-2 mb-2">
+        <PlanOverrideSelect provider={provider} alias={alias} />
         <InboxBadge aliasFilter={alias} onChanged={refetch} colors={colors} />
       </div>
+
+      {/* 多选纠错浮条：选中历史记录后出现（全宽容器居中，避免被挤窄换行） */}
+      {selIds.size > 0 && (
+        <div className="fixed left-0 right-0 bottom-6 z-[110] flex justify-center" style={{ pointerEvents: "none" }}>
+          <div
+            className="flex items-center gap-3 px-4 py-2.5 rounded-xl whitespace-nowrap"
+            style={{ background: "#22232b", border: "1px solid #3a3b46", boxShadow: "0 10px 30px rgba(0,0,0,0.6)", pointerEvents: "auto" }}
+          >
+            <span className="text-xs" style={{ color: "#ddd" }}>已选 <b style={{ color: "#cc785c" }}>{selIds.size}</b> 条记录</span>
+            <span className="text-xs" style={{ color: "#888" }}>纠正为</span>
+            <select
+              value={String(correctMult)}
+              onChange={(e) => setCorrectMult(Number(e.target.value))}
+              className="text-xs"
+              style={{ background: "#2c2c2c", color: "#ddd", border: "1px solid #3a3a3a", borderRadius: 6, padding: "3px 8px", cursor: "pointer" }}
+            >
+              {tierPresets(provider).map((p) => (
+                <option key={p.mult} value={String(p.mult)}>{p.label} ({p.mult}x)</option>
+              ))}
+            </select>
+            <button type="button" onClick={() => void applyCorrection()}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg"
+              style={{ background: "#cc785c", color: "#fff", border: 0, cursor: "pointer" }}>应用纠正</button>
+            <button type="button" onClick={() => setSelIds(new Set())}
+              className="text-xs px-2.5 py-1.5 rounded-lg"
+              style={{ background: "#383838", color: "#ccc", border: "1px solid #4a4a4a", cursor: "pointer" }}>清除</button>
+          </div>
+        </div>
+      )}
       {/* 每日消耗图（可切换单账号/总览） */}
       <div className="card p-0 overflow-hidden mb-3">
         <div className="px-4 py-2.5 flex items-center justify-between" style={{ borderBottom: "1px solid #3a3a3a" }}>
@@ -1832,8 +1973,19 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
                 const handleLeave = () => { cancelAnimationFrame(rafIdRef.current); setActiveGroup(null); };
 
                 return (
-                  <tr key={snap.id ?? i} style={{ borderBottom: "1px solid #2e2e2e", background: rowWeekBg(snap) }} className="hover:brightness-110">
-                    <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#ccc" }}>{formatLocalTime(snap.collected_at)}</td>
+                  <tr key={snap.id ?? i}
+                    style={{
+                      borderBottom: "1px solid #2e2e2e",
+                      background: (snap.id != null && selIds.has(snap.id)) ? "rgba(204,120,92,0.16)" : rowWeekBg(snap),
+                      boxShadow: (snap.id != null && selIds.has(snap.id)) ? "inset 3px 0 0 #cc785c" : undefined,
+                    }}
+                    className="hover:brightness-110">
+                    <td className="px-3 py-2 whitespace-nowrap select-none"
+                      style={{ color: "#ccc", cursor: "pointer" }}
+                      title="按住在时间列拖拽多选 / 点一条再 Shift 点另一条选范围 → 底部纠正倍率"
+                      onMouseDown={(e) => onRowMouseDown(e, i)}
+                      onMouseEnter={() => onRowMouseEnter(i)}
+                    >{formatLocalTime(snap.collected_at)}</td>
                     <td style={makeDayCellStyle(dayPalette, isDayFirst, isDayLast, isDayHovered)}
                       onMouseEnter={handleDayEnter}
                       onMouseMove={hasDayGroup ? handleMove : undefined}
@@ -1841,10 +1993,10 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
                     >
                       <div className="flex items-center gap-2 min-w-[90px]">
                         <span className="font-mono font-semibold w-12"
-                          style={{ color: (snap.session_pct ?? 0) >= 80 ? "#f87171" : (snap.session_pct ?? 0) >= 60 ? "#f0a500" : "#7ab8f5" }}>
+                          style={{ color: ratioPct(snap.session_pct, snap.session_total_pct) >= 80 ? "#f87171" : ratioPct(snap.session_pct, snap.session_total_pct) >= 60 ? "#f0a500" : "#7ab8f5" }}>
                           {formatPct(snap.session_pct)}
                         </span>
-                        <ProgressBar pct={snap.session_pct} className="flex-1" />
+                        <ProgressBar pct={snap.session_pct} total={snap.session_total_pct ?? 100} className="flex-1" />
                       </div>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.session_reset_at)}</td>
@@ -1855,10 +2007,10 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
                     >
                       <div className="flex items-center gap-2 min-w-[90px]">
                         <span className="font-mono font-semibold w-12"
-                          style={{ color: (snap.weekly_pct ?? 0) >= 80 ? "#f87171" : (snap.weekly_pct ?? 0) >= 60 ? "#f0a500" : "#4ade80" }}>
+                          style={{ color: ratioPct(snap.weekly_pct, snap.weekly_total_pct) >= 80 ? "#f87171" : ratioPct(snap.weekly_pct, snap.weekly_total_pct) >= 60 ? "#f0a500" : "#4ade80" }}>
                           {formatPct(snap.weekly_pct)}
                         </span>
-                        <ProgressBar pct={snap.weekly_pct} className="flex-1" />
+                        <ProgressBar pct={snap.weekly_pct} total={snap.weekly_total_pct ?? 100} className="flex-1" />
                       </div>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap" style={{ color: "#aaa" }}>{formatLocalTime(snap.weekly_reset_at)}</td>

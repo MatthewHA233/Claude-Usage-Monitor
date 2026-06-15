@@ -43,7 +43,7 @@ pub async fn run_background_collector(db: Arc<Database>) {
 }
 
 pub async fn collect_once(db: Arc<Database>) {
-    match collect_codex_oauth().await {
+    match collect_codex_oauth(db.as_ref()).await {
         Ok(Some(snapshot)) => {
             let message = format!(
                 "Codex OAuth ok: {} session={:?} weekly={:?}",
@@ -262,7 +262,7 @@ fn latest_cached_alias(db: &Database, provider: &str) -> Option<String> {
         .unwrap_or(None)
 }
 
-async fn collect_codex_oauth() -> Result<Option<UsageSnapshot>, String> {
+async fn collect_codex_oauth(db: &Database) -> Result<Option<UsageSnapshot>, String> {
     let Some(auth_path) = codex_auth_path() else {
         return Ok(None);
     };
@@ -275,7 +275,12 @@ async fn collect_codex_oauth() -> Result<Option<UsageSnapshot>, String> {
     }
 
     let usage = fetch_codex_usage(&credentials).await?;
-    Ok(Some(usage.to_snapshot(&credentials)))
+    let alias = credentials.account_alias();
+    // 「当前档位」手动覆盖优先，否则回落标签自动检测
+    let multiplier = db
+        .plan_multiplier_for("codex", &alias)
+        .unwrap_or_else(|| usage.quota_multiplier());
+    Ok(Some(usage.to_snapshot(&credentials, multiplier)))
 }
 
 fn codex_auth_path() -> Option<PathBuf> {
@@ -305,16 +310,20 @@ async fn collect_claude_oauth(db: &Database) -> Result<Option<UsageSnapshot>, St
         .map_err(|error| error.to_string())?;
     let account_alias = identity.resolve_account_alias(&credentials, &email_aliases)?;
     let usage = fetch_claude_usage(&credentials.access_token).await?;
-    // subscriptionType 往往只有 "max"（不带 5x/20x），CLI 侧检测不出倍率时
-    // 复用插件上报落库的 total_pct（popup 套餐选择 / rate_limit_tier 自动检测）
-    let mut multiplier = identity.quota_multiplier(&credentials);
-    if multiplier <= 1.0 {
-        if let Ok(Some(total)) = db.latest_session_total_pct("claude_code", &account_alias) {
-            if total > 100.0 {
-                multiplier = total / 100.0;
+    // 倍率优先级：「当前档位」手动覆盖 > subscriptionType 标签 > 插件上报的 total_pct。
+    let multiplier = if let Some(m) = db.plan_multiplier_for("claude_code", &account_alias) {
+        m
+    } else {
+        let mut multiplier = identity.quota_multiplier(&credentials);
+        if multiplier <= 1.0 {
+            if let Ok(Some(total)) = db.latest_session_total_pct("claude_code", &account_alias) {
+                if total > 100.0 {
+                    multiplier = total / 100.0;
+                }
             }
         }
-    }
+        multiplier
+    };
     Ok(Some(usage.to_snapshot(account_alias, multiplier)))
 }
 
@@ -831,7 +840,7 @@ impl ClaudeOAuthUsageResponse {
 }
 
 impl CodexUsageResponse {
-    fn to_snapshot(&self, credentials: &CodexCredentials) -> UsageSnapshot {
+    fn to_snapshot(&self, credentials: &CodexCredentials, multiplier: f64) -> UsageSnapshot {
         let primary = self
             .rate_limit
             .as_ref()
@@ -840,7 +849,6 @@ impl CodexUsageResponse {
             .rate_limit
             .as_ref()
             .and_then(|rate| rate.secondary_window.as_ref());
-        let multiplier = self.quota_multiplier();
         let total_pct = 100.0 * multiplier;
         UsageSnapshot {
             id: None,

@@ -66,6 +66,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_latest_snapshots,
+            commands::get_plan_overrides,
+            commands::set_plan_override,
+            commands::correct_history_snapshots,
             commands::get_history,
             commands::get_history_since,
             commands::get_analysis,

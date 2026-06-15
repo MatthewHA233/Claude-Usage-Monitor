@@ -8,6 +8,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+const PLAN_OVERRIDES_KEY: &str = "plan_overrides";
+
+/// 从已存 pct/total 反推原始 used_percent 再乘新倍率：pct_new = pct_old * 100 / total_old * mult
+fn reconv_pct(pct: Option<f64>, total_old: Option<f64>, new_mult: f64) -> Option<f64> {
+    let pct = pct?;
+    let total_old = total_old.filter(|t| *t > 0.0)?;
+    Some(pct * 100.0 / total_old * new_mult)
+}
+
 const APP_DATA_DIR: &str = "claude-usage-monitor";
 const LEGACY_DATA_DIR: &str = "claude-switch";
 const GENERIC_PLAN_ALIASES: &[&str] = &[
@@ -276,6 +285,74 @@ impl Database {
             params![key, value, chrono::Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    // ---- 账号「当前档位」手动覆盖（只作用于今后采集，不碰历史） ----
+
+    pub fn get_plan_overrides(&self) -> HashMap<String, f64> {
+        self.get_setting(PLAN_OVERRIDES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<HashMap<String, f64>>(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// 今后采集时该账号用的倍率（无设置返回 None → 回落自动检测）
+    pub fn plan_multiplier_for(&self, provider: &str, alias: &str) -> Option<f64> {
+        self.get_plan_overrides()
+            .get(&format!("{provider}::{alias}"))
+            .copied()
+            .filter(|v| *v > 0.0)
+    }
+
+    /// 设/清账号当前档位（mult<=0 清除）。仅影响今后采集，不重写历史。
+    pub fn set_plan_override(&self, provider: &str, alias: &str, mult: f64) -> Result<()> {
+        let mut m = self.get_plan_overrides();
+        let key = format!("{provider}::{alias}");
+        if mult > 0.0 {
+            m.insert(key, mult);
+        } else {
+            m.remove(&key);
+        }
+        self.set_setting(
+            PLAN_OVERRIDES_KEY,
+            &serde_json::to_string(&m).unwrap_or_else(|_| "{}".into()),
+        )
+    }
+
+    // ---- 一次性纠错：对选中的历史记录（按 snapshot id）按所选倍率重写其百分比 ----
+
+    /// 把给定的快照（按 id）的百分比按所选倍率重写（从旧值反推 used_percent 再乘新倍率）。
+    /// 精确到每条历史记录,用于纠正采集当时档位识别错误。返回改写行数。
+    pub fn correct_history_snapshots(&self, ids: &[i64], mult: f64) -> Result<usize> {
+        if mult <= 0.0 || ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let new_total = 100.0 * mult;
+        let tx = conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        for &id in ids {
+            let row: Option<(Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = tx
+                .query_row(
+                    "SELECT session_pct, session_total_pct, weekly_pct, weekly_total_pct FROM usage_snapshots WHERE id=?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((s_pct, s_tot, w_pct, w_tot)) = row else {
+                continue;
+            };
+            let new_s = reconv_pct(s_pct, s_tot, mult);
+            let new_w = reconv_pct(w_pct, w_tot, mult);
+            tx.execute(
+                "UPDATE usage_snapshots SET session_pct=?1, session_total_pct=?2, weekly_pct=?3, weekly_total_pct=?4 WHERE id=?5",
+                params![new_s, new_total, new_w, new_total, id],
+            )?;
+            n += 1;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     // ---- 预备发言/待办（独立表，按行 CRUD） ----
