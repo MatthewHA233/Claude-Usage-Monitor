@@ -57,7 +57,13 @@
       "Bash(grep -nA 25 \"def get_latest_session_info\" conversation_viewer.py)",
       "Bash(cd \"/d/my_pro/纯文本/聊天/claude启动器\")",
       "Bash(grep -rnE \"触发|trigger|ensure_running|hook|钩子|后端\" claude_launcher.py codex_launcher.py)",
-      "PowerShell(Get-Process *)"
+      "PowerShell(Get-Process *)",
+      "WebSearch",
+      "Bash(curl --retry 60 --retry-delay 1 --retry-connrefused -sf http://localhost:1420 -o /dev/null)",
+      "Bash(./src-tauri/target/x86_64-pc-windows-msvc/debug/claude-usage-monitor.exe *)",
+      "Bash(/d/my_pro/Tauri_ob/claude-switch/src-tauri/target/x86_64-pc-windows-msvc/debug/claude-usage-monitor.exe *)",
+      "Read(//tmp/**)",
+      "mcp__plugin_context7_context7__resolve-library-id"
     ]
   }
 }
