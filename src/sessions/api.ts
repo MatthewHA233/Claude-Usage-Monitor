@@ -72,9 +72,9 @@ export function fetchTimeline(date: string, source?: string) {
   return invoke<TimelineResponse>("session_timeline", { date, source: source ?? null });
 }
 
-/** 按天发言统计 */
-export function fetchStats(source?: string) {
-  return invoke<StatsResponse>("session_stats", { source: source ?? null });
+/** 按天发言统计（可选按来源 / 单会话过滤） */
+export function fetchStats(source?: string, session?: string) {
+  return invoke<StatsResponse>("session_stats", { source: source ?? null, session: session ?? null });
 }
 
 /** 读取本机图片为 data URL（[Image #N] 悬浮预览） */

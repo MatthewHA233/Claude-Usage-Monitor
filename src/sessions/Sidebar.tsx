@@ -11,6 +11,8 @@ interface Props {
   sessionCount: number;
   dayCount: number;
   days: DailyStat[];
+  /** 选中会话的逐日句数（热力图紫色标记） */
+  sessionDays?: DailyStat[];
   selectedDate: string;
   onSelectDate: (ymd: string) => void;
   onPrevDay: () => void;
@@ -36,6 +38,7 @@ export default function Sidebar({
   sessionCount,
   dayCount,
   days,
+  sessionDays,
   selectedDate,
   onSelectDate,
   onPrevDay,
@@ -89,7 +92,7 @@ export default function Sidebar({
 
       {/* 热力图 */}
       <div className="px-4 pb-2">
-        <Heatmap days={days} selectedDate={selectedDate} onSelect={onSelectDate} />
+        <Heatmap days={days} sessionDays={sessionDays} selectedDate={selectedDate} onSelect={onSelectDate} />
       </div>
 
       {/* 选中日期切换 + 当天统计 */}

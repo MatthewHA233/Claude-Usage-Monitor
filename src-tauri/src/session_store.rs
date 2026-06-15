@@ -590,35 +590,39 @@ impl SessionStore {
         Ok(out)
     }
 
-    /// 按天发言统计
-    pub fn daily_stats(&self, source: Option<String>) -> Result<Vec<DailyStat>> {
+    /// 按天发言统计（可按来源 / 单会话过滤）
+    pub fn daily_stats(
+        &self,
+        source: Option<String>,
+        session: Option<String>,
+    ) -> Result<Vec<DailyStat>> {
+        use rusqlite::types::Value;
         let conn = self.conn.lock().unwrap();
-        let base = "SELECT local_date, COUNT(*), COALESCE(SUM(chars),0) FROM messages \
-             WHERE local_date IS NOT NULL AND local_date != '未知'";
-        let map = |row: &rusqlite::Row| -> Result<DailyStat> {
+        let mut conds: Vec<&str> = vec!["local_date IS NOT NULL", "local_date != '未知'"];
+        let mut args: Vec<Value> = Vec::new();
+        if let Some(s) = &source {
+            conds.push("source = ?");
+            args.push(Value::Text(s.clone()));
+        }
+        if let Some(sid) = &session {
+            conds.push("session_id = ?");
+            args.push(Value::Text(sid.clone()));
+        }
+        let sql = format!(
+            "SELECT local_date, COUNT(*), COALESCE(SUM(chars),0) FROM messages \
+             WHERE {} GROUP BY local_date ORDER BY local_date",
+            conds.join(" AND ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut out = Vec::new();
+        for r in stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
             Ok(DailyStat {
                 date: row.get(0)?,
                 count: row.get(1)?,
                 chars: row.get(2)?,
             })
-        };
-        let mut out = Vec::new();
-        match &source {
-            Some(s) => {
-                let mut stmt = conn.prepare(&format!(
-                    "{base} AND source=?1 GROUP BY local_date ORDER BY local_date"
-                ))?;
-                for r in stmt.query_map(params![s], map)? {
-                    out.push(r?);
-                }
-            }
-            None => {
-                let mut stmt =
-                    conn.prepare(&format!("{base} GROUP BY local_date ORDER BY local_date"))?;
-                for r in stmt.query_map([], map)? {
-                    out.push(r?);
-                }
-            }
+        })? {
+            out.push(r?);
         }
         Ok(out)
     }
@@ -927,10 +931,11 @@ pub async fn session_timeline(
 pub async fn session_stats(
     state: State<'_, AppState>,
     source: Option<String>,
+    session: Option<String>,
 ) -> Result<StatsResponse, String> {
     let store = state.sessions.clone();
     let days = tokio::task::spawn_blocking(move || {
-        store.daily_stats(source)
+        store.daily_stats(source, session)
     })
     .await
     .map_err(|e| e.to_string())?

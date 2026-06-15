@@ -31,6 +31,7 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 
 export default function SessionTimeline({ date, rows, loading, collapsed, activeFilter, onToggleCollapse, onFilter }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const selRowRef = useRef<HTMLDivElement>(null); // 高亮会话的那一行，切日期时纵向滚到它
   // 悬浮单元格 / 小时表头 / 会话名 时显示的统一美化浮层（替代原生 title 提示）
   const [tip, setTip] = useState<
     { cx: number; top: number; bottom: number; big: number; title: string; sub?: string; hint?: string } | null
@@ -64,11 +65,24 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
   const rowMode = selSession != null && selHour == null;
   const colMode = selHour != null && selSession == null;
 
+  // 切日期 / 切选中会话 时标记需重新定位（避免后台轮询时也乱滚）
+  const needScrollRef = useRef(true);
   useEffect(() => {
-    if (!collapsed && scrollRef.current) {
-      scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
+    needScrollRef.current = true;
+  }, [date, selSession]);
+
+  // rows 到位后若有待定位标记：横向滚到最新小时 + 纵向滚到高亮会话那一行
+  useEffect(() => {
+    const c = scrollRef.current;
+    if (collapsed || !c || !needScrollRef.current) return;
+    needScrollRef.current = false;
+    c.scrollLeft = c.scrollWidth;
+    const row = selRowRef.current;
+    if (row) {
+      const headerH = 30; // sticky 小时表头高度
+      c.scrollTop += row.getBoundingClientRect().top - c.getBoundingClientRect().top - headerH;
     }
-  }, [date, rows.length, collapsed]);
+  }, [rows, collapsed]);
 
   return (
     <div className="flex flex-col shrink-0" style={{ background: "#1a1a1a", borderBottom: "1px solid #2a2a2a" }}>
@@ -150,7 +164,7 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
               const bmap = new Map(r.buckets.map((x) => [x.b, x.n]));
               const rowSel = selSession === r.session_id;
               return (
-                <div key={`${r.source_id}:${r.session_id}`} className="flex items-stretch" style={{ borderBottom: "1px solid #242424" }}>
+                <div ref={rowSel ? selRowRef : undefined} key={`${r.source_id}:${r.session_id}`} className="flex items-stretch" style={{ borderBottom: "1px solid #242424" }}>
                   {/* 会话名(行头) → 过滤整个会话；选中高亮整行 */}
                   <button
                     type="button"

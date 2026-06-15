@@ -45,6 +45,8 @@ export default function SessionsApp() {
   const [stream, setStream] = useState<StreamMessage[]>([]);
   const [rows, setRows] = useState<TimelineRowWithSource[]>([]);
   const [statsDays, setStatsDays] = useState<DailyStat[]>([]);
+  // 选中某会话时，该会话的逐日句数（热力图按它紫色标记有记录的日期）
+  const [sessionDays, setSessionDays] = useState<DailyStat[]>([]);
 
   // 预备发言/待办（仅本机私有，用户产生，不随轮询刷新——仅本窗口编辑）。
   // 落库走「差异化按行 CRUD」：对比新旧数组，只 upsert 变化的、只 delete 真正移除的，
@@ -81,12 +83,38 @@ export default function SessionsApp() {
   const dateRef = useRef(date);
   const sourceRef = useRef<string | null>(null);
   const filterRef = useRef<StreamFilter | null>(null);
+  const sessionDaysRef = useRef<DailyStat[]>([]);
 
   useEffect(() => {
     dateRef.current = date;
     sourceRef.current = activeSourceId;
     filterRef.current = streamFilter;
   }, [date, activeSourceId, streamFilter]);
+
+  useEffect(() => {
+    sessionDaysRef.current = sessionDays;
+  }, [sessionDays]);
+
+  // 选中某会话 → 拉该会话的逐日句数（供热力图紫色标记）；未选会话则清空
+  const selSession = streamFilter?.session ?? null;
+  const selSource = streamFilter?.source ?? undefined;
+  useEffect(() => {
+    if (!selSession) {
+      setSessionDays([]);
+      return;
+    }
+    let cancelled = false;
+    fetchStats(selSource, selSession)
+      .then((r) => {
+        if (!cancelled) setSessionDays(r.days);
+      })
+      .catch(() => {
+        if (!cancelled) setSessionDays([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selSession, selSource]);
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
@@ -192,8 +220,15 @@ export default function SessionsApp() {
 
   const selectDate = useCallback((ymd: string) => {
     setDate(ymd);
-    setStreamFilter(null);
     setActiveProject(null);
+    // 正高亮某会话、且新日期该会话有发言 → 保留会话筛选（只去掉小时收窄，看整天该会话）；
+    // 否则切日期即退出高亮、回到全部。
+    const sf = filterRef.current;
+    if (sf?.session && sessionDaysRef.current.some((d) => d.date === ymd)) {
+      setStreamFilter({ source: sf.source, session: sf.session, label: sf.label });
+    } else {
+      setStreamFilter(null);
+    }
   }, []);
 
   // 再点同一来源 = 取消，回到全部
@@ -268,6 +303,7 @@ export default function SessionsApp() {
           sessionCount={sessionCount}
           dayCount={dayCount}
           days={statsDays}
+          sessionDays={sessionDays}
           selectedDate={date}
           onSelectDate={selectDate}
           onPrevDay={() => selectDate(shiftYmd(date, -1))}

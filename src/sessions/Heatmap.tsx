@@ -7,15 +7,18 @@ const CELL = 12;
 const GAP = 2; // 同月内列间距
 const MONTH_GAP = 6; // 月份组之间的间距
 
-// 0..4 档绿色（仿 flomo/GitHub）；最亮(档 4)= 200 句及以上
-const COLORS = ["#1f1f1f", "#173a24", "#1f6b38", "#2f9e54", "#48c66b"];
+// 满格(最亮档)所需句数 —— 绿/紫共用，只在这一个地方设定
+const HEAT_MAX = 200;
+// 0..4 档色阶（仿 flomo/GitHub）：绿=全部发言；紫=选中会话(与卡片高亮同色)
+const GREEN = ["#1f1f1f", "#173a24", "#1f6b38", "#2f9e54", "#48c66b"];
+const PURPLE = ["#1f1f1f", "#2b2150", "#4a3a8c", "#6f56c4", "#a78bfa"];
 
 function level(count: number): number {
   if (count <= 0) return 0;
-  if (count < 50) return 1;
-  if (count < 100) return 2;
-  if (count < 200) return 3;
-  return 4;
+  if (count < HEAT_MAX * 0.25) return 1; // <50
+  if (count < HEAT_MAX * 0.5) return 2; // <100
+  if (count < HEAT_MAX) return 3; // <200
+  return 4; // ≥200
 }
 
 interface Cell {
@@ -25,6 +28,8 @@ interface Cell {
 
 interface Props {
   days: DailyStat[];
+  /** 选中会话的逐日句数：有值的日期改用紫色标记（同一 HEAT_MAX 档位） */
+  sessionDays?: DailyStat[];
   selectedDate: string;
   onSelect: (ymd: string) => void;
 }
@@ -36,11 +41,13 @@ function parseYmd(s: string): Date {
 
 /** 每天发言数的热力图：列=周(竖着 7 天)，按月分组。
  *  区间从「最早有发言的那天」到今天，横向可滚动、默认停在最新；向左看更早。 */
-export default function Heatmap({ days, selectedDate, onSelect }: Props) {
+export default function Heatmap({ days, sessionDays, selectedDate, onSelect }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrolledRef = useRef(false);
   // 悬浮某天格子时的美化浮层（替代原生 title，与时间轴面板同款）
-  const [tip, setTip] = useState<{ cx: number; top: number; bottom: number; count: number; ymd: string } | null>(null);
+  const [tip, setTip] = useState<
+    { cx: number; top: number; bottom: number; count: number; ymd: string; purple?: boolean; total?: number } | null
+  >(null);
 
   const counts = new Map<string, number>();
   let minDate = todayYmd();
@@ -48,6 +55,9 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
     counts.set(d.date, d.count);
     if (d.date < minDate) minDate = d.date;
   }
+  // 选中会话的逐日句数；有 key 的日期改紫色标记
+  const sessionCounts = new Map<string, number>();
+  for (const d of sessionDays ?? []) sessionCounts.set(d.date, d.count);
   const todayStr = todayYmd();
 
   // 起点 = min(最早有发言那天, 今天往前 DEFAULT_WEEKS 周)，再回退到所在周的周日
@@ -96,16 +106,26 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
           <div style={{ display: "flex", gap: GAP }}>
             {g.cols.map((col, ci) => (
               <div key={ci} style={{ display: "flex", flexDirection: "column", gap: GAP }}>
-                {col.map((cell) =>
-                  cell.future ? (
-                    <div key={cell.ymd} style={{ width: CELL, height: CELL }} />
-                  ) : (
+                {col.map((cell) => {
+                  if (cell.future) return <div key={cell.ymd} style={{ width: CELL, height: CELL }} />;
+                  const sCount = sessionCounts.get(cell.ymd) || 0;
+                  const gCount = counts.get(cell.ymd) || 0;
+                  const purple = sCount > 0; // 选中会话在这天有发言 → 紫
+                  return (
                     <button
                       key={cell.ymd}
                       type="button"
                       onMouseEnter={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
-                        setTip({ cx: rect.left + rect.width / 2, top: rect.top, bottom: rect.bottom, count: counts.get(cell.ymd) || 0, ymd: cell.ymd });
+                        setTip({
+                          cx: rect.left + rect.width / 2,
+                          top: rect.top,
+                          bottom: rect.bottom,
+                          count: purple ? sCount : gCount,
+                          total: gCount,
+                          purple,
+                          ymd: cell.ymd,
+                        });
                       }}
                       onMouseLeave={() => setTip(null)}
                       onClick={() => onSelect(cell.ymd)}
@@ -113,15 +133,15 @@ export default function Heatmap({ days, selectedDate, onSelect }: Props) {
                         width: CELL,
                         height: CELL,
                         borderRadius: 2,
-                        background: COLORS[level(counts.get(cell.ymd) || 0)],
+                        background: purple ? PURPLE[level(sCount)] : GREEN[level(gCount)],
                         border: cell.ymd === selectedDate ? "1.5px solid #f0b59e" : "1px solid transparent",
                         cursor: "pointer",
                         padding: 0,
                         flexShrink: 0,
                       }}
                     />
-                  )
-                )}
+                  );
+                })}
               </div>
             ))}
           </div>
@@ -138,7 +158,7 @@ function HeatmapTip({
   tip,
   todayStr,
 }: {
-  tip: { cx: number; top: number; bottom: number; count: number; ymd: string };
+  tip: { cx: number; top: number; bottom: number; count: number; ymd: string; purple?: boolean; total?: number };
   todayStr: string;
 }) {
   const dt = parseYmd(tip.ymd);
@@ -168,13 +188,21 @@ function HeatmapTip({
         whiteSpace: "nowrap",
       }}
     >
+      {tip.purple && (
+        <div style={{ fontSize: 10, fontWeight: 600, color: "#c4b5fd", marginBottom: 4, letterSpacing: "0.5px" }}>本会话</div>
+      )}
       {tip.count > 0 ? (
-        <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "#48c66b", fontFamily: "ui-monospace, monospace" }}>
+        <div style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: tip.purple ? "#a78bfa" : "#48c66b", fontFamily: "ui-monospace, monospace" }}>
           {tip.count}
           <span style={{ fontSize: 13, fontWeight: 500, color: "#c7ccd1", marginLeft: 3 }}>句</span>
         </div>
       ) : (
         <div style={{ fontSize: 15, fontWeight: 600, color: "#8b9298", lineHeight: 1.1, padding: "4px 0" }}>无发言</div>
+      )}
+      {tip.purple && (
+        <div style={{ fontSize: 10, color: "#8b9298", marginTop: 5 }}>
+          当日总 <span style={{ color: "#5fbf80", fontWeight: 700 }}>{tip.total ?? 0}</span> 句
+        </div>
       )}
       <div style={{ fontSize: 11, color: "#d3d7dc", marginTop: 6, letterSpacing: "0.3px" }}>{label}</div>
     </div>
