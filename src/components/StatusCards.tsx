@@ -846,6 +846,63 @@ function computeDailyStats(records: UsageSnapshot[]): {
   return { days, weeklyResetDates };
 }
 
+// ── Daily weekly-quota stats ──────────────────────────────
+// 每日「周额度」消耗：取当天最新一条的 weekly_pct，与前一天最新值作差；
+// 跨周重置（weekly_reset_at 整点变化）当天取重置后的累计值本身。
+function computeDailyWeeklyStats(records: UsageSnapshot[]): {
+  days: DayStats[];
+  weeklyResetDates: Set<string>;
+} {
+  const valid = [...records]
+    .filter(r => r.error == null && r.weekly_pct != null && r.weekly_reset_at != null)
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+  if (valid.length === 0) return { days: [], weeklyResetDates: new Set() };
+
+  // 每天最新一条（后覆盖前 = 当天 collected_at 最新）
+  const dailyLatest = new Map<string, UsageSnapshot>();
+  for (const r of valid) {
+    const date = new Date(r.collected_at).toLocaleDateString("en-CA");
+    dailyLatest.set(date, r);
+  }
+
+  const dayConsumed = new Map<string, number>();
+  const weeklyResetDates = new Set<string>();
+  let prevWeeklyKey: string | null = null;
+  let prevWeeklyPct: number | null = null;
+
+  for (const date of [...dailyLatest.keys()].sort()) {
+    const r = dailyLatest.get(date)!;
+    const wKey = normalizeToHour(r.weekly_reset_at!);
+    const wPct = r.weekly_pct!;
+    let consumed: number;
+    if (prevWeeklyKey === wKey && prevWeeklyPct != null) {
+      consumed = Math.max(0, wPct - prevWeeklyPct); // 同一周窗口：取增量
+    } else {
+      consumed = wPct; // 新的一周（或首日）：重置后的累计
+      if (prevWeeklyKey != null) weeklyResetDates.add(date);
+    }
+    dayConsumed.set(date, consumed);
+    prevWeeklyKey = wKey;
+    prevWeeklyPct = wPct;
+  }
+
+  // 与 session 图一致：从最早日期补全到今天，最多显示 30 天
+  const sortedDates = [...dayConsumed.keys()].sort();
+  const allDates: string[] = [];
+  const cur = new Date(sortedDates[0] + "T00:00:00");
+  const today = new Date(); today.setHours(23, 59, 59, 999);
+  while (cur <= today) { allDates.push(cur.toLocaleDateString("en-CA")); cur.setDate(cur.getDate() + 1); }
+  const displayDates = new Set(allDates.slice(-30));
+
+  const days: DayStats[] = [];
+  for (const date of allDates) {
+    if (displayDates.has(date)) {
+      days.push({ date, consumed: Math.round((dayConsumed.get(date) ?? 0) * 10) / 10 });
+    }
+  }
+  return { days, weeklyResetDates };
+}
+
 // ── Table annotations（历史表格高亮框 + 悬浮详情）──────────
 // spanType: 1=session 完整在本阶段内  2=横跨两段（从前段延续）  3=横跨三段及以上（中间段）
 interface SessionDetail {
@@ -1342,7 +1399,8 @@ function DailySessionChartSvg({ days, weeklyResetDates, color = "#4a9eff" }: {
 // ── computeAllDailyStats（多账号） ────────────────────────
 function computeAllDailyStats(
   histories: Record<string, UsageSnapshot[]>,
-  colors: Record<string, string>
+  colors: Record<string, string>,
+  metric: "session" | "weekly" = "session"
 ): {
   dates: string[];
   accountSeries: Array<{ key: string; provider: string; alias: string; color: string; values: number[] }>;
@@ -1360,9 +1418,10 @@ function computeAllDailyStats(
   }> = [];
 
   let globalEarliest: string | null = null;
+  const computeOne = metric === "weekly" ? computeDailyWeeklyStats : computeDailyStats;
 
   for (const key of keys) {
-    const { days, weeklyResetDates } = computeDailyStats(histories[key]);
+    const { days, weeklyResetDates } = computeOne(histories[key]);
     const byDate = new Map(days.map(d => [d.date, d.consumed]));
     perAccount.push({ key, byDate, weeklyResetDates });
     if (days.length > 0) {
@@ -1547,6 +1606,9 @@ function ConfirmDialog({ message, onConfirm, onCancel }: {
   );
 }
 
+// 历史图表「Session / 周额度」指标偏好（跨账号、跨重开都记住）
+const CHART_METRIC_KEY = "history.chartMetric";
+
 // ── HistoryPanel ──────────────────────────────────────────
 function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   provider: string;
@@ -1559,17 +1621,21 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
   const { histories, loading: allLoading } = useAllHistories();
   const [confirmId, setConfirmId] = useState<number | null>(null);
   const [chartMode, setChartMode] = useState<"single" | "total">("single");
+  const [metric, setMetric] = useState<"session" | "weekly">(
+    () => (localStorage.getItem(CHART_METRIC_KEY) === "weekly" ? "weekly" : "session")
+  );
   const [activeGroup, setActiveGroup] = useState<TooltipInfo | null>(null);
   // ref 控制悬浮面板 DOM 位置，mousemove 直接写 style 避免 setState 触发重渲染
   const tooltipElRef = useRef<HTMLDivElement>(null);
   const rafIdRef = useRef(0);
   const anchorRef = useRef<HTMLDivElement>(null);
 
-  const { days, weeklyResetDates } = computeDailyStats(statsRecords);
+  const { days, weeklyResetDates } =
+    metric === "weekly" ? computeDailyWeeklyStats(statsRecords) : computeDailyStats(statsRecords);
   const identityKey = keyFromParts(provider, alias);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
   const periodLabel = "Weekly";
-  const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors);
+  const { dates, accountSeries, totals, weeklyResetDates: allWeeklyResets } = computeAllDailyStats(histories, colors, metric);
   const annotations = useMemo(() => computeTableAnnotations(statsRecords), [statsRecords]);
 
   // 向上查找实际在滚动的祖先（scrollHeight > clientHeight），监听滚动
@@ -1619,9 +1685,21 @@ function HistoryPanel({ provider, alias, allAliases: _allAliases, colors }: {
       {/* 每日消耗图（可切换单账号/总览） */}
       <div className="card p-0 overflow-hidden mb-3">
         <div className="px-4 py-2.5 flex items-center justify-between" style={{ borderBottom: "1px solid #3a3a3a" }}>
-          <div>
-            <span className="text-sm font-semibold" style={{ color: "#ddd" }}>每日 Session 消耗</span>
-            <span className="text-xs ml-2" style={{ color: "#666" }}>近30天</span>
+          <div className="flex items-center gap-2">
+            <div className="flex gap-1">
+              {(["session", "weekly"] as const).map((mt) => (
+                <button key={mt} onClick={() => { setMetric(mt); localStorage.setItem(CHART_METRIC_KEY, mt); }}
+                  className="text-xs px-2.5 py-1 rounded-md font-semibold"
+                  style={{
+                    background: metric === mt ? "#3a3a3a" : "transparent",
+                    color: metric === mt ? "#eee" : "#888",
+                    border: metric === mt ? "1px solid #555" : "1px solid transparent",
+                  }}>
+                  {mt === "session" ? "每日 Session 消耗" : "每日周额度消耗"}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs" style={{ color: "#666" }}>近30天</span>
           </div>
           <div className="flex gap-1">
             {(["single", "total"] as const).map((m) => (
