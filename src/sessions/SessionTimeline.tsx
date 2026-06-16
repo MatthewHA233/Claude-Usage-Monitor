@@ -201,11 +201,11 @@ export default function SessionTimeline({ date, rows, loading, collapsed, active
                   >
                     <div className="text-[12px] font-medium truncate" style={{ color: "#e5e7eb" }}>{r.title}</div>
                     <div className="flex items-center gap-2 mt-0.5 text-[10px]" style={{ color: "#8b9298" }}>
-                      <span className="inline-flex items-center gap-0.5 truncate min-w-0">
-                        <FolderGit2 size={9} /> {r.project_name || "—"}
+                      <span className="inline-flex items-center gap-0.5 shrink-0 whitespace-nowrap">
+                        <FolderGit2 size={9} className="shrink-0" /> {r.project_name || "—"}
                       </span>
-                      <span className="inline-flex items-center gap-0.5 shrink-0">
-                        <Monitor size={9} /> {r.source_label}
+                      <span className="inline-flex items-center gap-0.5 truncate min-w-0">
+                        <Monitor size={9} className="shrink-0" /> <span className="truncate">{r.source_label}</span>
                       </span>
                     </div>
                   </button>

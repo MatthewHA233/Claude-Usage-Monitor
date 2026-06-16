@@ -816,6 +816,14 @@ impl SessionStore {
         Ok((sc, pc))
     }
 
+    /// 删除某来源的全部数据（消息 + 会话 + 文件增量记录）
+    pub fn purge_source(&self, source: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM messages WHERE source=?1", params![source])?;
+        conn.execute("DELETE FROM sessions WHERE source=?1", params![source])?;
+        conn.execute("DELETE FROM files WHERE source=?1", params![source])?;
+        Ok(())
+    }
 }
 
 /// 整文件重解析后替换其行（+ 更新会话元信息）
@@ -937,6 +945,19 @@ pub fn session_sources_save(
     state
         .db
         .set_setting("session_sources", &json)
+        .map_err(|e| e.to_string())
+}
+
+/// 删除某来源在物化库里的全部数据（消息/会话/文件）。配合前端从 session_sources 移除该源。
+#[tauri::command]
+pub async fn session_purge_source(
+    state: State<'_, AppState>,
+    source_id: String,
+) -> Result<(), String> {
+    let store = state.sessions.clone();
+    tokio::task::spawn_blocking(move || store.purge_source(&source_id))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
 }
 

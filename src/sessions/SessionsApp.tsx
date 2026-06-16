@@ -270,6 +270,10 @@ export default function SessionsApp() {
       const base_url = normalizeBaseUrl(address);
       if (!base_url) return;
       const current = await getSources().catch(() => [] as SessionSource[]);
+      if (current.some((s) => s.base_url === base_url)) {
+        setAddOpen(false); // 已存在同地址来源，不重复添加（避免一台机器被采集两次）
+        return;
+      }
       const id = crypto.randomUUID();
       const next = [...current, { id, label: label || base_url.replace(/^https?:\/\//, ""), base_url }];
       await saveSources(next).catch(() => undefined);
@@ -278,6 +282,32 @@ export default function SessionsApp() {
     },
     [refreshAll]
   );
+
+  // 右键改远程机器名：更新 session_sources 里对应 id 的 label
+  const handleRenameSource = useCallback(
+    async (id: string, label: string) => {
+      const current = await getSources().catch(() => [] as SessionSource[]);
+      const next = current.map((s) => (s.id === id ? { ...s, label } : s));
+      await saveSources(next).catch(() => undefined);
+      void refreshAll();
+    },
+    [refreshAll]
+  );
+
+  // 删除某机器来源：先弹自定义确认框，确认后清掉它在物化库的全部数据
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; label: string } | null>(null);
+  const handleDeleteSource = useCallback((id: string, label: string) => setPendingDelete({ id, label }), []);
+  const confirmDeleteSource = useCallback(async () => {
+    const pd = pendingDelete;
+    setPendingDelete(null);
+    if (!pd) return;
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("session_purge_source", { sourceId: pd.id }).catch(() => undefined);
+    const current = await getSources().catch(() => [] as SessionSource[]);
+    await saveSources(current.filter((s) => s.id !== pd.id)).catch(() => undefined);
+    setActiveSourceId((cur) => (cur === pd.id ? null : cur));
+    void refreshAll();
+  }, [pendingDelete, refreshAll]);
 
   return (
     <div className="h-screen flex" style={{ background: "#181818" }}>
@@ -314,6 +344,8 @@ export default function SessionsApp() {
           sourceStatuses={sourceStatuses}
           activeSourceId={activeSourceId}
           onSelectSource={selectSource}
+          onRenameSource={handleRenameSource}
+          onDeleteSource={handleDeleteSource}
           projects={projects}
           activeProject={activeProject}
           onSelectProject={selectProject}
@@ -370,6 +402,44 @@ export default function SessionsApp() {
       </div>
 
       {addOpen && <AddSourceDialog onCancel={() => setAddOpen(false)} onConfirm={handleAdd} />}
+
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ zIndex: 210, background: "rgba(0,0,0,0.55)" }}
+          onClick={() => setPendingDelete(null)}
+        >
+          <div
+            className="rounded-xl p-5"
+            style={{ width: 360, background: "#1f1f1f", border: "1px solid #333" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold mb-2" style={{ color: "#f3f4f6" }}>删除来源</div>
+            <div className="text-xs mb-4" style={{ color: "#9ca3af", lineHeight: 1.6 }}>
+              删除「<span style={{ color: "#e5e7eb" }}>{pendingDelete.label}</span>」及其
+              <b style={{ color: "#f87171" }}>全部已采集数据</b>?此操作不可撤销。
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDelete(null)}
+                className="text-sm px-3 py-1.5 rounded-md"
+                style={{ color: "#cbd5e1", background: "#262626", border: "1px solid #333", cursor: "pointer" }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteSource()}
+                className="text-sm px-3 py-1.5 rounded-md font-semibold"
+                style={{ color: "#fff", background: "#b9402f", border: 0, cursor: "pointer" }}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 预备发言：左下角悬浮 HUD（position:fixed，不占文档流） */}
       <DraftBar

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { X, RefreshCw, Wifi, Monitor, Search } from "lucide-react";
-import { DEFAULT_PORT } from "./api";
+import { getSources, normalizeBaseUrl } from "./api";
 import { discoverRelays, type DiscoveredRelay } from "./discovery";
 
 interface Props {
@@ -9,12 +9,14 @@ interface Props {
 }
 
 export default function AddSourceDialog({ onCancel, onConfirm }: Props) {
-  const [label, setLabel] = useState("");
-  const [address, setAddress] = useState("");
-
   // 局域网发现（mDNS）：打开即扫描，列出在线中继，点一下直接添加
   const [found, setFound] = useState<DiscoveredRelay[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [existing, setExisting] = useState<string[]>([]); // 已添加来源的 base_url（去重用）
+
+  useEffect(() => {
+    void getSources().then((ss) => setExisting(ss.map((s) => s.base_url))).catch(() => undefined);
+  }, []);
 
   const scan = useCallback(() => {
     setScanning(true);
@@ -27,8 +29,6 @@ export default function AddSourceDialog({ onCancel, onConfirm }: Props) {
   useEffect(() => {
     scan();
   }, [scan]);
-
-  const canConfirm = address.trim().length > 0;
 
   return (
     <div
@@ -77,78 +77,48 @@ export default function AddSourceDialog({ onCancel, onConfirm }: Props) {
               {scanning ? "正在扫描局域网…" : "未发现在线中继。确保对端 Claude 启动器已运行（会自动开中继）。"}
             </div>
           ) : (
-            found.map((r) => (
-              <button
-                key={r.ip}
-                type="button"
-                onClick={() => onConfirm(r.hostname || r.ip, r.base_url)}
-                className="flex items-center gap-2 w-full text-left px-3 py-2"
-                style={{ background: "transparent", border: 0, borderBottom: "1px solid #222", cursor: "pointer" }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "#202020")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-              >
-                <Monitor size={14} style={{ color: "#4ade80", flexShrink: 0 }} />
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs truncate" style={{ color: "#e5e7eb" }}>
-                    {r.hostname || r.ip}
-                    {r.os ? <span style={{ color: "#6b7280" }}> · {r.os}</span> : null}
+            found.map((r) => {
+              const matched = existing.includes(normalizeBaseUrl(r.base_url));
+              return (
+                <button
+                  key={r.ip}
+                  type="button"
+                  disabled={matched}
+                  onClick={() => { if (!matched) onConfirm(r.hostname || r.ip, r.base_url); }}
+                  className="flex items-center gap-2 w-full text-left px-3 py-2"
+                  style={{ background: "transparent", border: 0, borderBottom: "1px solid #222", cursor: matched ? "default" : "pointer", opacity: matched ? 0.55 : 1 }}
+                  onMouseEnter={(e) => { if (!matched) e.currentTarget.style.background = "#202020"; }}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <Monitor size={14} style={{ color: matched ? "#6b7280" : "#4ade80", flexShrink: 0 }} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs truncate" style={{ color: "#e5e7eb" }}>
+                      {r.hostname || r.ip}
+                      {r.os ? <span style={{ color: "#6b7280" }}> · {r.os}</span> : null}
+                    </div>
+                    <div className="text-[10px] font-mono truncate" style={{ color: "#6b7280" }}>{r.ip}:{r.port}</div>
                   </div>
-                  <div className="text-[10px] font-mono truncate" style={{ color: "#6b7280" }}>{r.ip}:{r.port}</div>
-                </div>
-                <Wifi size={13} style={{ color: "#4ade80", flexShrink: 0 }} />
-              </button>
-            ))
+                  {matched
+                    ? <span className="text-[10px] shrink-0" style={{ color: "#6b7280" }}>已匹配</span>
+                    : <Wifi size={13} style={{ color: "#4ade80", flexShrink: 0 }} />}
+                </button>
+              );
+            })
           )}
         </div>
 
-        <div className="text-[11px] mb-3 text-center" style={{ color: "#4b5563" }}>— 或手动填写 —</div>
-
-        <label className="block text-xs mb-1" style={{ color: "#9ca3af" }}>名称（可选）</label>
-        <input
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          placeholder="例如 我的 MacBook"
-          className="w-full text-sm rounded-md px-3 py-2 mb-3 outline-none"
-          style={{ background: "#161616", border: "1px solid #333", color: "#f3f4f6" }}
-        />
-
-        <label className="block text-xs mb-1" style={{ color: "#9ca3af" }}>地址（IP 或 IP:端口）</label>
-        <input
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          placeholder={`例如 192.168.1.20:${DEFAULT_PORT}`}
-          className="w-full text-sm rounded-md px-3 py-2 outline-none"
-          style={{ background: "#161616", border: "1px solid #333", color: "#f3f4f6" }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && canConfirm) onConfirm(label.trim(), address.trim());
-          }}
-        />
-        <div className="text-[11px] mt-1.5" style={{ color: "#6b7280" }}>
-          只填 IP 会自动补端口 {DEFAULT_PORT}。目标机器需运行 session_api_server.py。
+        <div className="text-[11px] mb-1" style={{ color: "#6b7280" }}>
+          找不到机器?确保对端 Claude 启动器已运行(会自动开中继),再点「重新扫描」。
         </div>
 
-        <div className="flex justify-end gap-2 mt-5">
+        <div className="flex justify-end mt-4">
           <button
             type="button"
             onClick={onCancel}
             className="text-sm px-3 py-1.5 rounded-md"
             style={{ color: "#cbd5e1", background: "#262626", border: "1px solid #333", cursor: "pointer" }}
           >
-            取消
-          </button>
-          <button
-            type="button"
-            disabled={!canConfirm}
-            onClick={() => onConfirm(label.trim(), address.trim())}
-            className="text-sm px-3 py-1.5 rounded-md"
-            style={{
-              color: "#fff",
-              background: canConfirm ? "#cc785c" : "#3a3a3a",
-              border: "1px solid #333",
-              cursor: canConfirm ? "pointer" : "not-allowed",
-            }}
-          >
-            添加
+            关闭
           </button>
         </div>
       </div>

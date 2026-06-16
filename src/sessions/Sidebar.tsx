@@ -1,5 +1,5 @@
-import type { CSSProperties, ReactNode } from "react";
-import { Plus, RefreshCw, Wifi, WifiOff, FolderGit2, Hash, ChevronLeft, ChevronRight, PanelLeftClose } from "lucide-react";
+import { useState, type CSSProperties, type ReactNode } from "react";
+import { Plus, RefreshCw, Wifi, WifiOff, FolderGit2, Hash, ChevronLeft, ChevronRight, PanelLeftClose, Trash2, Pencil } from "lucide-react";
 import type { DailyStat, SourceStatus } from "./types";
 import { nfmt } from "./format";
 import Heatmap from "./Heatmap";
@@ -23,6 +23,10 @@ interface Props {
   sourceStatuses: SourceStatus[];
   activeSourceId: string | null;
   onSelectSource: (id: string | null) => void;
+  /** 右键改远程机器名（更新 session_sources 的 label） */
+  onRenameSource?: (id: string, label: string) => void;
+  /** 删除远程机器来源（含全部数据） */
+  onDeleteSource?: (id: string, label: string) => void;
   projects: { name: string; count: number }[];
   activeProject: string | null;
   onSelectProject: (name: string | null) => void;
@@ -49,6 +53,8 @@ export default function Sidebar({
   sourceStatuses,
   activeSourceId,
   onSelectSource,
+  onRenameSource,
+  onDeleteSource,
   projects,
   activeProject,
   onSelectProject,
@@ -58,6 +64,12 @@ export default function Sidebar({
   refreshing,
   syncing,
 }: Props) {
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editVal, setEditVal] = useState("");
+  const commitEdit = () => {
+    if (editId && editVal.trim() && onRenameSource) onRenameSource(editId, editVal.trim());
+    setEditId(null);
+  };
   return (
     <div
       className="shrink-0 flex flex-col h-full overflow-y-auto"
@@ -132,16 +144,38 @@ export default function Sidebar({
           icon={<FolderGit2 size={14} />}
           label="全部发言"
         />
-        {sourceStatuses.map((s) => (
-          <SideItem
-            key={s.id}
-            active={activeSourceId === s.id}
-            onClick={() => onSelectSource(s.id)}
-            icon={s.online ? <Wifi size={14} style={{ color: "#4ade80" }} /> : <WifiOff size={14} style={{ color: "#f87171" }} />}
-            label={s.label + (s.id === LOCAL_SOURCE ? "" : "")}
-            count={s.online ? s.session_count : undefined}
-          />
-        ))}
+        {sourceStatuses.map((s) => {
+          const renameable = s.id !== LOCAL_SOURCE && s.id !== "history";
+          if (editId === s.id) {
+            return (
+              <input
+                key={s.id}
+                autoFocus
+                value={editVal}
+                onChange={(e) => setEditVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitEdit();
+                  else if (e.key === "Escape") setEditId(null);
+                }}
+                onBlur={commitEdit}
+                className="w-full rounded-md px-2.5 py-1.5 text-xs outline-none"
+                style={{ background: "#232323", color: "#eee", border: "1px solid #5fd3e0" }}
+              />
+            );
+          }
+          return (
+            <SideItem
+              key={s.id}
+              active={activeSourceId === s.id}
+              onClick={() => onSelectSource(s.id)}
+              onEdit={renameable ? () => { setEditId(s.id); setEditVal(s.label); } : undefined}
+              onDelete={renameable && onDeleteSource ? () => onDeleteSource(s.id, s.label) : undefined}
+              icon={s.online ? <Wifi size={14} style={{ color: "#4ade80" }} /> : <WifiOff size={14} style={{ color: "#f87171" }} />}
+              label={s.label}
+              count={s.online ? s.session_count : undefined}
+            />
+          );
+        })}
       </div>
 
       {/* 项目标签 */}
@@ -204,21 +238,27 @@ function Stat({ value, label }: { value: string; label: string }) {
 function SideItem({
   active,
   onClick,
+  onEdit,
+  onDelete,
   icon,
   label,
   count,
 }: {
   active: boolean;
   onClick: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
   icon: ReactNode;
   label: string;
   count?: number;
 }) {
+  const hasActions = !!(onEdit || onDelete);
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className="flex items-center gap-2 w-full text-left rounded-md px-2.5 py-1.5 text-xs"
+      className="group flex items-center gap-2 w-full text-left rounded-md px-2.5 py-1.5 text-xs"
       style={{
         color: active ? "#f9fafb" : "#cbd5e1",
         background: active ? "#2f6f4f" : "transparent",
@@ -228,7 +268,25 @@ function SideItem({
     >
       <span className="shrink-0 inline-flex" style={{ color: active ? "#fff" : "#8b9298" }}>{icon}</span>
       <span className="truncate flex-1">{label}</span>
-      {count !== undefined && <span className="shrink-0 tabular-nums" style={{ color: active ? "#d1fae5" : "#6b7280" }}>{count}</span>}
-    </button>
+      {count !== undefined && (
+        <span className={`shrink-0 tabular-nums ${hasActions ? "group-hover:hidden" : ""}`} style={{ color: active ? "#d1fae5" : "#6b7280" }}>{count}</span>
+      )}
+      {hasActions && (
+        <span className="shrink-0 hidden group-hover:inline-flex items-center gap-1.5">
+          {onEdit && (
+            <button type="button" title="改名" onClick={(e) => { e.stopPropagation(); onEdit(); }}
+              style={{ color: "#9ca3af", background: "transparent", border: 0, cursor: "pointer", padding: 0, display: "inline-flex" }}>
+              <Pencil size={12} />
+            </button>
+          )}
+          {onDelete && (
+            <button type="button" title="删除该机器（含全部数据）" onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              style={{ color: "#f87171", background: "transparent", border: 0, cursor: "pointer", padding: 0, display: "inline-flex" }}>
+              <Trash2 size={13} />
+            </button>
+          )}
+        </span>
+      )}
+    </div>
   );
 }

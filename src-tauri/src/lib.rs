@@ -93,6 +93,7 @@ pub fn run() {
             commands::set_proxy_settings,
             session_store::session_sources_get,
             session_store::session_sources_save,
+            session_store::session_purge_source,
             session_store::session_drafts_get,
             session_store::session_draft_upsert,
             session_store::session_draft_delete,
