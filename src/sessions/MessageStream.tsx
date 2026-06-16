@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Bot,
   ChevronDown,
@@ -37,7 +37,7 @@ interface Props {
   onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
 }
 
-/** flomo 风格卡片流：当天我的发言，时间倒序，每条一张卡片 */
+/** flomo 风格卡片流：当天我的发言，时间正序（新消息在底部）、滚动默认贴底，每条一张卡片 */
 export default function MessageStream({
   messages,
   loading,
@@ -49,6 +49,15 @@ export default function MessageStream({
   onFilterProject,
   onFilterSession,
 }: Props) {
+  // 时间正序：新消息排在底部（messages 传入为倒序，这里翻正）
+  const ordered = useMemo(() => [...messages].reverse(), [messages]);
+  // 滚动默认贴底：来新消息往上顶
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [ordered]);
+
   if (loading && messages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 animate-pulse" style={{ color: "#8b9298" }}>
@@ -67,12 +76,12 @@ export default function MessageStream({
   }
 
   return (
-    <div className="overflow-auto h-full px-5 py-4">
+    <div ref={scrollRef} className="overflow-auto h-full px-5 py-4">
       <div className="mx-auto" style={{ maxWidth: 760 }}>
-        {messages.map((m, i) => {
+        {ordered.map((m, i) => {
           const b = bucketOf(m.ts_unix); // 当天第几个 10 分钟
           const h = Math.floor(b / 6);
-          const prevB = i > 0 ? bucketOf(messages[i - 1].ts_unix) : -2;
+          const prevB = i > 0 ? bucketOf(ordered[i - 1].ts_unix) : -2;
           const crossHour = i > 0 && Math.floor(prevB / 6) !== h;
           const cross10 = i > 0 && prevB !== b;
           return (
