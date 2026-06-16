@@ -1410,17 +1410,29 @@ function DailySessionChartSvg({ days, weeklyResetDates, color = "#4a9eff" }: {
           return <line key={`ref${i}`} x1={xL.toFixed(1)} y1={y.toFixed(1)} x2={xR.toFixed(1)} y2={y.toFixed(1)} stroke="#5fd3e0" strokeWidth={1} strokeDasharray="4,3" opacity={0.75} />;
         })}
         {hasRef && (() => {
-          let li = -1;
-          for (let i = n - 1; i >= 0; i--) { if (refs[i] != null) { li = i; break; } }
-          if (li < 0) return null;
-          return <text x={PAD.left + cW} y={yOf(refs[li]!) - 3} textAnchor="end" fontSize={8} fill="#5fd3e0">满额/天 {Math.round(refs[li]!)}%</text>;
+          // 按满额值（=倍率）把连续相同的天聚成段，每段各自在右端标一个「满额/天 X%」
+          const segs: { start: number; end: number; val: number }[] = [];
+          refs.forEach((r, i) => {
+            if (r == null) return;
+            const last = segs[segs.length - 1];
+            if (last && last.end === i - 1 && Math.abs(last.val - r) < 0.5) last.end = i;
+            else segs.push({ start: i, end: i, val: r });
+          });
+          return segs.map((s, si) => {
+            const xR = s.end === n - 1 ? PAD.left + cW : (xOf(s.end) + xOf(s.end + 1)) / 2;
+            return (
+              <text key={`reflbl${si}`} x={xR.toFixed(1)} y={(yOf(s.val) - 3).toFixed(1)} textAnchor="end" fontSize={8} fill="#5fd3e0">
+                满额/天 {Math.round(s.val)}%
+              </text>
+            );
+          });
         })()}
         <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
         {days.map((d, i) => (
           <g key={i}>
             <circle cx={xOf(i)} cy={yOf(d.consumed)} r={2.5} fill={color} />
             {d.consumed > 0 && (
-              <text x={xOf(i)} y={yOf(d.consumed) - 5} textAnchor="middle" fontSize={8} fill={color + "cc"}>{d.consumed}</text>
+              <text x={xOf(i)} y={yOf(d.consumed) - 5} textAnchor="middle" fontSize={8} fill={color + "cc"}>{d.consumed}%</text>
             )}
           </g>
         ))}
@@ -1590,7 +1602,7 @@ function TotalDailyChartSvg({ dates, accountSeries, totals, weeklyResetDates, cu
         })}
         {/* 总计节点数值（堆叠顶端） */}
         {totals.map((v, i) => v > 0 && (
-          <text key={i} x={xOf(i)} y={yOf(v) - 4} textAnchor="middle" fontSize={8} fill="#ddd">{v}</text>
+          <text key={i} x={xOf(i)} y={yOf(v) - 4} textAnchor="middle" fontSize={8} fill="#ddd">{v}%</text>
         ))}
         {/* 周重置竖线 */}
         {dates.map((d, i) => weeklyResetDates.has(d) && (
