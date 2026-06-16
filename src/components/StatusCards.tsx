@@ -759,11 +759,12 @@ function PaceTargetOverlay({ startRatio, endRatio, targetPct }: PaceTarget) {
         style={{
           left: `${left}%`,
           width: `${width}%`,
-          background: "rgba(95,211,224,0.10)",
-          backgroundImage: "repeating-linear-gradient(45deg, rgba(95,211,224,0.55) 0px, rgba(95,211,224,0.55) 1.5px, transparent 1.5px, transparent 5px)",
-          borderLeft: "1px dashed rgba(95,211,224,0.6)",
-          borderRight: "1.5px solid #5fd3e0",
+          background: "rgba(217,140,255,0.14)",
+          backgroundImage: "repeating-linear-gradient(45deg, rgba(217,140,255,0.72) 0px, rgba(217,140,255,0.72) 1.5px, transparent 1.5px, transparent 5px)",
+          borderLeft: "1px dashed rgba(217,140,255,0.78)",
+          borderRight: "1.5px solid #d98cff",
           borderRadius: 2,
+          boxShadow: "0 0 0 0.5px rgba(0,0,0,0.35)",
           boxSizing: "border-box",
         }}
       />
@@ -776,7 +777,7 @@ function PaceTargetOverlay({ startRatio, endRatio, targetPct }: PaceTarget) {
           transform: "translate(-50%, -100%)",
           fontSize: 8,
           lineHeight: 1,
-          color: "#fff",
+          color: "#d98cff",
           whiteSpace: "nowrap",
           textShadow: "0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)",
         }}
