@@ -537,8 +537,8 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
   const weeklyPaceTarget = useMemo(
     () => (weeklyPct != null && weeklyTotal > 0 && weeklyPct / weeklyTotal >= 0.98)
       ? null
-      : computeWeeklyPaceTarget(accountHistory, weeklyTotal),
-    [accountHistory, weeklyTotal, weeklyPct],
+      : computeWeeklyPaceTarget(accountHistory, weeklyTotal, resetDays),
+    [accountHistory, weeklyTotal, weeklyPct, resetDays],
   );
 
   return (
@@ -707,10 +707,10 @@ function ratioPct(pct: number | null | undefined, total: number | null | undefin
 
 // ── 今日配速目标框（Weekly 进度条上的「满额平均」装饰）─────────
 // 起点 = 今天开头的 weekly_pct（若今天是周重置日，今天第一条已是重置后的低值，天然满足）；
-// 终点 = 起点 + 满额平均/天（= weekly_total / 7，正好占进度条 1/7 宽）。返回 0–1 的进度条比例。
+// 终点 = 起点 +（今天开头剩余额度 ÷ 距重置剩余天数）× 权重；权重默认 1，仅「今天发生周重置」时按今天已过比例缩减。返回 0–1 比例。
 interface PaceTarget { startRatio: number; endRatio: number; targetPct: number; startPct: number; }
 
-function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: number): PaceTarget | null {
+function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: number, remainingDays: number | null): PaceTarget | null {
   if (!records || records.length === 0 || !total || total <= 0) return null;
   const valid = records
     .filter(r => r.error == null && r.weekly_pct != null && r.collected_at)
@@ -724,9 +724,25 @@ function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: nu
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const todays = valid.filter(r => ld(r.collected_at) === today);
   const startPct = Math.max(0, todays.length > 0 ? todays[0].weekly_pct! : valid[valid.length - 1].weekly_pct!);
-  const daily = total / 7;
+  // 每天应消耗 = 今天开头剩余额度 ÷ 距重置剩余天数（精确小数）；天数无效退回 7 天兜底
+  const days = remainingDays != null && remainingDays > 0 ? remainingDays : 7;
+  const daily = Math.max(0, (total - startPct) / days);
+  // 权重默认 1（今天整段）；仅「今天发生了周重置」是部分天，才按今天已过比例缩减
+  const normHour = (iso?: string | null) => (iso ? Math.round(new Date(iso).getTime() / 3_600_000) : null);
+  const firstTodayIdx = valid.findIndex(r => ld(r.collected_at) === today);
+  let todayHadReset = false;
+  if (firstTodayIdx > 0) {
+    const prev = valid[firstTodayIdx - 1], curr = valid[firstTodayIdx];
+    const a = normHour(prev.weekly_reset_at), b = normHour(curr.weekly_reset_at);
+    todayHadReset = a != null && b != null ? a !== b : curr.weekly_pct! < prev.weekly_pct! - 1;
+  }
+  let weight = 1;
+  if (todayHadReset) {
+    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    weight = Math.min(1, Math.max(0, (now.getTime() - todayMidnight.getTime()) / 86_400_000));
+  }
   // 终点超出满额则 cap 到 total（落在 100% 进度处）
-  const targetPct = Math.min(total, startPct + daily);
+  const targetPct = Math.min(total, startPct + daily * weight);
   return { startRatio: startPct / total, endRatio: targetPct / total, targetPct, startPct };
 }
 
