@@ -122,6 +122,8 @@ pub struct TokenUsageModelBreakdown {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsageDay {
+    #[serde(default)]
+    pub source: String,
     pub date: String,
     pub provider: String,
     pub input_tokens: i64,

@@ -90,6 +90,7 @@ export interface TokenUsageModelBreakdown {
 }
 
 export interface TokenUsageDay {
+  source: string; // 机器名："本机" 或远程源 label
   date: string;
   provider: "claude_code" | "codex" | string;
   input_tokens: number;

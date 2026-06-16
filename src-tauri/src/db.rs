@@ -629,6 +629,7 @@ impl Database {
             let models_json: String = row.get(8)?;
             let models = serde_json::from_str(&models_json).unwrap_or_default();
             Ok(TokenUsageDay {
+                source: "本机".to_string(),
                 provider: row.get(0)?,
                 date: row.get(1)?,
                 input_tokens: row.get(2)?,

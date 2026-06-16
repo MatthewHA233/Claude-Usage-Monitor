@@ -77,18 +77,23 @@ pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
 
     let mut report = rebuild_daily_cache(db, since, until, &mut stats);
 
-    // 跨机器：拉各远程 claude启动器中继的 token 摘要，按 provider+date 合并进本机报告
+    // 跨机器：拉各远程 claude启动器中继的 token 摘要，作为独立机器行并入(不与本机累加)
     for remote in token_remotes(db) {
         match fetch_remote_token_summary(&remote.base_url, days) {
-            Ok(remote_days) => merge_remote_days(&mut report, remote_days, since, until),
+            Ok(remote_days) => {
+                append_remote_days(&mut report, &remote.label, remote_days, since, until)
+            }
             Err(e) => report
                 .errors
                 .push(format!("远程「{}」token 拉取失败: {}", remote.label, e)),
         }
     }
-    report
-        .days
-        .sort_by(|a, b| b.date.cmp(&a.date).then(a.provider.cmp(&b.provider)));
+    report.days.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then(a.source.cmp(&b.source))
+            .then(a.provider.cmp(&b.provider))
+    });
     report.summary = summary_from_days(&report.days);
 
     report.scanned_files = stats.scanned_files;
@@ -185,13 +190,17 @@ fn fetch_remote_token_summary(
     Ok(parsed.days)
 }
 
-/// 把远程 token 行合并进报告：同 provider+date 累加（model 也并入对应明细）
-fn merge_remote_days(
+/// 把某台远程机器的 token 行聚合成独立行(source=机器名)并入报告；
+/// 不与本机或其它机器累加——同 provider+date 在该机器内部聚合 model 明细
+fn append_remote_days(
     report: &mut TokenUsageReport,
+    source: &str,
     remote: Vec<RemoteTokenDay>,
     since: NaiveDate,
     until: NaiveDate,
 ) {
+    use std::collections::HashMap;
+    let mut acc: HashMap<(String, String), TokenUsageDay> = HashMap::new();
     for rd in remote {
         if !day_in_range(&rd.date, since, until) {
             continue;
@@ -206,56 +215,48 @@ fn merge_remote_days(
         } else {
             rd.model.clone()
         };
-        match report
-            .days
-            .iter_mut()
-            .find(|d| d.provider == rd.provider && d.date == rd.date)
-        {
-            Some(d) => {
-                d.input_tokens += rd.input_tokens;
-                d.cache_read_tokens += rd.cache_read_tokens;
-                d.cache_creation_tokens += rd.cache_creation_tokens;
-                d.output_tokens += rd.output_tokens;
-                d.total_tokens += total;
-                match d.models.iter_mut().find(|m| m.model == model) {
-                    Some(m) => {
-                        m.input_tokens += rd.input_tokens;
-                        m.cache_read_tokens += rd.cache_read_tokens;
-                        m.cache_creation_tokens += rd.cache_creation_tokens;
-                        m.output_tokens += rd.output_tokens;
-                        m.total_tokens += total;
-                    }
-                    None => d.models.push(TokenUsageModelBreakdown {
-                        model,
-                        input_tokens: rd.input_tokens,
-                        cache_read_tokens: rd.cache_read_tokens,
-                        cache_creation_tokens: rd.cache_creation_tokens,
-                        output_tokens: rd.output_tokens,
-                        total_tokens: total,
-                        cost_usd: None,
-                    }),
-                }
-            }
-            None => report.days.push(TokenUsageDay {
+        let entry = acc
+            .entry((rd.provider.clone(), rd.date.clone()))
+            .or_insert_with(|| TokenUsageDay {
+                source: source.to_string(),
                 date: rd.date.clone(),
                 provider: rd.provider.clone(),
+                input_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cost_usd: None,
+                models: Vec::new(),
+            });
+        entry.input_tokens += rd.input_tokens;
+        entry.cache_read_tokens += rd.cache_read_tokens;
+        entry.cache_creation_tokens += rd.cache_creation_tokens;
+        entry.output_tokens += rd.output_tokens;
+        entry.total_tokens += total;
+        match entry.models.iter_mut().find(|m| m.model == model) {
+            Some(m) => {
+                m.input_tokens += rd.input_tokens;
+                m.cache_read_tokens += rd.cache_read_tokens;
+                m.cache_creation_tokens += rd.cache_creation_tokens;
+                m.output_tokens += rd.output_tokens;
+                m.total_tokens += total;
+            }
+            None => entry.models.push(TokenUsageModelBreakdown {
+                model,
                 input_tokens: rd.input_tokens,
                 cache_read_tokens: rd.cache_read_tokens,
                 cache_creation_tokens: rd.cache_creation_tokens,
                 output_tokens: rd.output_tokens,
                 total_tokens: total,
                 cost_usd: None,
-                models: vec![TokenUsageModelBreakdown {
-                    model,
-                    input_tokens: rd.input_tokens,
-                    cache_read_tokens: rd.cache_read_tokens,
-                    cache_creation_tokens: rd.cache_creation_tokens,
-                    output_tokens: rd.output_tokens,
-                    total_tokens: total,
-                    cost_usd: None,
-                }],
             }),
         }
+    }
+    for (_key, mut day) in acc {
+        day.models
+            .sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens).then(a.model.cmp(&b.model)));
+        report.days.push(day);
     }
 }
 
@@ -567,6 +568,7 @@ fn build_report(agg: Aggregator, since: NaiveDate, until: NaiveDate) -> TokenUsa
 
             let summary = totals_from_models(&model_rows);
             days_out.push(TokenUsageDay {
+                source: "本机".to_string(),
                 date: day,
                 provider: provider.clone(),
                 input_tokens: summary.input_tokens,

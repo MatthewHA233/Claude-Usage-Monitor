@@ -23,6 +23,19 @@ const compact = (value: number) => {
 
 const providerColor = (provider: string) => provider === "codex" ? "#4a9eff" : "#cc785c";
 
+// 机器配色：本机固定绿，远程按名字 hash 取一个稳定的非绿色
+const REMOTE_COLORS = ["#c084fc", "#f472b6", "#fbbf24", "#38bdf8", "#a3e635"];
+const sourceColor = (source: string) => {
+  if (source === "本机" || source === "") return "#4ade80";
+  let h = 0;
+  for (let i = 0; i < source.length; i++) h = (h * 31 + source.charCodeAt(i)) >>> 0;
+  return REMOTE_COLORS[h % REMOTE_COLORS.length];
+};
+
+// 机器排序：本机优先，其余按名字
+const sortSources = (a: string, b: string) =>
+  a === "本机" ? -1 : b === "本机" ? 1 : a.localeCompare(b);
+
 const monthKey = (date: string) => date.slice(0, 7); // YYYY-MM
 const fmtMonth = (m: string) => {
   const [y, mo] = m.split("-");
@@ -60,7 +73,7 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
     [allDays, month],
   );
 
-  // 选中月的汇总
+  // 选中月的汇总（所有机器 + provider 总计）
   const summary = useMemo(
     () =>
       rows.reduce(
@@ -87,7 +100,7 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
           <div className="text-base font-semibold" style={{ color: "#f3f4f6" }}>Token 用量</div>
           <div className="text-xs" style={{ color: "#858585" }}>
             {report
-              ? `本机 + 远程汇总 · 检查 ${report.scanned_files} 个日志 · 解析 ${report.parsed_files} 个变更`
+              ? `本机 + 远程分机器统计 · 检查 ${report.scanned_files} 个日志 · 解析 ${report.parsed_files} 个变更`
               : "点击刷新后增量扫描本机 Codex / Claude Code 日志"}
           </div>
         </div>
@@ -153,6 +166,7 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
           <thead style={{ background: "#202020", color: "#9ca3af" }}>
             <tr>
               <Th>日期</Th>
+              <Th>机器</Th>
               <Th>来源</Th>
               <Th align="right">Input</Th>
               <Th align="right">Cache</Th>
@@ -164,14 +178,19 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-5 text-center" style={{ color: "#777" }}>
+                <td colSpan={8} className="px-3 py-5 text-center" style={{ color: "#777" }}>
                   {loading ? "扫描中..." : month ? "本月无数据" : "尚未扫描 token 日志"}
                 </td>
               </tr>
             ) : (
               [...rows]
-                .sort((a, b) => b.date.localeCompare(a.date) || a.provider.localeCompare(b.provider))
-                .map((row) => <TokenRow key={`${row.provider}:${row.date}`} row={row} />)
+                .sort(
+                  (a, b) =>
+                    b.date.localeCompare(a.date) ||
+                    sortSources(a.source, b.source) ||
+                    a.provider.localeCompare(b.provider),
+                )
+                .map((row) => <TokenRow key={`${row.source}:${row.provider}:${row.date}`} row={row} />)
             )}
           </tbody>
         </table>
@@ -179,7 +198,7 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
 
       {report && report.errors.length > 0 && (
         <div className="mt-2 text-xs" style={{ color: "#fbbf24" }}>
-          {report.errors.length} 个日志读取失败，已跳过。
+          {report.errors.length} 条读取/远程拉取失败，已跳过。
         </div>
       )}
     </section>
@@ -217,28 +236,33 @@ function ProviderSummary({ rows }: { rows: TokenUsageDay[] }) {
   );
 }
 
+// 每日并排双机柱：每天每台机器一根柱（柱内 provider 堆叠），柱下方机器色条区分本机/远程
 function TokenUsageChart({ rows }: { rows: TokenUsageDay[] }) {
-  const dates = [...new Set(rows.map((row) => row.date))].sort((a, b) => a.localeCompare(b));
+  if (rows.length === 0) return null;
   const providers = ["claude_code", "codex"];
-  const byDate = new Map<string, Record<string, number>>();
-  for (const date of dates) byDate.set(date, {});
-  for (const row of rows) {
-    const bucket = byDate.get(row.date) ?? {};
-    bucket[row.provider] = (bucket[row.provider] ?? 0) + row.total_tokens;
-    byDate.set(row.date, bucket);
+  const sources = [...new Set(rows.map((r) => r.source))].sort(sortSources);
+  const dates = [...new Set(rows.map((r) => r.date))].sort((a, b) => a.localeCompare(b));
+
+  const keyOf = (d: string, s: string, p: string) => `${d}|${s}|${p}`;
+  const cell = new Map<string, number>();
+  for (const r of rows) {
+    const k = keyOf(r.date, r.source, r.provider);
+    cell.set(k, (cell.get(k) ?? 0) + r.total_tokens);
   }
-  const max = Math.max(1, ...dates.map((date) => providers.reduce((sum, provider) => sum + (byDate.get(date)?.[provider] ?? 0), 0)));
-  const leftPad = 40;
+  const sourceTotal = (d: string, s: string) =>
+    providers.reduce((sum, p) => sum + (cell.get(keyOf(d, s, p)) ?? 0), 0);
+  const max = Math.max(1, ...dates.flatMap((d) => sources.map((s) => sourceTotal(d, s))));
+
+  const barWidth = sources.length > 1 ? 11 : 14;
+  const barGap = 3; // 同一天机器柱间距
+  const groupWidth = sources.length * barWidth + (sources.length - 1) * barGap;
+  const groupGap = 16; // 天与天之间
+  const leftPad = 42;
   const rightPad = 24;
-  const width = Math.max(560, leftPad + rightPad + dates.length * 58);
-  const height = 210;
+  const width = Math.max(560, leftPad + rightPad + dates.length * (groupWidth + groupGap));
+  const height = 224;
   const chartTop = 18;
   const chartBottom = 168;
-  const barWidth = 14;
-  const plotWidth = width - leftPad - rightPad;
-  const step = plotWidth / Math.max(1, dates.length);
-
-  if (rows.length === 0) return null;
 
   return (
     <div className="mb-3 overflow-x-auto" style={{ border: "1px solid #303030", borderRadius: 8, background: "#1f1f1f" }}>
@@ -252,38 +276,46 @@ function TokenUsageChart({ rows }: { rows: TokenUsageDay[] }) {
             </g>
           );
         })}
-        {dates.map((date, index) => {
-          const x = leftPad + 10 + index * step;
-          let yCursor = chartBottom;
+        {dates.map((date, di) => {
+          const groupX = leftPad + 10 + di * (groupWidth + groupGap);
           return (
             <g key={date}>
-              {providers.map((provider) => {
-                const value = byDate.get(date)?.[provider] ?? 0;
-                const h = Math.max(0, (value / max) * (chartBottom - chartTop));
-                yCursor -= h;
+              {sources.map((src, si) => {
+                const barX = groupX + si * (barWidth + barGap);
+                let yCursor = chartBottom;
                 return (
-                  <rect
-                    key={provider}
-                    x={x}
-                    y={yCursor}
-                    width={barWidth}
-                    height={h}
-                    rx={2}
-                    fill={providerColor(provider)}
-                  >
-                    <title>{`${date} ${providerLabel(provider)} ${compact(value)}`}</title>
-                  </rect>
+                  <g key={src}>
+                    {providers.map((p) => {
+                      const value = cell.get(keyOf(date, src, p)) ?? 0;
+                      const h = Math.max(0, (value / max) * (chartBottom - chartTop));
+                      yCursor -= h;
+                      return (
+                        <rect key={p} x={barX} y={yCursor} width={barWidth} height={h} rx={1} fill={providerColor(p)}>
+                          <title>{`${date} · ${src} · ${providerLabel(p)} ${compact(value)}`}</title>
+                        </rect>
+                      );
+                    })}
+                    {/* 机器色底标 */}
+                    <rect x={barX} y={chartBottom + 2} width={barWidth} height={3} rx={1} fill={sourceColor(src)} />
+                  </g>
                 );
               })}
-              <text x={x + barWidth / 2} y={190} fontSize={10} fill="#9ca3af" textAnchor="middle">{date.slice(8)}</text>
+              <text x={groupX + groupWidth / 2} y={chartBottom + 22} fontSize={10} fill="#9ca3af" textAnchor="middle">{date.slice(8)}</text>
             </g>
           );
         })}
+        {/* 图例：provider 填充色 + 机器色条 */}
         <g>
-          <circle cx={width - 170} cy={18} r={4} fill={providerColor("claude_code")} />
-          <text x={width - 160} y={22} fontSize={11} fill="#cbd5e1">Claude Code</text>
-          <circle cx={width - 76} cy={18} r={4} fill={providerColor("codex")} />
-          <text x={width - 66} y={22} fontSize={11} fill="#cbd5e1">Codex</text>
+          <circle cx={leftPad + 6} cy={11} r={4} fill={providerColor("claude_code")} />
+          <text x={leftPad + 14} y={15} fontSize={10} fill="#cbd5e1">Claude</text>
+          <circle cx={leftPad + 66} cy={11} r={4} fill={providerColor("codex")} />
+          <text x={leftPad + 74} y={15} fontSize={10} fill="#cbd5e1">Codex</text>
+          {sources.map((src, i) => (
+            <g key={src} transform={`translate(${leftPad + 130 + i * 64}, 0)`}>
+              <rect x={0} y={8} width={12} height={5} rx={1} fill={sourceColor(src)} />
+              <text x={16} y={15} fontSize={10} fill="#cbd5e1">{src}</text>
+            </g>
+          ))}
         </g>
       </svg>
     </div>
@@ -297,6 +329,19 @@ function TokenRow({ row }: { row: TokenUsageDay }) {
   return (
     <tr style={{ borderTop: "1px solid #2a2a2a", color: "#e5e7eb" }}>
       <Td>{row.date}</Td>
+      <Td>
+        <span
+          style={{
+            display: "inline-block",
+            width: 7,
+            height: 7,
+            borderRadius: 7,
+            background: sourceColor(row.source),
+            marginRight: 6,
+          }}
+        />
+        {row.source || "本机"}
+      </Td>
       <Td>
         <span
           style={{
