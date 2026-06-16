@@ -246,6 +246,7 @@ export default function StatusCards({ snapshots, recommendation, analysis, local
               avgCost={providerAvgCosts[provider] ?? avgCost}
               avgCostsByProvider={providerAvgCosts}
               allSnapshots={snapshots}
+              accountHistory={histories[key] ?? []}
               colors={colors}
               setColor={setColor}
               alarmEnabled={alarm.isEnabled(key)}
@@ -410,6 +411,7 @@ interface CardProps {
   avgCost: number | null;
   avgCostsByProvider: Record<string, number>;
   allSnapshots: UsageSnapshot[];
+  accountHistory: UsageSnapshot[];
   colors: Record<string, string>;
   setColor: (alias: string, color: string) => Promise<void>;
   isPaused: boolean;
@@ -512,7 +514,7 @@ function ActiveRaceBadge({ race, onOpen }: { race: StoredQuotaRace; onOpen: () =
   );
 }
 
-function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, colors, setColor, isPaused, cliLoggedIn, pluginCollecting, activeRace, pausedAt, onOpenRace, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm, onStopAlarm }: CardProps) {
+function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHours, weeklyHours, isRecommended, avgCost, avgCostsByProvider, allSnapshots, accountHistory, colors, setColor, isPaused, cliLoggedIn, pluginCollecting, activeRace, pausedAt, onOpenRace, onTogglePaused, alarmEnabled, alarmRinging, onToggleAlarm, onStopAlarm }: CardProps) {
   const [modal, setModal] = useState<"history" | "sprint" | null>(null);
   const colorInputRef = useRef<HTMLInputElement>(null);
   const accountColor = colors[identityKey] ?? colors[alias] ?? DEFAULT_COLOR;
@@ -530,6 +532,14 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
   const periodQuotaLabel = "周额度";
   const quotaMultiplier = quotaMultiplierFromSnapshot(snap);
   const accountType = accountTypeLabel(provider, snap);
+  // Weekly 进度条上的「今日配速目标框」（起点=今天开头 weekly%，终点=满额平均/天）
+  // 周额度本身已到 98%+（快用满）则不显示目标框
+  const weeklyPaceTarget = useMemo(
+    () => (weeklyPct != null && weeklyTotal > 0 && weeklyPct / weeklyTotal >= 0.98)
+      ? null
+      : computeWeeklyPaceTarget(accountHistory, weeklyTotal),
+    [accountHistory, weeklyTotal, weeklyPct],
+  );
 
   return (
     <>
@@ -632,6 +642,7 @@ function AccountCard({ accountKey: identityKey, provider, alias, snap, sessionHo
                 <UsageRow label={periodLabel} pct={snap.weekly_pct ?? null} total={snap.weekly_total_pct ?? 100}
                   resetHours={weeklyHours} resetAt={snap.weekly_reset_at} colorFn={weeklyResetColor}
                   preciseCountdownBelowHours={24}
+                  paceTarget={weeklyPaceTarget}
                 />
               </div>
             </div>
@@ -694,13 +705,80 @@ function ratioPct(pct: number | null | undefined, total: number | null | undefin
   return ((pct ?? 0) / t) * 100;
 }
 
-function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra, preciseCountdown = false, preciseCountdownBelowHours }: {
+// ── 今日配速目标框（Weekly 进度条上的「满额平均」装饰）─────────
+// 起点 = 今天开头的 weekly_pct（若今天是周重置日，今天第一条已是重置后的低值，天然满足）；
+// 终点 = 起点 + 满额平均/天（= weekly_total / 7，正好占进度条 1/7 宽）。返回 0–1 的进度条比例。
+interface PaceTarget { startRatio: number; endRatio: number; targetPct: number; startPct: number; }
+
+function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: number): PaceTarget | null {
+  if (!records || records.length === 0 || !total || total <= 0) return null;
+  const valid = records
+    .filter(r => r.error == null && r.weekly_pct != null && r.collected_at)
+    .sort((a, b) => a.collected_at.localeCompare(b.collected_at));
+  if (valid.length === 0) return null;
+  const ld = (iso: string) => {
+    const d = new Date(iso);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const todays = valid.filter(r => ld(r.collected_at) === today);
+  const startPct = Math.max(0, todays.length > 0 ? todays[0].weekly_pct! : valid[valid.length - 1].weekly_pct!);
+  const daily = total / 7;
+  // 终点超出满额则 cap 到 total（落在 100% 进度处）
+  const targetPct = Math.min(total, startPct + daily);
+  return { startRatio: startPct / total, endRatio: targetPct / total, targetPct, startPct };
+}
+
+function PaceTargetOverlay({ startRatio, endRatio, targetPct }: PaceTarget) {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  const left = clamp(startRatio) * 100;
+  const right = clamp(endRatio) * 100;
+  const width = Math.max(0, right - left);
+  return (
+    <div className="absolute inset-0 pointer-events-none">
+      {/* 今天应推进的一段：斜线纹路填充，右边界=满额平均目标线 */}
+      <div
+        className="absolute top-0 bottom-0"
+        style={{
+          left: `${left}%`,
+          width: `${width}%`,
+          background: "rgba(95,211,224,0.10)",
+          backgroundImage: "repeating-linear-gradient(45deg, rgba(95,211,224,0.55) 0px, rgba(95,211,224,0.55) 1.5px, transparent 1.5px, transparent 5px)",
+          borderLeft: "1px dashed rgba(95,211,224,0.6)",
+          borderRight: "1.5px solid #5fd3e0",
+          borderRadius: 2,
+          boxSizing: "border-box",
+        }}
+      />
+      {/* 目标值：纯白，居中对齐右边界（终点/目标线），挨着进度条上边线 */}
+      <div
+        className="absolute font-mono font-semibold"
+        style={{
+          left: `${right}%`,
+          top: -1,
+          transform: "translate(-50%, -100%)",
+          fontSize: 8,
+          lineHeight: 1,
+          color: "#fff",
+          whiteSpace: "nowrap",
+          textShadow: "0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.9)",
+        }}
+      >
+        目标 {Math.round(targetPct)}%
+      </div>
+    </div>
+  );
+}
+
+function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra, preciseCountdown = false, preciseCountdownBelowHours, paceTarget }: {
   label: string; pct: number | null; total?: number | null;
   resetHours: number | null; resetAt: string | null;
   colorFn: (h: number | null) => string;
   resetExtra?: React.ReactNode;
   preciseCountdown?: boolean;
   preciseCountdownBelowHours?: number;
+  paceTarget?: PaceTarget | null;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [peek, setPeek] = useState(false); // 悬浮临时看「占总%」（仅 5x/20x）
@@ -740,7 +818,14 @@ function UsageRow({ label, pct, total, resetHours, resetAt, colorFn, resetExtra,
           <span style={{ color: "#bbb" }}>余 {formatPct(rem)}</span>
         </div>
       </div>
-      <ProgressBar pct={pct} total={totalPct} />
+      {paceTarget ? (
+        <div className="relative">
+          <ProgressBar pct={pct} total={totalPct} />
+          <PaceTargetOverlay {...paceTarget} />
+        </div>
+      ) : (
+        <ProgressBar pct={pct} total={totalPct} />
+      )}
       <div className="text-xs mt-1 font-medium flex items-center gap-1.5" style={{ color }}>
         <span>{resetText}</span>
         {resetExtra}
