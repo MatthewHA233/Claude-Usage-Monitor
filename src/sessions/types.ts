@@ -8,6 +8,11 @@ export interface SessionSource {
 
 // ---- 发言流（session_my_messages） ----
 
+/** 回复的有序块：文字 或 工具调用（与后端 ReplyBlock 对应，展开时交错渲染） */
+export type ReplyBlock =
+  | { type: "text"; text: string }
+  | { type: "tool"; id: string; name: string; input: unknown };
+
 export interface MyMessage {
   session_id: string;
   source_id: string;
@@ -21,6 +26,8 @@ export interface MyMessage {
   reply: string;
   reply_chars: number;
   images: string[];
+  /** 有序回复块；老缓存可能缺省，渲染时回退到 reply */
+  blocks?: ReplyBlock[];
 }
 
 export interface MyMessagesResponse {

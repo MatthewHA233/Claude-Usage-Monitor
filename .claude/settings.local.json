@@ -63,7 +63,12 @@
       "Bash(./src-tauri/target/x86_64-pc-windows-msvc/debug/claude-usage-monitor.exe *)",
       "Bash(/d/my_pro/Tauri_ob/claude-switch/src-tauri/target/x86_64-pc-windows-msvc/debug/claude-usage-monitor.exe *)",
       "Read(//tmp/**)",
-      "mcp__plugin_context7_context7__resolve-library-id"
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "Bash(CARGO_BUILD_JOBS=4 npx tauri *)",
+      "Bash(NODE_OPTIONS=--max-old-space-size=2048 npx tsc --noEmit)",
+      "Bash(echo \"再次失败\\(exit $?\\)\")",
+      "PowerShell(Stop-Process *)",
+      "Bash(cd *)"
     ]
   }
 }

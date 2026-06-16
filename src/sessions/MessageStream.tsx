@@ -1,7 +1,25 @@
-import { useState, type ReactNode } from "react";
-import { ChevronRight, ChevronDown, ChevronUp, FolderGit2, Monitor, MessagesSquare } from "lucide-react";
-import type { StreamMessage } from "./types";
+import { useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  FilePen,
+  FilePlus,
+  FileText,
+  FolderGit2,
+  Globe,
+  ListChecks,
+  MessagesSquare,
+  Monitor,
+  Search,
+  SquareTerminal,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
+import type { StreamMessage, ReplyBlock } from "./types";
 import { clock, nfmt, bucketOf } from "./format";
+import { fetchToolResult } from "./api";
 import MessageText from "./MessageText";
 import Markdown from "./Markdown";
 
@@ -114,7 +132,9 @@ function StreamCard({
   onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const hasReply = m.reply_chars > 0;
+  const blocks = m.blocks ?? [];
+  const toolCount = blocks.reduce((n, b) => n + (b.type === "tool" ? 1 : 0), 0);
+  const hasReply = m.reply_chars > 0 || blocks.length > 0;
 
   // 按 10 分钟桶奇偶相间的卡片背景（与时间轴斑马同节奏）
   const bg = shade ? "#25252c" : "#191919";
@@ -161,7 +181,7 @@ function StreamCard({
             style={{ color: "#8fb3d3", background: "transparent", border: 0, cursor: "pointer" }}
           >
             <ChevronRight size={11} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }} />
-            Claude 回复 · {nfmt(m.reply_chars)} 字
+            Claude 回复{m.reply_chars > 0 ? ` · ${nfmt(m.reply_chars)} 字` : ""}{toolCount > 0 ? ` · ${toolCount} 工具` : ""}
           </button>
         ) : (
           <span style={{ color: "#555" }}>（无回复正文）</span>
@@ -173,7 +193,11 @@ function StreamCard({
           className="rounded-md px-3 py-2 mt-2.5"
           style={{ background: "#171717", border: "1px solid #262626", maxHeight: 420, overflow: "auto" }}
         >
-          <Markdown content={m.reply} />
+          {blocks.length > 0 ? (
+            <ReplyBlocks blocks={blocks} source={m.source_id} session={m.session_id} />
+          ) : (
+            <Markdown content={m.reply} />
+          )}
         </div>
       )}
       </div>
@@ -304,4 +328,198 @@ function Tag({
       <span className="truncate">{label}</span>
     </button>
   );
+}
+
+// ── 回复块交错渲染：文字（Markdown）+ 工具调用卡片，按真实顺序 ──
+function ReplyBlocks({ blocks, source, session }: {
+  blocks: ReplyBlock[];
+  source: string;
+  session: string;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {blocks.map((b, i) =>
+        b.type === "text" ? (
+          <Markdown key={i} content={b.text} />
+        ) : (
+          <ToolCallBlock key={i} name={b.name} input={b.input} toolId={b.id} source={source} session={session} />
+        )
+      )}
+    </div>
+  );
+}
+
+/** 各工具的图标 + 强调色 */
+function toolVisual(name: string): { Icon: LucideIcon; color: string } {
+  switch (name) {
+    case "Read":
+      return { Icon: FileText, color: "#60a5fa" };
+    case "Write":
+      return { Icon: FilePlus, color: "#4ade80" };
+    case "Edit":
+    case "NotebookEdit":
+      return { Icon: FilePen, color: "#fbbf24" };
+    case "Bash":
+      return { Icon: SquareTerminal, color: "#fb923c" };
+    case "Grep":
+    case "Glob":
+      return { Icon: Search, color: "#22d3ee" };
+    case "Task":
+      return { Icon: Bot, color: "#c084fc" };
+    case "WebFetch":
+    case "WebSearch":
+      return { Icon: Globe, color: "#38bdf8" };
+    case "TodoWrite":
+      return { Icon: ListChecks, color: "#a3e635" };
+    default:
+      return { Icon: Wrench, color: "#d98cff" };
+  }
+}
+
+const toolPre: CSSProperties = {
+  margin: 0,
+  fontSize: 11,
+  lineHeight: 1.55,
+  color: "#c2c8d0",
+  fontFamily: "monospace",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  overflow: "auto",
+  maxHeight: 300,
+};
+
+function ToolSection({ label, sep, children }: { label: string; sep?: boolean; children: ReactNode }) {
+  return (
+    <div style={{ padding: "6px 10px 8px", borderTop: sep ? "1px solid #232329" : undefined }}>
+      <div
+        style={{
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.6px",
+          color: "#6b7078",
+          marginBottom: 4,
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** 单个工具调用：图标 + 名称 + 入参摘要；点一次同时展开「完整入参 + 懒加载结果」 */
+function ToolCallBlock({ name, input, toolId, source, session }: {
+  name: string;
+  input: unknown;
+  toolId: string;
+  source: string;
+  session: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [res, setRes] = useState<string | null>(null);
+  const [resLoading, setResLoading] = useState(false);
+  const [resErr, setResErr] = useState(false);
+  const summary = summarizeToolInput(name, input);
+  const { Icon, color } = toolVisual(name);
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    // 首次展开时懒加载结果（之后切换只是显隐）
+    if (next && res === null && !resErr && toolId) {
+      setResLoading(true);
+      try {
+        const r = await fetchToolResult(source, session, toolId);
+        setRes(r ?? "（未找到该工具的返回结果）");
+      } catch {
+        setResErr(true);
+      } finally {
+        setResLoading(false);
+      }
+    }
+  };
+
+  return (
+    <div className="rounded-lg overflow-hidden" style={{ background: "#1a1a1e", border: "1px solid #2b2b32" }}>
+      <button
+        type="button"
+        onClick={toggle}
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 min-w-0 text-left"
+        style={{ background: open ? "#1f1f24" : "transparent", border: 0, cursor: "pointer" }}
+      >
+        <span
+          className="inline-flex items-center justify-center shrink-0"
+          style={{ width: 19, height: 19, borderRadius: 5, background: `${color}22` }}
+        >
+          <Icon size={12} style={{ color }} />
+        </span>
+        <span style={{ color, fontWeight: 600, fontFamily: "monospace", fontSize: 12.5, flexShrink: 0 }}>{name}</span>
+        {summary && (
+          <span className="truncate" style={{ color: "#8b9096", fontSize: 11.5, fontFamily: "monospace" }}>{summary}</span>
+        )}
+        <ChevronRight
+          size={12}
+          style={{ marginLeft: "auto", flexShrink: 0, color: "#5b5f67", transform: open ? "rotate(90deg)" : "none", transition: "transform .12s" }}
+        />
+      </button>
+
+      {open && (
+        <div style={{ borderTop: "1px solid #2b2b32" }}>
+          <ToolSection label="入参">
+            <pre style={toolPre}>{prettyJson(input)}</pre>
+          </ToolSection>
+          <ToolSection label="结果" sep>
+            {resLoading ? (
+              <span style={{ color: "#8b9096", fontSize: 11 }}>加载中…</span>
+            ) : resErr ? (
+              <span style={{ color: "#e0a0a0", fontSize: 11 }}>读取失败：原始会话文件不可达 / 远程源离线</span>
+            ) : (
+              <pre style={toolPre}>{res}</pre>
+            )}
+          </ToolSection>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 工具入参摘要：取各工具的关键字段，单行展示
+function summarizeToolInput(name: string, input: unknown): string {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" ? v : v == null ? "" : JSON.stringify(v));
+  const short = (v: string, n = 100) => (v.length > n ? v.slice(0, n) + "…" : v);
+  switch (name) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "NotebookEdit":
+      return short(s(o.file_path ?? o.path ?? o.notebook_path));
+    case "Bash":
+      return short(s(o.command));
+    case "Grep":
+      return short([s(o.pattern), o.path ? `· ${s(o.path)}` : "", o.glob ? `· ${s(o.glob)}` : ""].filter(Boolean).join(" "));
+    case "Glob":
+      return short(s(o.pattern));
+    case "Task":
+      return short(s(o.description ?? o.subagent_type));
+    case "WebFetch":
+      return short(s(o.url));
+    case "WebSearch":
+      return short(s(o.query));
+    case "TodoWrite":
+      return Array.isArray(o.todos) ? `${(o.todos as unknown[]).length} 项` : "";
+    default: {
+      const first = Object.values(o).find((v) => typeof v === "string") as string | undefined;
+      return first ? short(first) : "";
+    }
+  }
+}
+
+function prettyJson(input: unknown): string {
+  try {
+    return JSON.stringify(input, null, 2);
+  } catch {
+    return String(input);
+  }
 }

@@ -67,6 +67,15 @@ export function fetchMyMessages(
   });
 }
 
+/** 懒加载某个工具调用的结果（点开「查看结果」时才现读原始 JSONL；远程源需联网） */
+export function fetchToolResult(source: string, session: string, toolUseId: string) {
+  return invoke<string | null>("session_tool_result", {
+    source,
+    session,
+    toolUseId,
+  });
+}
+
 /** 会话时间轴（某本地日期） */
 export function fetchTimeline(date: string, source?: string) {
   return invoke<TimelineResponse>("session_timeline", { date, source: source ?? null });

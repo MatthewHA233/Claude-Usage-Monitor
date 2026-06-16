@@ -19,6 +19,21 @@
 
 TypeScript 类型检查：`npx tsc --noEmit`（前端），Rust 检查直接用 `cargo xwin build`（增量编译快，约 7-15s）。
 
+## WebView 调试（默认用 chrome-devtools-webview3 MCP）
+
+调试本 app 运行中的 WebView2，**默认用 `chrome-devtools-webview3` MCP**（连 `127.0.0.1:9224`）。
+端口分工固定：`webview2`(9222)=Solevup(solo-leveling-system)、`nomal`(9223)=网站开发、`webview3`(9224)=**本 app**。
+
+- **启动 exe 必须带远程调试端口**才会开 CDP，且端口要选**空闲**的：
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9224`
+  用 PowerShell `Start-Process` detached 启动（exe 独立于会话，重启 Claude Code 不影响它）。
+  注意 IPv4/IPv6 撞端口：9224 空闲时 WebView2 绑 IPv4 `127.0.0.1`（MCP 能连）；若该端口已被别的 WebView2 占用，
+  本 app 会退到绑 IPv6 `::1`，而 MCP 连的是 IPv4 → 连不上（换一个真正空闲的端口即可）。
+- **连接**：`list_pages` 应只看到 `http://localhost:1420/`（本 app 前端，需 `npm run dev` 在跑）。
+- **跑命令**：`evaluate_script` 里用 `window.__TAURI__.core.invoke('命令名', { 参数 })`
+  （`tauri.conf.json` 已开 `app.withGlobalTauri: true`，故页面里有全局 `__TAURI__`）。
+- 新增/改 MCP（配置在 `~/.claude.json` 的 `mcpServers`）需**重启 Claude Code 会话**才加载。
+
 ## 磁盘空间管理
 
 | 操作 | 占用 |

@@ -100,6 +100,7 @@ pub fn run() {
             session_store::session_draft_push,
             discovery::session_discover_relays,
             session_store::session_my_messages,
+            session_store::session_tool_result,
             session_store::session_timeline,
             session_store::session_stats,
             session_store::session_status,

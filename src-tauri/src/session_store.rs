@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::session_parse::parse_session;
+use crate::session_parse::{parse_session, ReplyBlock};
 use crate::state::AppState;
 
 pub const LOCAL_SOURCE: &str = "local";
@@ -55,6 +55,9 @@ pub struct SessionDraft {
     pub created_unix: i64,
     #[serde(default)]
     pub done_unix: Option<i64>,
+    /// 可选：把待办挂到某条主题线（主题白板用）。
+    #[serde(default)]
+    pub topic_id: Option<String>,
 }
 
 /// 薄中继 /raw/list 的一项
@@ -88,6 +91,9 @@ fn join_url(base_url: &str, path: &str) -> String {
     }
 }
 
+/// 解析器版本：升级后清空 files 表，触发全部会话重新解析（回填新增的 blocks/工具调用）
+const PARSE_VERSION: &str = "2";
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
     source TEXT NOT NULL,
@@ -120,7 +126,8 @@ CREATE TABLE IF NOT EXISTS messages (
     chars       INTEGER,
     reply       TEXT,
     reply_chars INTEGER,
-    images      TEXT
+    images      TEXT,
+    blocks      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_msg_ts      ON messages(ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_date    ON messages(local_date);
@@ -143,6 +150,8 @@ pub struct MyMessage {
     pub reply: String,
     pub reply_chars: i64,
     pub images: Vec<String>,
+    /// 回复的有序块（文字/工具调用交错）；工具块只带 name/input/id，结果按需懒加载
+    pub blocks: Vec<ReplyBlock>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +304,10 @@ fn map_my_message(row: &rusqlite::Row) -> Result<MyMessage> {
         .get::<_, Option<String>>(11)?
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default();
+    let blocks = row
+        .get::<_, Option<String>>(12)?
+        .and_then(|s| serde_json::from_str::<Vec<ReplyBlock>>(&s).ok())
+        .unwrap_or_default();
     Ok(MyMessage {
         session_id: row.get(0)?,
         source_id: row.get(1)?,
@@ -308,6 +321,7 @@ fn map_my_message(row: &rusqlite::Row) -> Result<MyMessage> {
         reply: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
         reply_chars: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
         images,
+        blocks,
     })
 }
 
@@ -320,6 +334,14 @@ impl SessionStore {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(SCHEMA)?;
+        // 旧库迁移：补 blocks 列（已存在则忽略 duplicate column 错误）
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN blocks TEXT", []);
+        // 解析器升级 → 清空 files 让全部会话重新解析（回填 blocks/工具调用）
+        let stale = get_meta(&conn, "parse_version").ok().flatten().as_deref() != Some(PARSE_VERSION);
+        if stale {
+            let _ = conn.execute("DELETE FROM files", []);
+            let _ = set_meta(&conn, "parse_version", PARSE_VERSION);
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             syncing: AtomicBool::new(false),
@@ -576,11 +598,11 @@ impl SessionStore {
             let sid = format!("hist:{project}");
             let chars = text.chars().count() as i64;
             tx.execute(
-                "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images,blocks) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 params![
                     HISTORY_SOURCE, sid, hist_path, seq as i64,
-                    local_iso_of(*ts_unix), *ts_unix, date.as_str(), text.as_str(), chars, "", 0i64, "[]"
+                    local_iso_of(*ts_unix), *ts_unix, date.as_str(), text.as_str(), chars, "", 0i64, "[]", "[]"
                 ],
             )?;
             let e = proj_last.entry((*project).clone()).or_insert(0);
@@ -611,6 +633,50 @@ impl SessionStore {
     }
 
     /// 发言流：按时间倒序平铺
+    /// 该 (source, session) 的原始文件路径（本机绝对路径 / 远程 key）
+    fn session_file_path(&self, source: &str, session: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT file_path FROM sessions WHERE source=?1 AND session_id=?2",
+            params![source, session],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// 懒加载某个工具调用的结果：读原始 JSONL（本机直接读 / 远程拉中继），
+    /// 按 tool_use_id 找 tool_result。history 源无 transcript，返回 None。
+    pub fn tool_result(
+        &self,
+        source: &str,
+        session: &str,
+        tool_use_id: &str,
+        remotes: &[SessionSource],
+    ) -> Option<String> {
+        if source == HISTORY_SOURCE {
+            return None;
+        }
+        let file_path = self.session_file_path(source, session)?;
+        let content = if source == LOCAL_SOURCE {
+            std::fs::read_to_string(&file_path).ok()?
+        } else {
+            let base = remotes
+                .iter()
+                .find(|s| s.id == source)
+                .map(|s| s.base_url.clone())?;
+            blocking_client(20)
+                .get(join_url(&base, "/raw/file"))
+                .query(&[("key", &file_path)])
+                .send()
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.text())
+                .ok()?
+        };
+        crate::session_parse::find_tool_result(&content, tool_use_id)
+    }
+
     pub fn my_messages(
         &self,
         limit: i64,
@@ -656,7 +722,7 @@ impl SessionStore {
 
         let base = "SELECT m.session_id, m.source, COALESCE(s.project_name,''), \
              COALESCE(s.project_path,''), m.ts, m.ts_unix, m.local_date, m.text, m.chars, \
-             m.reply, m.reply_chars, m.images FROM messages m \
+             m.reply, m.reply_chars, m.images, m.blocks FROM messages m \
              LEFT JOIN sessions s ON s.source=m.source AND s.session_id=m.session_id";
         let sql =
             format!("{base} {where_sql} ORDER BY m.ts_unix DESC, m.id DESC LIMIT ? OFFSET ?");
@@ -843,9 +909,10 @@ fn ingest(
     )?;
     for (seq, t) in meta.turns.iter().enumerate() {
         let images_json = serde_json::to_string(&t.images).unwrap_or_else(|_| "[]".to_string());
+        let blocks_json = serde_json::to_string(&t.blocks).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images) \
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images,blocks) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 source,
                 session_id,
@@ -858,7 +925,8 @@ fn ingest(
                 t.chars,
                 t.reply,
                 t.reply_chars,
-                images_json
+                images_json,
+                blocks_json
             ],
         )?;
     }
@@ -1099,6 +1167,25 @@ pub async fn session_my_messages(
         limit,
         items,
     })
+}
+
+/// 懒加载某个工具调用的结果（点开「查看结果」时才现读原始 JSONL）
+#[tauri::command]
+pub async fn session_tool_result(
+    state: State<'_, AppState>,
+    source: String,
+    session: String,
+    tool_use_id: String,
+) -> Result<Option<String>, String> {
+    let store = state.sessions.clone();
+    let db = state.db.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        let remotes = remotes_from_db(&db);
+        store.tool_result(&source, &session, &tool_use_id, &remotes)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(res)
 }
 
 #[tauri::command]

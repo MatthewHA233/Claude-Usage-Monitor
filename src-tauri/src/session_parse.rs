@@ -6,7 +6,23 @@
 //! 都喂给同一个解析器，保证两侧行为一致。
 
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// 回复里的一个有序块：文字 或 工具调用。用于展开回复时按真实顺序交错展示。
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ReplyBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool")]
+    Tool {
+        /// tool_use 的 id（toolu_xxx），前端按需懒加载对应 tool_result 时用来定位
+        id: String,
+        name: String,
+        input: Value,
+    },
+}
 
 /// 一条「我的发言 + 折叠回复」
 pub struct UserTurn {
@@ -17,6 +33,8 @@ pub struct UserTurn {
     pub chars: i64,
     pub reply: String,
     pub reply_chars: i64,
+    /// 回复的有序块（文字/工具调用交错），展开时还原 AI「边说边做」的过程
+    pub blocks: Vec<ReplyBlock>,
     /// 该条消息附带的图片本机路径（按 [Image #N] 顺序），来自紧随其后的来源注释事件
     pub images: Vec<String>,
 }
@@ -185,14 +203,64 @@ fn extract_assistant_text(obj: &Value) -> Option<String> {
     }
 }
 
-fn flush(cur: &mut Option<UserTurn>, reply_parts: &mut Vec<String>, turns: &mut Vec<UserTurn>) {
+/// 从 assistant 行抽出有序块：text 块 → 文字，tool_use 块 → 工具调用（名称 + 入参）。
+/// 一个 assistant 事件的 content 可能形如 [text, tool_use, text, ...]，按数组顺序保留。
+fn extract_assistant_blocks(obj: &Value) -> Vec<ReplyBlock> {
+    if obj.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+        return Vec::new();
+    }
+    let Some(content) = obj.get("message").and_then(|m| m.get("content")) else {
+        return Vec::new();
+    };
+    let mut blocks: Vec<ReplyBlock> = Vec::new();
+    if let Some(arr) = content.as_array() {
+        for x in arr {
+            match x.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    if let Some(s) = x.get("text").and_then(|v| v.as_str()) {
+                        let s = s.trim();
+                        if !s.is_empty() {
+                            blocks.push(ReplyBlock::Text { text: s.to_string() });
+                        }
+                    }
+                }
+                Some("tool_use") => {
+                    let id = x.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = x
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string();
+                    let input = x.get("input").cloned().unwrap_or(Value::Null);
+                    blocks.push(ReplyBlock::Tool { id, name, input });
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(s) = content.as_str() {
+        let s = s.trim();
+        if !s.is_empty() {
+            blocks.push(ReplyBlock::Text { text: s.to_string() });
+        }
+    }
+    blocks
+}
+
+fn flush(
+    cur: &mut Option<UserTurn>,
+    reply_parts: &mut Vec<String>,
+    reply_blocks: &mut Vec<ReplyBlock>,
+    turns: &mut Vec<UserTurn>,
+) {
     if let Some(mut t) = cur.take() {
         let reply = reply_parts.join("\n\n");
         t.reply_chars = reply.chars().count() as i64;
         t.reply = reply;
+        t.blocks = std::mem::take(reply_blocks);
         turns.push(t);
     }
     reply_parts.clear();
+    reply_blocks.clear();
 }
 
 /// 解析单个会话文件的完整文本
@@ -200,6 +268,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
     let mut turns: Vec<UserTurn> = Vec::new();
     let mut cur: Option<UserTurn> = None;
     let mut reply_parts: Vec<String> = Vec::new();
+    let mut reply_blocks: Vec<ReplyBlock> = Vec::new();
 
     let mut cwd = String::new();
     let mut ai_title: Option<String> = None;
@@ -267,7 +336,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
 
         // 工作中排队插话（attachment/queued_command）：算作我的一条发言
         if let Some(qp) = extract_queued_prompt(&obj) {
-            flush(&mut cur, &mut reply_parts, &mut turns);
+            flush(&mut cur, &mut reply_parts, &mut reply_blocks, &mut turns);
             if first_prompt.is_none() {
                 first_prompt = Some(qp.lines().next().unwrap_or("").trim().to_string());
             }
@@ -280,13 +349,14 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
                 ts,
                 reply: String::new(),
                 reply_chars: 0,
+                blocks: Vec::new(),
                 images: Vec::new(),
             });
             continue;
         }
 
         if let Some(ut) = extract_user_text(&obj) {
-            flush(&mut cur, &mut reply_parts, &mut turns);
+            flush(&mut cur, &mut reply_parts, &mut reply_blocks, &mut turns);
             if first_prompt.is_none() {
                 first_prompt = Some(ut.lines().next().unwrap_or("").trim().to_string());
             }
@@ -303,15 +373,20 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
                 ts,
                 reply: String::new(),
                 reply_chars: 0,
+                blocks: Vec::new(),
                 images: Vec::new(),
             });
-        } else if let Some(at) = extract_assistant_text(&obj) {
+        } else if obj.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+            // 收回复文字（reply 用于字数/搜索/fallback）+ 有序块（含纯工具调用事件）
             if cur.is_some() {
-                reply_parts.push(at);
+                if let Some(at) = extract_assistant_text(&obj) {
+                    reply_parts.push(at);
+                }
+                reply_blocks.extend(extract_assistant_blocks(&obj));
             }
         }
     }
-    flush(&mut cur, &mut reply_parts, &mut turns);
+    flush(&mut cur, &mut reply_parts, &mut reply_blocks, &mut turns);
 
     let title = custom_title
         .or(ai_title)
@@ -324,5 +399,56 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
         cwd,
         last_unix,
         turns,
+    }
+}
+
+/// 懒加载：在会话原文里按 tool_use_id 找对应的 tool_result，返回其文本内容。
+/// tool_result 出现在某个 user 行的 message.content 数组里（与 tool_use 通过 id 配对）。
+pub fn find_tool_result(content: &str, tool_use_id: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(obj) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(arr) = obj
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for x in arr {
+            if x.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                continue;
+            }
+            if x.get("tool_use_id").and_then(|v| v.as_str()) != Some(tool_use_id) {
+                continue;
+            }
+            return Some(tool_result_text(x.get("content")));
+        }
+    }
+    None
+}
+
+/// tool_result 的 content 归一成纯文本（字符串 / [{type:text,text}] 数组 / 其它原样 JSON）
+fn tool_result_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|b| {
+                if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    b.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    b.as_str().map(|s| s.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(v) => v.to_string(),
+        None => String::new(),
     }
 }

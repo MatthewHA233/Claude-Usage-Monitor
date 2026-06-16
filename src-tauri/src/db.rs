@@ -83,14 +83,13 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 fn storage_pct_and_total(
-    provider: &str,
+    _provider: &str,
     pct: Option<f64>,
     total_pct: Option<f64>,
 ) -> (Option<f64>, f64) {
+    // [已放行] 历史上这里把 codex total=1000 当旧版误存的 10x 减半回 5x(500)。
+    // 现已支持「手动覆盖档位」(可合法把 codex 设为 10x→total=1000)，故不再强制减半，按上报/覆盖值原样存。
     let total_pct = total_pct.unwrap_or(100.0);
-    if provider == "codex" && (total_pct - 1000.0).abs() < 0.001 {
-        return (pct.map(|value| value * 0.5), 500.0);
-    }
     (pct, total_pct)
 }
 
@@ -238,6 +237,8 @@ impl Database {
         self.add_column_if_missing("filtered_inbox", "session_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("filtered_inbox", "weekly_total_pct", "REAL DEFAULT 100")?;
         self.add_column_if_missing("local_usage_status", "account_alias", "TEXT")?;
+        // 主题白板：待办可挂主题线（nullable，旧库幂等加列）
+        self.add_column_if_missing("session_drafts", "topic_id", "TEXT")?;
         Ok(())
     }
 
@@ -385,7 +386,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, source_id, session_id, session_title, project_name,
-                    done, created_unix, done_unix
+                    done, created_unix, done_unix, topic_id
              FROM session_drafts
              ORDER BY created_unix DESC",
         )?;
@@ -401,6 +402,7 @@ impl Database {
                 done: done_int != 0,
                 created_unix: row.get(7)?,
                 done_unix: row.get(8)?,
+                topic_id: row.get(9)?,
             })
         })?;
         rows.collect()
@@ -411,8 +413,8 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO session_drafts
-             (id, text, source_id, session_id, session_title, project_name, done, created_unix, done_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             (id, text, source_id, session_id, session_title, project_name, done, created_unix, done_unix, topic_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 text = excluded.text,
                 source_id = excluded.source_id,
@@ -421,7 +423,8 @@ impl Database {
                 project_name = excluded.project_name,
                 done = excluded.done,
                 created_unix = excluded.created_unix,
-                done_unix = excluded.done_unix",
+                done_unix = excluded.done_unix,
+                topic_id = excluded.topic_id",
             params![
                 d.id,
                 d.text,
@@ -432,6 +435,7 @@ impl Database {
                 if d.done { 1 } else { 0 },
                 d.created_unix,
                 d.done_unix,
+                d.topic_id,
             ],
         )?;
         Ok(())
@@ -723,46 +727,14 @@ impl Database {
         Ok(())
     }
 
-    /// Codex GPT Pro is a 5x quota. Older builds stored Codex Pro as 10x.
+    /// 旧版曾把 codex Pro 误存 10x 而减半回 5x；现已支持「手动覆盖档位」(可合法设 codex 10x→1000)，
+    /// 故移除 1000→500 减半，仅保留把未缩放(total=100)记录补到 5x(500) 的升档兜底。
     fn normalize_codex_pro_scale(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(
             "
-            UPDATE usage_snapshots
-            SET session_pct = CASE
-                    WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
-                    ELSE session_pct
-                END,
-                session_total_pct = 500
-            WHERE provider = 'codex'
-              AND session_total_pct = 1000;
-
-            UPDATE usage_snapshots
-            SET weekly_pct = CASE
-                    WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
-                    ELSE weekly_pct
-                END,
-                weekly_total_pct = 500
-            WHERE provider = 'codex'
-              AND weekly_total_pct = 1000;
-
-            UPDATE filtered_inbox
-            SET session_pct = CASE
-                    WHEN session_total_pct = 1000 AND session_pct IS NOT NULL THEN session_pct * 0.5
-                    ELSE session_pct
-                END,
-                session_total_pct = 500
-            WHERE provider = 'codex'
-              AND session_total_pct = 1000;
-
-            UPDATE filtered_inbox
-            SET weekly_pct = CASE
-                    WHEN weekly_total_pct = 1000 AND weekly_pct IS NOT NULL THEN weekly_pct * 0.5
-                    ELSE weekly_pct
-                END,
-                weekly_total_pct = 500
-            WHERE provider = 'codex'
-              AND weekly_total_pct = 1000;
+            -- [已放行] 不再把 codex total=1000 减半为 500（现支持「手动覆盖档位」设 codex 10x→1000）。
+            -- 仅保留把未缩放(total=100)记录补到 5x(500) 的升档逻辑（对真 5x 账号兜底，不撤销 10x）。
 
             UPDATE usage_snapshots
             SET session_pct = CASE
