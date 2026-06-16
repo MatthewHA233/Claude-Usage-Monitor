@@ -764,7 +764,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 // ── Daily session stats ───────────────────────────────────
-interface DayStats { date: string; consumed: number; }
+interface DayStats { date: string; consumed: number; total?: number; }
 
 // session_reset_at / weekly_reset_at 整点±1分钟归一：四舍五入到最近整点
 function normalizeToHour(isoStr: string): string {
@@ -885,6 +885,7 @@ function computeDailyWeeklyStats(records: UsageSnapshot[]): {
   }
 
   const dayConsumed = new Map<string, number>();
+  const dayTotal = new Map<string, number>(); // 当天 weekly_total_pct（=100×倍率），用于「满额/天」参考线
   const weeklyResetDates = new Set<string>();
   let prevWeeklyKey: string | null = null;
   let prevWeeklyPct: number | null = null;
@@ -901,6 +902,7 @@ function computeDailyWeeklyStats(records: UsageSnapshot[]): {
       if (prevWeeklyKey != null) weeklyResetDates.add(date);
     }
     dayConsumed.set(date, consumed);
+    dayTotal.set(date, r.weekly_total_pct ?? 100);
     prevWeeklyKey = wKey;
     prevWeeklyPct = wPct;
   }
@@ -916,7 +918,7 @@ function computeDailyWeeklyStats(records: UsageSnapshot[]): {
   const days: DayStats[] = [];
   for (const date of allDates) {
     if (displayDates.has(date)) {
-      days.push({ date, consumed: Math.round((dayConsumed.get(date) ?? 0) * 10) / 10 });
+      days.push({ date, consumed: Math.round((dayConsumed.get(date) ?? 0) * 10) / 10, total: dayTotal.get(date) });
     }
   }
   return { days, weeklyResetDates };
@@ -1362,7 +1364,10 @@ function DailySessionChartSvg({ days, weeklyResetDates, color = "#4a9eff" }: {
   const cH = VH - PAD.top - PAD.bottom;
   const n = days.length;
 
-  const maxVal = Math.max(...days.map(d => d.consumed), 50);
+  // 「满额/天」参考线：该天 weekly_total/7（按各段倍率→阶梯横虚线）。仅周额度图的 days 带 total。
+  const refs = days.map(d => (d.total != null && d.total > 0 ? d.total / 7 : null));
+  const hasRef = refs.some(r => r != null);
+  const maxVal = Math.max(...days.map(d => d.consumed), ...refs.filter((r): r is number => r != null), 50);
   const xOf = (i: number) => PAD.left + (n === 1 ? cW / 2 : (i / (n - 1)) * cW);
   const yOf = (v: number) => PAD.top + cH - (v / maxVal) * cH;
 
@@ -1396,6 +1401,20 @@ function DailySessionChartSvg({ days, weeklyResetDates, color = "#4a9eff" }: {
             <text x={xOf(i) + 3} y={PAD.top + 9} fontSize={8} fill="#f0a500">周重置</text>
           </g>
         ))}
+        {hasRef && days.map((_, i) => {
+          const r = refs[i];
+          if (r == null) return null;
+          const xL = i === 0 ? PAD.left : (xOf(i - 1) + xOf(i)) / 2;
+          const xR = i === n - 1 ? PAD.left + cW : (xOf(i) + xOf(i + 1)) / 2;
+          const y = yOf(r);
+          return <line key={`ref${i}`} x1={xL.toFixed(1)} y1={y.toFixed(1)} x2={xR.toFixed(1)} y2={y.toFixed(1)} stroke="#5fd3e0" strokeWidth={1} strokeDasharray="4,3" opacity={0.75} />;
+        })}
+        {hasRef && (() => {
+          let li = -1;
+          for (let i = n - 1; i >= 0; i--) { if (refs[i] != null) { li = i; break; } }
+          if (li < 0) return null;
+          return <text x={PAD.left + cW} y={yOf(refs[li]!) - 3} textAnchor="end" fontSize={8} fill="#5fd3e0">满额/天 {Math.round(refs[li]!)}%</text>;
+        })()}
         <path d={linePath} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
         {days.map((d, i) => (
           <g key={i}>
