@@ -75,7 +75,7 @@ export default function App() {
   const { analysis, refetch: refetchAnalysis } = useAnalysis();
   const { statuses: localUsageStatuses, refetch: refetchLocalStatuses } = useLocalUsageStatuses(30_000);
   const { statuses: pluginUsageStatuses, refetch: refetchPluginStatuses } = usePluginUsageStatuses(10_000);
-  const { report: tokenReport, loading: tokenLoading, error: tokenError, refetch: refetchTokenReport } = useTokenUsageReport(14, false);
+  const { report: tokenReport, loading: tokenLoading, error: tokenError, refetch: refetchTokenReport } = useTokenUsageReport(400, false);
 
   const refresh = useCallback(async () => {
     await invoke("refresh_local_usage").catch(() => undefined);

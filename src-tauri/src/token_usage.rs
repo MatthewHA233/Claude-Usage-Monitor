@@ -66,7 +66,7 @@ impl Aggregator {
 }
 
 pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
-    let days = since_days.clamp(1, 365);
+    let days = since_days.clamp(1, 3650);
     let today = Local::now().date_naive();
     let since = today - Duration::days(days - 1);
     let until = today;
@@ -76,6 +76,21 @@ pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
     scan_claude(db, &mut stats, since, until);
 
     let mut report = rebuild_daily_cache(db, since, until, &mut stats);
+
+    // 跨机器：拉各远程 claude启动器中继的 token 摘要，按 provider+date 合并进本机报告
+    for remote in token_remotes(db) {
+        match fetch_remote_token_summary(&remote.base_url, days) {
+            Ok(remote_days) => merge_remote_days(&mut report, remote_days, since, until),
+            Err(e) => report
+                .errors
+                .push(format!("远程「{}」token 拉取失败: {}", remote.label, e)),
+        }
+    }
+    report
+        .days
+        .sort_by(|a, b| b.date.cmp(&a.date).then(a.provider.cmp(&b.provider)));
+    report.summary = summary_from_days(&report.days);
+
     report.scanned_files = stats.scanned_files;
     report.parsed_files = stats.parsed_files;
     report.errors.extend(stats.errors.into_iter().take(20));
@@ -83,7 +98,7 @@ pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
 }
 
 pub fn load_cached_report(db: &Database, since_days: i64) -> TokenUsageReport {
-    let days = since_days.clamp(1, 365);
+    let days = since_days.clamp(1, 3650);
     let today = Local::now().date_naive();
     let since = today - Duration::days(days - 1);
     let until = today;
@@ -113,6 +128,134 @@ pub fn load_cached_report(db: &Database, since_days: i64) -> TokenUsageReport {
             parsed_files: 0,
             errors: vec![error.to_string()],
         },
+    }
+}
+
+// ── 跨机器：从远程 claude启动器中继拉 token 摘要并合并进报告 ──
+
+#[derive(Deserialize)]
+struct RemoteTokenSummary {
+    #[serde(default)]
+    days: Vec<RemoteTokenDay>,
+}
+
+#[derive(Deserialize)]
+struct RemoteTokenDay {
+    date: String,
+    provider: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+    #[serde(default)]
+    cache_creation_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+}
+
+/// 已注册的远程会话源（中继地址）；跳过隐式本机源
+fn token_remotes(db: &Database) -> Vec<crate::session_store::SessionSource> {
+    db.get_setting("session_sources")
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Vec<crate::session_store::SessionSource>>(&j).ok())
+        .map(|v| v.into_iter().filter(|s| s.id != "local").collect())
+        .unwrap_or_default()
+}
+
+/// 拉远程中继的 /api/token_summary（局域网，强制不走系统代理）
+fn fetch_remote_token_summary(
+    base_url: &str,
+    since_days: i64,
+) -> Result<Vec<RemoteTokenDay>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/api/token_summary?since_days={since_days}");
+    let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let parsed: RemoteTokenSummary = resp.json().map_err(|e| e.to_string())?;
+    Ok(parsed.days)
+}
+
+/// 把远程 token 行合并进报告：同 provider+date 累加（model 也并入对应明细）
+fn merge_remote_days(
+    report: &mut TokenUsageReport,
+    remote: Vec<RemoteTokenDay>,
+    since: NaiveDate,
+    until: NaiveDate,
+) {
+    for rd in remote {
+        if !day_in_range(&rd.date, since, until) {
+            continue;
+        }
+        let total =
+            rd.input_tokens + rd.cache_read_tokens + rd.cache_creation_tokens + rd.output_tokens;
+        if total <= 0 {
+            continue;
+        }
+        let model = if rd.model.trim().is_empty() {
+            "(unknown)".to_string()
+        } else {
+            rd.model.clone()
+        };
+        match report
+            .days
+            .iter_mut()
+            .find(|d| d.provider == rd.provider && d.date == rd.date)
+        {
+            Some(d) => {
+                d.input_tokens += rd.input_tokens;
+                d.cache_read_tokens += rd.cache_read_tokens;
+                d.cache_creation_tokens += rd.cache_creation_tokens;
+                d.output_tokens += rd.output_tokens;
+                d.total_tokens += total;
+                match d.models.iter_mut().find(|m| m.model == model) {
+                    Some(m) => {
+                        m.input_tokens += rd.input_tokens;
+                        m.cache_read_tokens += rd.cache_read_tokens;
+                        m.cache_creation_tokens += rd.cache_creation_tokens;
+                        m.output_tokens += rd.output_tokens;
+                        m.total_tokens += total;
+                    }
+                    None => d.models.push(TokenUsageModelBreakdown {
+                        model,
+                        input_tokens: rd.input_tokens,
+                        cache_read_tokens: rd.cache_read_tokens,
+                        cache_creation_tokens: rd.cache_creation_tokens,
+                        output_tokens: rd.output_tokens,
+                        total_tokens: total,
+                        cost_usd: None,
+                    }),
+                }
+            }
+            None => report.days.push(TokenUsageDay {
+                date: rd.date.clone(),
+                provider: rd.provider.clone(),
+                input_tokens: rd.input_tokens,
+                cache_read_tokens: rd.cache_read_tokens,
+                cache_creation_tokens: rd.cache_creation_tokens,
+                output_tokens: rd.output_tokens,
+                total_tokens: total,
+                cost_usd: None,
+                models: vec![TokenUsageModelBreakdown {
+                    model,
+                    input_tokens: rd.input_tokens,
+                    cache_read_tokens: rd.cache_read_tokens,
+                    cache_creation_tokens: rd.cache_creation_tokens,
+                    output_tokens: rd.output_tokens,
+                    total_tokens: total,
+                    cost_usd: None,
+                }],
+            }),
+        }
     }
 }
 

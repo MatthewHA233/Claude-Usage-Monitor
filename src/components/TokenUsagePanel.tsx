@@ -1,4 +1,5 @@
-import { RefreshCw } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import type { TokenUsageDay, TokenUsageReport } from "../types";
 
 interface Props {
@@ -22,8 +23,62 @@ const compact = (value: number) => {
 
 const providerColor = (provider: string) => provider === "codex" ? "#4a9eff" : "#cc785c";
 
+const monthKey = (date: string) => date.slice(0, 7); // YYYY-MM
+const fmtMonth = (m: string) => {
+  const [y, mo] = m.split("-");
+  return `${y} 年 ${parseInt(mo, 10)} 月`;
+};
+
+const navBtnStyle = (disabled: boolean): React.CSSProperties => ({
+  width: 28,
+  height: 28,
+  borderRadius: 6,
+  border: "1px solid #3a3a3a",
+  background: "#202020",
+  color: disabled ? "#555" : "#d1d5db",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: disabled ? "default" : "pointer",
+  opacity: disabled ? 0.5 : 1,
+});
+
 export default function TokenUsagePanel({ report, loading, error, onRefresh }: Props) {
-  const rows = report?.days ?? [];
+  const allDays = report?.days ?? [];
+
+  // 全部有数据的月份（YYYY-MM），新→旧
+  const months = useMemo(
+    () => [...new Set(allDays.map((d) => monthKey(d.date)))].sort((a, b) => b.localeCompare(a)),
+    [allDays],
+  );
+  const [picked, setPicked] = useState<string | null>(null);
+  const month = picked && months.includes(picked) ? picked : months[0] ?? null;
+
+  // 选中月的行
+  const rows = useMemo(
+    () => (month ? allDays.filter((d) => monthKey(d.date) === month) : []),
+    [allDays, month],
+  );
+
+  // 选中月的汇总
+  const summary = useMemo(
+    () =>
+      rows.reduce(
+        (acc, r) => {
+          acc.input += r.input_tokens;
+          acc.cache += r.cache_read_tokens + r.cache_creation_tokens;
+          acc.output += r.output_tokens;
+          acc.total += r.total_tokens;
+          return acc;
+        },
+        { input: 0, cache: 0, output: 0, total: 0 },
+      ),
+    [rows],
+  );
+
+  const idx = month ? months.indexOf(month) : -1;
+  const hasPrev = idx >= 0 && idx < months.length - 1; // 更早的月
+  const hasNext = idx > 0; // 更晚的月
 
   return (
     <section>
@@ -31,12 +86,14 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
         <div>
           <div className="text-base font-semibold" style={{ color: "#f3f4f6" }}>Token 用量</div>
           <div className="text-xs" style={{ color: "#858585" }}>
-            {report ? `${report.since} 至 ${report.until} · 检查 ${report.scanned_files} 个日志 · 解析 ${report.parsed_files} 个变更` : "点击刷新后增量扫描本机 Codex / Claude Code 日志"}
+            {report
+              ? `本机 + 远程汇总 · 检查 ${report.scanned_files} 个日志 · 解析 ${report.parsed_files} 个变更`
+              : "点击刷新后增量扫描本机 Codex / Claude Code 日志"}
           </div>
         </div>
         <button
           onClick={onRefresh}
-          title="刷新 token 用量"
+          title="刷新 token 用量（扫本机 + 拉远程）"
           className="inline-flex items-center justify-center"
           style={{
             width: 30,
@@ -51,15 +108,40 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
         </button>
       </div>
 
+      {/* 月份导航：默认最新月，可翻历史月 */}
+      {month && (
+        <div className="flex items-center justify-center gap-3 mb-3">
+          <button
+            onClick={() => hasPrev && setPicked(months[idx + 1])}
+            disabled={!hasPrev}
+            title="上一月"
+            style={navBtnStyle(!hasPrev)}
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span style={{ color: "#e5e7eb", fontSize: 13, fontWeight: 600, minWidth: 110, textAlign: "center" }}>
+            {fmtMonth(month)}
+          </span>
+          <button
+            onClick={() => hasNext && setPicked(months[idx - 1])}
+            disabled={!hasNext}
+            title="下一月"
+            style={navBtnStyle(!hasNext)}
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
+
       {error && <div className="text-xs mb-2" style={{ color: "#f87171" }}>{error}</div>}
 
-      {report && (
+      {report && month && (
         <>
           <div className="grid grid-cols-4 gap-2 mb-3">
-            <Metric label="Input" value={compact(report.summary.input_tokens)} />
-            <Metric label="Cache" value={compact(report.summary.cache_read_tokens + report.summary.cache_creation_tokens)} />
-            <Metric label="Output" value={compact(report.summary.output_tokens)} />
-            <Metric label="Total" value={compact(report.summary.total_tokens)} />
+            <Metric label="Input" value={compact(summary.input)} />
+            <Metric label="Cache" value={compact(summary.cache)} />
+            <Metric label="Output" value={compact(summary.output)} />
+            <Metric label="Total" value={compact(summary.total)} />
           </div>
           <ProviderSummary rows={rows} />
           <TokenUsageChart rows={rows} />
@@ -83,12 +165,14 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-3 py-5 text-center" style={{ color: "#777" }}>
-                  {loading ? "扫描中..." : "尚未扫描 token 日志"}
+                  {loading ? "扫描中..." : month ? "本月无数据" : "尚未扫描 token 日志"}
                 </td>
               </tr>
-            ) : rows.map((row) => (
-              <TokenRow key={`${row.provider}:${row.date}`} row={row} />
-            ))}
+            ) : (
+              [...rows]
+                .sort((a, b) => b.date.localeCompare(a.date) || a.provider.localeCompare(b.provider))
+                .map((row) => <TokenRow key={`${row.provider}:${row.date}`} row={row} />)
+            )}
           </tbody>
         </table>
       </div>
@@ -134,7 +218,7 @@ function ProviderSummary({ rows }: { rows: TokenUsageDay[] }) {
 }
 
 function TokenUsageChart({ rows }: { rows: TokenUsageDay[] }) {
-  const dates = [...new Set(rows.map((row) => row.date))].sort((a, b) => b.localeCompare(a));
+  const dates = [...new Set(rows.map((row) => row.date))].sort((a, b) => a.localeCompare(b));
   const providers = ["claude_code", "codex"];
   const byDate = new Map<string, Record<string, number>>();
   for (const date of dates) byDate.set(date, {});
@@ -191,7 +275,7 @@ function TokenUsageChart({ rows }: { rows: TokenUsageDay[] }) {
                   </rect>
                 );
               })}
-              <text x={x + barWidth / 2} y={190} fontSize={10} fill="#9ca3af" textAnchor="middle">{date.slice(5)}</text>
+              <text x={x + barWidth / 2} y={190} fontSize={10} fill="#9ca3af" textAnchor="middle">{date.slice(8)}</text>
             </g>
           );
         })}
