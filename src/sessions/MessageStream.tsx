@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Bot,
   ChevronDown,
@@ -158,7 +158,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   );
 }
 
-function StreamCard({ m, shade, sessionTitle }: { m: StreamMessage; shade: boolean; sessionTitle: string }) {
+const StreamCard = memo(function StreamCard({ m, shade, sessionTitle }: { m: StreamMessage; shade: boolean; sessionTitle: string }) {
   const [open, setOpen] = useState(false);
   const blocks = m.blocks ?? [];
   const toolCount = blocks.reduce((n, b) => n + (b.type === "tool" ? 1 : 0), 0);
@@ -168,7 +168,12 @@ function StreamCard({ m, shade, sessionTitle }: { m: StreamMessage; shade: boole
   const bg = shade ? "#25252c" : "#191919";
   const { ss } = subSecond(m.ts); // 秒（时:分之外更细一档）
   return (
-    <div className="rounded-xl px-4 py-3 flex gap-3" style={{ background: bg, border: "1px solid #2a2a2a" }}>
+    // content-visibility:auto → 视口外卡片跳过布局/绘制（长列表性能关键）；
+    // contain-intrinsic-size 给未渲染时的占位高度，auto 让浏览器记住渲染过的真实高度、避免滚动条跳动
+    <div
+      className="rounded-xl px-4 py-3 flex gap-3"
+      style={{ background: bg, border: "1px solid #2a2a2a", contentVisibility: "auto", containIntrinsicSize: "auto 88px" }}
+    >
       <div className="shrink-0 font-mono" style={{ width: 46, paddingTop: 1 }}>
         <div style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, letterSpacing: "0.3px" }}>{clock(m.ts_unix)}</div>
         {ss && (
@@ -214,7 +219,7 @@ function StreamCard({ m, shade, sessionTitle }: { m: StreamMessage; shade: boole
       </div>
     </div>
   );
-}
+});
 
 // 超过该字数的发言（常是大段粘贴）默认折叠，底部渐变 + 大范围可点的展开/收起
 const COLLAPSE_THRESHOLD = 1000;

@@ -27,7 +27,7 @@ import type {
   DailyStat,
 } from "./types";
 import { shiftYmd, todayYmd, dayRange } from "./format";
-import { assignLanes } from "./lanes";
+import { assignLanesPacked } from "./lanes";
 
 const POLL_INTERVAL_MS = 15_000;
 
@@ -133,7 +133,7 @@ export default function SessionsApp() {
   );
 
   // 轨道分配（时间轴 + 卡片共用一套，保证轨道严格同序同列）
-  const lanes = useMemo(() => assignLanes(rows), [rows]);
+  const lanes = useMemo(() => assignLanesPacked(rows), [rows]);
 
   // 预备发言「归属」下拉：当天会话作为可选项
   const sessionOptions = useMemo<SessionOption[]>(
