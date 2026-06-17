@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import type { StreamMessage, ReplyBlock } from "./types";
 import { clock, nfmt, bucketOf, subSecond, secInBucket } from "./format";
+import { laneKey } from "./lanes";
 import { fetchToolResult } from "./api";
 import MessageText from "./MessageText";
 import Markdown from "./Markdown";
@@ -33,10 +34,12 @@ interface Props {
   messages: StreamMessage[];
   loading: boolean;
   sessionTitles: Record<string, string>;
+  laneOf: Record<string, number>; // laneKey → 列；与时间轴共用
+  laneCount: number;
 }
 
 /** flomo 风格卡片流：当天我的发言，时间正序（新消息在底部）、滚动默认贴底，每条一张卡片 */
-export default function MessageStream({ messages, loading, sessionTitles }: Props) {
+export default function MessageStream({ messages, loading, sessionTitles, laneOf, laneCount }: Props) {
   // 时间正序：新消息排在底部（messages 传入为倒序，这里翻正）
   const ordered = useMemo(() => [...messages].reverse(), [messages]);
   // 滚动贴底：仅在「切换数据集(切天/筛选, 首条变了)」或「用户本就停在底部」时贴底，
@@ -69,50 +72,6 @@ export default function MessageStream({ messages, loading, sessionTitles }: Prop
       else gs.push({ bucket: b, hour: Math.floor(b / 6), cards: [m] });
     }
     return gs;
-  }, [ordered]);
-
-  // 会话 → 轨道(列)：每会话固定一轨；≤3 个会话按"时间跨度降序"左→右排
-  // (最左=当天跨度最久=主线, 越往右跨度越短越碎片)；>3 个才占轨复用
-  // (时间不重叠的会话共用一轨, git-lane 式)
-  const { laneOf, laneCount } = useMemo(() => {
-    const sess = new Map<string, { start: number; end: number }>();
-    for (const m of ordered) {
-      const t = m.ts_unix ?? 0;
-      const s = sess.get(m.session_id);
-      if (s) {
-        s.start = Math.min(s.start, t);
-        s.end = Math.max(s.end, t);
-      } else {
-        sess.set(m.session_id, { start: t, end: t });
-      }
-    }
-    const arr = [...sess.entries()].map(([sid, v]) => ({
-      sid,
-      start: v.start,
-      end: v.end,
-      span: v.end - v.start,
-    }));
-    arr.sort((a, b) => b.span - a.span || a.start - b.start); // 跨度降序：左=久, 右=碎
-    const lane: Record<string, number> = {};
-    if (arr.length <= 3) {
-      arr.forEach((s, i) => {
-        lane[s.sid] = i;
-      });
-      return { laneOf: lane, laneCount: Math.max(1, arr.length) };
-    }
-    // >3 个会话：占轨复用——贪心放进最左一条"已空闲(end ≤ 本会话 start)"的轨道
-    const laneEnd: number[] = [];
-    for (const s of arr) {
-      let placed = laneEnd.findIndex((end) => end <= s.start);
-      if (placed === -1) {
-        laneEnd.push(s.end);
-        placed = laneEnd.length - 1;
-      } else {
-        laneEnd[placed] = s.end;
-      }
-      lane[s.sid] = placed;
-    }
-    return { laneOf: lane, laneCount: Math.max(1, laneEnd.length) };
   }, [ordered]);
 
   if (loading && messages.length === 0) {
@@ -177,7 +136,7 @@ export default function MessageStream({ messages, loading, sessionTitles }: Prop
                   return (
                     <div className="flex items-start" style={{ gap: 12 }}>
                       {Array.from({ length: laneCount }, (_, lane) => {
-                        const laneCards = g.cards.filter((m) => (laneOf[m.session_id] ?? 0) === lane);
+                        const laneCards = g.cards.filter((m) => (laneOf[laneKey(m.source_id, m.session_id)] ?? 0) === lane);
                         const top = laneCards.length
                           ? (secInBucket(laneCards[0].ts_unix) - baseSec) * 0.18
                           : 0;

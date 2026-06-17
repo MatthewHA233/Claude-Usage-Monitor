@@ -18,6 +18,8 @@ export interface MyMessage {
   source_id: string;
   project_name: string;
   project_path: string;
+  project_seq: number | null; // 项目序号（非 history；缺失 null）
+  session_seq: number | null; // 项目内会话序号
   ts: string;
   ts_unix: number | null;
   local_date: string;
@@ -69,6 +71,8 @@ export interface TimelineRow {
   title: string;
   project_name: string;
   project_path: string;
+  project_seq: number | null; // 项目序号（非 history；缺失 null）
+  session_seq: number | null; // 项目内会话序号
   first_unix: number | null;
   last_unix: number | null;
   count: number;

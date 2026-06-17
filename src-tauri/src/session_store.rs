@@ -136,12 +136,37 @@ CREATE INDEX IF NOT EXISTS idx_msg_srcsess ON messages(source, session_id);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 ";
 
+// 给非 history 会话分配持久化编号：项目(source×project_path)按首发时间→project_seq，
+// 项目内会话按首发→session_seq。确定性、稳定，物化后重算。
+const RENUMBER_SQL: &str = "
+WITH base AS (
+  SELECT s.source AS src, s.session_id AS sid, COALESCE(s.project_path,'') AS ppath,
+         (SELECT MIN(m.ts_unix) FROM messages m WHERE m.source = s.source AND m.session_id = s.session_id) AS fu
+  FROM sessions s WHERE s.source <> 'history'
+),
+b2 AS (
+  SELECT src, sid, ppath, fu, MIN(fu) OVER (PARTITION BY src, ppath) AS pf
+  FROM base WHERE fu IS NOT NULL
+),
+ranked AS (
+  SELECT src, sid,
+    DENSE_RANK() OVER (ORDER BY pf, src, ppath) AS pseq,
+    ROW_NUMBER() OVER (PARTITION BY src, ppath ORDER BY fu, sid) AS sseq
+  FROM b2
+)
+UPDATE sessions SET project_seq = ranked.pseq, session_seq = ranked.sseq
+FROM ranked WHERE sessions.source = ranked.src AND sessions.session_id = ranked.sid;
+";
+
 #[derive(Serialize)]
 pub struct MyMessage {
     pub session_id: String,
     pub source_id: String,
     pub project_name: String,
     pub project_path: String,
+    /// 持久化编号：项目序号 / 项目内会话序号（非 history；缺失为 None）
+    pub project_seq: Option<i64>,
+    pub session_seq: Option<i64>,
     pub ts: String,
     pub ts_unix: Option<i64>,
     pub local_date: String,
@@ -167,6 +192,9 @@ pub struct TimelineRow {
     pub title: String,
     pub project_name: String,
     pub project_path: String,
+    /// 持久化编号：项目序号 / 项目内会话序号（非 history；缺失为 None）
+    pub project_seq: Option<i64>,
+    pub session_seq: Option<i64>,
     pub first_unix: Option<i64>,
     pub last_unix: Option<i64>,
     pub count: i64,
@@ -313,6 +341,8 @@ fn map_my_message(row: &rusqlite::Row) -> Result<MyMessage> {
         source_id: row.get(1)?,
         project_name: row.get(2)?,
         project_path: row.get(3)?,
+        project_seq: row.get(13)?,
+        session_seq: row.get(14)?,
         ts: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         ts_unix: row.get(5)?,
         local_date: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "未知".into()),
@@ -336,6 +366,9 @@ impl SessionStore {
         conn.execute_batch(SCHEMA)?;
         // 旧库迁移：补 blocks 列（已存在则忽略 duplicate column 错误）
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN blocks TEXT", []);
+        // 会话编号列：项目序号 / 项目内会话序号（renumber 填充）
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project_seq INTEGER", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN session_seq INTEGER", []);
         // 解析器升级 → 清空 files 让全部会话重新解析（回填 blocks/工具调用）
         let stale = get_meta(&conn, "parse_version").ok().flatten().as_deref() != Some(PARSE_VERSION);
         if stale {
@@ -360,7 +393,14 @@ impl SessionStore {
             // 单个远程失败（离线/超时）不影响其余源与本机
             let _ = self.sync_remote(&src.id, &src.base_url);
         }
+        let _ = self.renumber(); // 物化完成后重算会话编号
         self.syncing.store(false, Ordering::SeqCst);
+    }
+
+    /// 重算所有非 history 会话的持久化编号（项目序号 / 项目内会话序号）
+    fn renumber(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(RENUMBER_SQL)
     }
 
     /// 后台循环用：读已保存远程源后做一次完整同步
@@ -722,7 +762,7 @@ impl SessionStore {
 
         let base = "SELECT m.session_id, m.source, COALESCE(s.project_name,''), \
              COALESCE(s.project_path,''), m.ts, m.ts_unix, m.local_date, m.text, m.chars, \
-             m.reply, m.reply_chars, m.images, m.blocks FROM messages m \
+             m.reply, m.reply_chars, m.images, m.blocks, s.project_seq, s.session_seq FROM messages m \
              LEFT JOIN sessions s ON s.source=m.source AND s.session_id=m.session_id";
         let sql =
             format!("{base} {where_sql} ORDER BY m.ts_unix DESC, m.id DESC LIMIT ? OFFSET ?");
@@ -742,12 +782,13 @@ impl SessionStore {
     pub fn timeline(&self, date: &str, source: Option<String>) -> Result<Vec<TimelineRow>> {
         let conn = self.conn.lock().unwrap();
         let base = "SELECT m.session_id, m.source, COALESCE(s.title,''), \
-             COALESCE(s.project_name,''), COALESCE(s.project_path,''), m.ts_unix \
+             COALESCE(s.project_name,''), COALESCE(s.project_path,''), m.ts_unix, \
+             s.project_seq, s.session_seq \
              FROM messages m LEFT JOIN sessions s ON s.source=m.source AND s.session_id=m.session_id \
              WHERE m.local_date=?1 AND m.ts_unix IS NOT NULL";
 
-        // (session_id, source, title, project_name, project_path, ts_unix)
-        let collect = |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<(String, String, String, String, String, i64)>> {
+        // (session_id, source, title, project_name, project_path, ts_unix, project_seq, session_seq)
+        let collect = |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<(String, String, String, String, String, i64, Option<i64>, Option<i64>)>> {
             let rows = stmt.query_map(p, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -756,12 +797,14 @@ impl SessionStore {
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
                 ))
             })?;
             rows.collect()
         };
 
-        let raw: Vec<(String, String, String, String, String, i64)> = match &source {
+        let raw: Vec<(String, String, String, String, String, i64, Option<i64>, Option<i64>)> = match &source {
             Some(s) => {
                 let sql = format!("{base} AND m.source=?2 ORDER BY m.ts_unix");
                 let mut stmt = conn.prepare(&sql)?;
@@ -781,7 +824,7 @@ impl SessionStore {
         let mut buckets: std::collections::HashMap<(String, String), std::collections::HashMap<i64, i64>> =
             std::collections::HashMap::new();
 
-        for (sid, src, title, pname, ppath, ts_unix) in raw {
+        for (sid, src, title, pname, ppath, ts_unix, pseq, sseq) in raw {
             let key = (src.clone(), sid.clone());
             let row = map.entry(key.clone()).or_insert_with(|| {
                 order.push(key.clone());
@@ -795,6 +838,8 @@ impl SessionStore {
                     },
                     project_name: pname.clone(),
                     project_path: ppath.clone(),
+                    project_seq: pseq,
+                    session_seq: sseq,
                     first_unix: Some(ts_unix),
                     last_unix: Some(ts_unix),
                     count: 0,

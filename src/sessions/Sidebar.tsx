@@ -49,11 +49,7 @@ export default function Sidebar({
   syncing,
 }: Props) {
   return (
-    <div
-      className="shrink-0 flex flex-col h-full overflow-y-auto"
-      style={{ width: 300, background: "#1b1b1b", borderRight: "1px solid #2a2a2a" }}
-      data-tauri-drag-region
-    >
+    <div className="shrink-0 flex flex-col" data-tauri-drag-region>
       {/* 标题 + 操作 */}
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <div className="flex items-center gap-2">
