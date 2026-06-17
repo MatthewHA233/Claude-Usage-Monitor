@@ -38,7 +38,6 @@ export default function SessionsApp() {
   const [syncing, setSyncing] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [timelineCollapsed, setTimelineCollapsed] = useState(false);
 
   const [stream, setStream] = useState<StreamMessage[]>([]);
   const [rows, setRows] = useState<TimelineRowWithSource[]>([]);
@@ -237,8 +236,6 @@ export default function SessionsApp() {
               laneOf={lanes.laneOf}
               laneCount={lanes.laneCount}
               labelsByLane={lanes.labelsByLane}
-              collapsed={timelineCollapsed}
-              onToggleCollapse={() => setTimelineCollapsed((v) => !v)}
             />
           </div>
         </div>
