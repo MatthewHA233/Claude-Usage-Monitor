@@ -721,11 +721,19 @@ function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: nu
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   };
   const now = new Date();
+  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const todays = valid.filter(r => ld(r.collected_at) === today);
   const startPct = Math.max(0, todays.length > 0 ? todays[0].weekly_pct! : valid[valid.length - 1].weekly_pct!);
-  // 每天应消耗 = 今天开头剩余额度 ÷ 距重置剩余天数（精确小数）；天数无效退回 7 天兜底
-  const days = remainingDays != null && remainingDays > 0 ? remainingDays : 7;
+  // 每天应消耗 = 今天开头剩余额度 ÷ 距重置剩余天数。
+  // 关键：剩余天数按「今天零点 → 周重置时刻」算（一整天内恒定），不能用实时递减的剩余小时——
+  // 否则 days 在一天里不断变小、daily 变大，目标线会持续右移（本次修复点）。remainingDays 仅作兜底。
+  const resetIso = todays.length > 0 ? todays[todays.length - 1].weekly_reset_at : valid[valid.length - 1].weekly_reset_at;
+  let days = remainingDays != null && remainingDays > 0 ? remainingDays : 7;
+  if (resetIso) {
+    const d = (new Date(resetIso).getTime() - todayMidnight.getTime()) / 86_400_000;
+    if (d > 0) days = d;
+  }
   const daily = Math.max(0, (total - startPct) / days);
   // 权重默认 1（今天整段）；仅「今天发生了周重置」是部分天，才按今天已过比例缩减
   const normHour = (iso?: string | null) => (iso ? Math.round(new Date(iso).getTime() / 3_600_000) : null);
@@ -738,7 +746,6 @@ function computeWeeklyPaceTarget(records: UsageSnapshot[] | undefined, total: nu
   }
   let weight = 1;
   if (todayHadReset) {
-    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     weight = Math.min(1, Math.max(0, (now.getTime() - todayMidnight.getTime()) / 86_400_000));
   }
   // 终点超出满额则 cap 到 total（落在 100% 进度处）
