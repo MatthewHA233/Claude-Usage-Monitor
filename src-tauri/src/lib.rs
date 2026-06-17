@@ -88,6 +88,7 @@ pub fn run() {
             commands::inbox_delete,
             commands::get_token_usage_report,
             commands::get_cached_token_usage_report,
+            commands::token_purge_source,
             commands::refresh_local_usage,
             commands::get_proxy_settings,
             commands::set_proxy_settings,

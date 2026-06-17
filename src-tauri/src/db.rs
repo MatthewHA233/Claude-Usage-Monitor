@@ -175,6 +175,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_token_usage_files_provider
                 ON token_usage_files(provider);
             CREATE TABLE IF NOT EXISTS token_usage_days (
+                source        TEXT    NOT NULL DEFAULT '本机',
                 provider      TEXT    NOT NULL,
                 date          TEXT    NOT NULL,
                 input_tokens  INTEGER NOT NULL DEFAULT 0,
@@ -185,7 +186,7 @@ impl Database {
                 cost_usd      REAL,
                 models_json   TEXT    NOT NULL,
                 updated_at    TEXT    NOT NULL,
-                PRIMARY KEY (provider, date)
+                PRIMARY KEY (source, provider, date)
             );
             CREATE INDEX IF NOT EXISTS idx_token_usage_days_date
                 ON token_usage_days(date DESC);
@@ -239,6 +240,51 @@ impl Database {
         self.add_column_if_missing("local_usage_status", "account_alias", "TEXT")?;
         // 主题白板：待办可挂主题线（nullable，旧库幂等加列）
         self.add_column_if_missing("session_drafts", "topic_id", "TEXT")?;
+        // 跨机器 token：token_usage_days 加 source 列、主键改 (source, provider, date)（旧库重建表）
+        self.migrate_token_usage_days_source()?;
+        Ok(())
+    }
+
+    /// 旧 token_usage_days（主键 provider,date、无 source 列）→ 新结构（带 source、主键 source,provider,date）。
+    /// 旧数据全部标记为本机；新库已是新结构则跳过。改主键 SQLite 无法 ALTER，只能重建表。
+    fn migrate_token_usage_days_source(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(token_usage_days)")?;
+        let cols: HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        if cols.contains("source") || !cols.contains("provider") {
+            return Ok(()); // 已是新结构 / 表尚未建立 → 无需迁移
+        }
+        conn.execute_batch(
+            "
+            CREATE TABLE token_usage_days_new (
+                source        TEXT    NOT NULL DEFAULT '本机',
+                provider      TEXT    NOT NULL,
+                date          TEXT    NOT NULL,
+                input_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens  INTEGER NOT NULL DEFAULT 0,
+                cost_usd      REAL,
+                models_json   TEXT    NOT NULL,
+                updated_at    TEXT    NOT NULL,
+                PRIMARY KEY (source, provider, date)
+            );
+            INSERT INTO token_usage_days_new
+                (source, provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+                 output_tokens, total_tokens, cost_usd, models_json, updated_at)
+                SELECT '本机', provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+                       output_tokens, total_tokens, cost_usd, models_json, updated_at
+                FROM token_usage_days;
+            DROP TABLE token_usage_days;
+            ALTER TABLE token_usage_days_new RENAME TO token_usage_days;
+            CREATE INDEX IF NOT EXISTS idx_token_usage_days_date ON token_usage_days(date DESC);
+            ",
+        )?;
         Ok(())
     }
 
@@ -579,10 +625,10 @@ impl Database {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         conn.execute(
             "INSERT INTO token_usage_days
-             (provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+             (source, provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
               output_tokens, total_tokens, cost_usd, models_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(provider, date) DO UPDATE SET
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(source, provider, date) DO UPDATE SET
                 input_tokens = excluded.input_tokens,
                 cache_read_tokens = excluded.cache_read_tokens,
                 cache_creation_tokens = excluded.cache_creation_tokens,
@@ -592,6 +638,7 @@ impl Database {
                 models_json = excluded.models_json,
                 updated_at = excluded.updated_at",
             params![
+                day.source,
                 day.provider,
                 day.date,
                 day.input_tokens,
@@ -607,37 +654,64 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_token_usage_days_between(&self, since: &str, until: &str) -> Result<()> {
+    /// 删某来源在 [since, until] 内的全部 token 日行。配合 rebuild/远程同步做窗口内全量覆盖。
+    pub fn delete_token_usage_days_for_source(&self, source: &str, since: &str, until: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM token_usage_days WHERE date >= ?1 AND date <= ?2",
-            params![since, until],
+            "DELETE FROM token_usage_days WHERE source = ?1 AND date >= ?2 AND date <= ?3",
+            params![source, since, until],
         )?;
+        Ok(())
+    }
+
+    /// 删某来源的全部 token 缓存（删除该机器源时调用，source 为其稳定 id）。
+    pub fn delete_all_token_usage_for_source(&self, source: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM token_usage_days WHERE source = ?1",
+            params![source],
+        )?;
+        Ok(())
+    }
+
+    /// 清理孤儿远程 token 缓存：保留本机 + valid_ids 里仍存在的源，删除其余
+    /// （旧版用 label 当 key 的残留行、已删除来源的遗留行）。
+    pub fn retain_token_sources(&self, valid_ids: &[String]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let placeholders = if valid_ids.is_empty() {
+            "''".to_string()
+        } else {
+            valid_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+        };
+        let sql = format!(
+            "DELETE FROM token_usage_days WHERE source != '本机' AND source NOT IN ({placeholders})"
+        );
+        conn.execute(&sql, rusqlite::params_from_iter(valid_ids.iter()))?;
         Ok(())
     }
 
     pub fn token_usage_days(&self, since: &str, until: &str) -> Result<Vec<TokenUsageDay>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
+            "SELECT source, provider, date, input_tokens, cache_read_tokens, cache_creation_tokens,
                     output_tokens, total_tokens, cost_usd, models_json
              FROM token_usage_days
              WHERE date >= ?1 AND date <= ?2
-             ORDER BY date DESC, provider",
+             ORDER BY date DESC, source, provider",
         )?;
         let rows = stmt.query_map(params![since, until], |row| {
-            let models_json: String = row.get(8)?;
+            let models_json: String = row.get(9)?;
             let models = serde_json::from_str(&models_json).unwrap_or_default();
             Ok(TokenUsageDay {
-                source: "本机".to_string(),
-                provider: row.get(0)?,
-                date: row.get(1)?,
-                input_tokens: row.get(2)?,
-                cache_read_tokens: row.get(3)?,
-                cache_creation_tokens: row.get(4)?,
-                output_tokens: row.get(5)?,
-                total_tokens: row.get(6)?,
-                cost_usd: row.get(7)?,
+                source: row.get(0)?,
+                provider: row.get(1)?,
+                date: row.get(2)?,
+                input_tokens: row.get(3)?,
+                cache_read_tokens: row.get(4)?,
+                cache_creation_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                total_tokens: row.get(7)?,
+                cost_usd: row.get(8)?,
                 models,
             })
         })?;

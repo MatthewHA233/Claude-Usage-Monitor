@@ -12,6 +12,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 const MAX_FILES_PER_PROVIDER: usize = 2_000;
+/// 远程 token 同步窗口：覆盖「所有月份」的历史，初始化即全量缓存到本地，
+/// 之后每次刷新都对该来源做窗口内全量覆盖（中继离线则保留上次落库的旧缓存）。
+const REMOTE_SYNC_DAYS: i64 = 3650;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct TokenTotals {
@@ -75,30 +78,47 @@ pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
     scan_codex(db, &mut stats, since, until);
     scan_claude(db, &mut stats, since, until);
 
-    let mut report = rebuild_daily_cache(db, since, until, &mut stats);
+    // 本机：从文件缓存重算近 N 天并落库（source='本机'）。返回值不用，统一在末尾从 db 读。
+    rebuild_daily_cache(db, since, until, &mut stats);
 
-    // 跨机器：拉各远程 claude启动器中继的 token 摘要，作为独立机器行并入(不与本机累加)
-    for remote in token_remotes(db) {
-        match fetch_remote_token_summary(&remote.base_url, days) {
+    // 跨机器：拉各远程中继 token 摘要，全量同步「所有月份」到本地缓存（按 source 落库，不与本机累加）。
+    // 中继离线/失败 → 只记错误、保留上次落库的旧缓存，使离线时仍能展示该机器历史。
+    let mut remote_errors: Vec<String> = Vec::new();
+    let remote_since = today - Duration::days(REMOTE_SYNC_DAYS - 1);
+    let remotes = token_remotes(db);
+    for remote in &remotes {
+        match fetch_remote_token_summary(&remote.base_url, REMOTE_SYNC_DAYS) {
             Ok(remote_days) => {
-                append_remote_days(&mut report, &remote.label, remote_days, since, until)
+                // 持久化 key 用稳定的 source id（与会话数据对齐），不用可改名/可重名的 label
+                let token_days = aggregate_remote_days(&remote.id, remote_days, remote_since, until);
+                // 窗口内全量覆盖该来源：先删后写
+                if let Err(e) = db.delete_token_usage_days_for_source(
+                    &remote.id,
+                    &remote_since.to_string(),
+                    &until.to_string(),
+                ) {
+                    remote_errors.push(e.to_string());
+                }
+                for day in &token_days {
+                    if let Err(e) = db.upsert_token_usage_day(day) {
+                        remote_errors.push(e.to_string());
+                    }
+                }
             }
-            Err(e) => report
-                .errors
-                .push(format!("远程「{}」token 拉取失败: {}", remote.label, e)),
+            Err(e) => remote_errors.push(format!("远程「{}」token 拉取失败: {}", remote.label, e)),
         }
     }
-    report.days.sort_by(|a, b| {
-        b.date
-            .cmp(&a.date)
-            .then(a.source.cmp(&b.source))
-            .then(a.provider.cmp(&b.provider))
-    });
-    report.summary = summary_from_days(&report.days);
 
+    // 清理孤儿：旧版用 label 当 key 的残留行、已删除来源的遗留行（保留本机 + 现存源 id）
+    let valid_ids: Vec<String> = remotes.iter().map(|s| s.id.clone()).collect();
+    let _ = db.retain_token_sources(&valid_ids);
+
+    // 统一从 db 读当前窗口（含本机 + 各远程缓存；远程离线时读到的是上次成功落库的旧缓存）
+    let mut report = load_cached_report(db, since_days);
     report.scanned_files = stats.scanned_files;
     report.parsed_files = stats.parsed_files;
     report.errors.extend(stats.errors.into_iter().take(20));
+    report.errors.extend(remote_errors);
     report
 }
 
@@ -108,15 +128,19 @@ pub fn load_cached_report(db: &Database, since_days: i64) -> TokenUsageReport {
     let since = today - Duration::days(days - 1);
     let until = today;
     match db.token_usage_days(&since.to_string(), &until.to_string()) {
-        Ok(days) => TokenUsageReport {
-            since: since.to_string(),
-            until: until.to_string(),
-            summary: summary_from_days(&days),
-            days,
-            scanned_files: 0,
-            parsed_files: 0,
-            errors: Vec::new(),
-        },
+        Ok(days) => {
+            // 远程 source 存的是 id，显示前映射回 label 并丢弃孤儿行
+            let days = relabel_sources(db, days);
+            TokenUsageReport {
+                since: since.to_string(),
+                until: until.to_string(),
+                summary: summary_from_days(&days),
+                days,
+                scanned_files: 0,
+                parsed_files: 0,
+                errors: Vec::new(),
+            }
+        }
         Err(error) => TokenUsageReport {
             since: since.to_string(),
             until: until.to_string(),
@@ -170,6 +194,25 @@ fn token_remotes(db: &Database) -> Vec<crate::session_store::SessionSource> {
         .unwrap_or_default()
 }
 
+/// 把 token 行里远程 source（库内存的是稳定的 SessionSource.id）映射回用户可读的 label。
+/// 本机固定为「本机」；id 不在 session_sources（源已删 / 旧 label 残留）的孤儿行直接丢弃不显示。
+fn relabel_sources(db: &Database, days: Vec<TokenUsageDay>) -> Vec<TokenUsageDay> {
+    let map: HashMap<String, String> =
+        token_remotes(db).into_iter().map(|s| (s.id, s.label)).collect();
+    days
+        .into_iter()
+        .filter_map(|mut day| {
+            if day.source == "本机" {
+                return Some(day);
+            }
+            map.get(&day.source).map(|label| {
+                day.source = label.clone();
+                day
+            })
+        })
+        .collect()
+}
+
 /// 拉远程中继的 /api/token_summary（局域网，强制不走系统代理）
 fn fetch_remote_token_summary(
     base_url: &str,
@@ -190,15 +233,14 @@ fn fetch_remote_token_summary(
     Ok(parsed.days)
 }
 
-/// 把某台远程机器的 token 行聚合成独立行(source=机器名)并入报告；
-/// 不与本机或其它机器累加——同 provider+date 在该机器内部聚合 model 明细
-fn append_remote_days(
-    report: &mut TokenUsageReport,
+/// 把某台远程机器的 token 行聚合成独立 TokenUsageDay(source=机器名)，返回供落库；
+/// 不与本机或其它机器累加——同 provider+date 在该机器内部聚合 model 明细。
+fn aggregate_remote_days(
     source: &str,
     remote: Vec<RemoteTokenDay>,
     since: NaiveDate,
     until: NaiveDate,
-) {
+) -> Vec<TokenUsageDay> {
     use std::collections::HashMap;
     let mut acc: HashMap<(String, String), TokenUsageDay> = HashMap::new();
     for rd in remote {
@@ -253,11 +295,13 @@ fn append_remote_days(
             }),
         }
     }
+    let mut out: Vec<TokenUsageDay> = Vec::new();
     for (_key, mut day) in acc {
         day.models
             .sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens).then(a.model.cmp(&b.model)));
-        report.days.push(day);
+        out.push(day);
     }
+    out
 }
 
 fn scan_codex(db: &Database, stats: &mut ScanStats, since: NaiveDate, until: NaiveDate) {
@@ -506,7 +550,9 @@ fn rebuild_daily_cache(
     }
 
     let report = build_report(aggregate, since, until);
-    if let Err(error) = db.delete_token_usage_days_between(&since.to_string(), &until.to_string()) {
+    if let Err(error) =
+        db.delete_token_usage_days_for_source("本机", &since.to_string(), &until.to_string())
+    {
         stats.errors.push(error.to_string());
         return report;
     }

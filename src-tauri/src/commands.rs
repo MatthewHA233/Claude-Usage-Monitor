@@ -244,6 +244,15 @@ pub async fn get_cached_token_usage_report(
         .map_err(|e| e.to_string())
 }
 
+/// 删除某机器源的全部 token 缓存（source_id 为该源的稳定 id）。删源时配合 session_purge_source 调用。
+#[tauri::command]
+pub fn token_purge_source(source_id: String, state: State<AppState>) -> Result<(), String> {
+    state
+        .db
+        .delete_all_token_usage_for_source(&source_id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn refresh_local_usage(state: State<'_, AppState>) -> Result<(), String> {
     let db = std::sync::Arc::clone(&state.db);
