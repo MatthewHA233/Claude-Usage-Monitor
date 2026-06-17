@@ -18,12 +18,16 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { StreamMessage, ReplyBlock } from "./types";
-import { clock, nfmt, bucketOf } from "./format";
+import { clock, nfmt, bucketOf, subSecond, secInBucket } from "./format";
 import { fetchToolResult } from "./api";
 import MessageText from "./MessageText";
 import Markdown from "./Markdown";
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
+
+// 轨道(列)最小宽度：多轨道平分若低于此值，则固定此宽并开横向滚动（实测 2 轨≈310px，取整 300）
+const MIN_LANE_W = 300;
+const LANE_GAP = 12;
 
 interface Props {
   messages: StreamMessage[];
@@ -51,11 +55,80 @@ export default function MessageStream({
 }: Props) {
   // 时间正序：新消息排在底部（messages 传入为倒序，这里翻正）
   const ordered = useMemo(() => [...messages].reverse(), [messages]);
-  // 滚动默认贴底：来新消息往上顶
+  // 滚动贴底：仅在「切换数据集(切天/筛选, 首条变了)」或「用户本就停在底部」时贴底，
+  // 不打断用户向上翻看历史（父组件轮询刷新会换 messages 引用，不能每次都拉回底部）
   const scrollRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
+  const firstKeyRef = useRef("");
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const first = ordered[0];
+    const firstKey = first ? `${first.source_id}:${first.session_id}:${first.ts_unix ?? 0}` : "";
+    const datasetChanged = firstKey !== firstKeyRef.current;
+    firstKeyRef.current = firstKey;
+    if (datasetChanged || atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [ordered]);
+
+  // 按 10 分钟桶分组：同桶的卡片横向并排（最多 3 列、略微高低错落）表达并发；
+  // 单卡片桶占满整行（不空旷）
+  const groups = useMemo(() => {
+    const gs: { bucket: number; hour: number; cards: StreamMessage[] }[] = [];
+    for (const m of ordered) {
+      const b = bucketOf(m.ts_unix);
+      const last = gs[gs.length - 1];
+      if (last && last.bucket === b) last.cards.push(m);
+      else gs.push({ bucket: b, hour: Math.floor(b / 6), cards: [m] });
+    }
+    return gs;
+  }, [ordered]);
+
+  // 会话 → 轨道(列)：每会话固定一轨；≤3 个会话按"时间跨度降序"左→右排
+  // (最左=当天跨度最久=主线, 越往右跨度越短越碎片)；>3 个才占轨复用
+  // (时间不重叠的会话共用一轨, git-lane 式)
+  const { laneOf, laneCount } = useMemo(() => {
+    const sess = new Map<string, { start: number; end: number }>();
+    for (const m of ordered) {
+      const t = m.ts_unix ?? 0;
+      const s = sess.get(m.session_id);
+      if (s) {
+        s.start = Math.min(s.start, t);
+        s.end = Math.max(s.end, t);
+      } else {
+        sess.set(m.session_id, { start: t, end: t });
+      }
+    }
+    const arr = [...sess.entries()].map(([sid, v]) => ({
+      sid,
+      start: v.start,
+      end: v.end,
+      span: v.end - v.start,
+    }));
+    arr.sort((a, b) => b.span - a.span || a.start - b.start); // 跨度降序：左=久, 右=碎
+    const lane: Record<string, number> = {};
+    if (arr.length <= 3) {
+      arr.forEach((s, i) => {
+        lane[s.sid] = i;
+      });
+      return { laneOf: lane, laneCount: Math.max(1, arr.length) };
+    }
+    // >3 个会话：占轨复用——贪心放进最左一条"已空闲(end ≤ 本会话 start)"的轨道
+    const laneEnd: number[] = [];
+    for (const s of arr) {
+      let placed = laneEnd.findIndex((end) => end <= s.start);
+      if (placed === -1) {
+        laneEnd.push(s.end);
+        placed = laneEnd.length - 1;
+      } else {
+        laneEnd[placed] = s.end;
+      }
+      lane[s.sid] = placed;
+    }
+    return { laneOf: lane, laneCount: Math.max(1, laneEnd.length) };
   }, [ordered]);
 
   if (loading && messages.length === 0) {
@@ -75,42 +148,71 @@ export default function MessageStream({
     );
   }
 
+  const single = laneCount <= 1;
+  const renderCard = (m: StreamMessage, ci: number, bucket: number) => (
+    <StreamCard
+      key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${ci}`}
+      m={m}
+      shade={bucket % 2 === 0}
+      sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
+      activeSourceId={activeSourceId}
+      activeProject={activeProject}
+      activeSession={activeSession}
+      onFilterSource={onFilterSource}
+      onFilterProject={onFilterProject}
+      onFilterSession={onFilterSession}
+    />
+  );
+
   return (
-    <div ref={scrollRef} className="overflow-auto h-full px-5 py-4">
-      <div className="mx-auto" style={{ maxWidth: 760 }}>
-        {ordered.map((m, i) => {
-          const b = bucketOf(m.ts_unix); // 当天第几个 10 分钟
-          const h = Math.floor(b / 6);
-          const prevB = i > 0 ? bucketOf(ordered[i - 1].ts_unix) : -2;
-          const crossHour = i > 0 && Math.floor(prevB / 6) !== h;
-          const cross10 = i > 0 && prevB !== b;
+    <div ref={scrollRef} onScroll={onScroll} className={`overflow-auto h-full py-4 ${single ? "px-5" : "px-3"}`}>
+      <div
+        className={single ? "mx-auto" : undefined}
+        style={single ? { maxWidth: 760 } : { minWidth: laneCount * MIN_LANE_W + (laneCount - 1) * LANE_GAP }}
+      >
+        {groups.map((g, gi) => {
+          const crossHour = gi > 0 && groups[gi - 1].hour !== g.hour;
           return (
-            <div key={`${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}:${i}`}>
-              {i > 0 &&
+            <div key={`${g.bucket}:${gi}`}>
+              {gi > 0 &&
                 (crossHour ? (
                   // 1 小时边界：醒目分界 + 时刻
                   <div className="flex items-center gap-2" style={{ margin: "13px 6px 11px" }}>
                     <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
-                    <span className="text-[10px] font-mono" style={{ color: "#9ca3af" }}>{pad2(h)}:00</span>
+                    <span className="text-[10px] font-mono" style={{ color: "#9ca3af" }}>{pad2(g.hour)}:00</span>
                     <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
                   </div>
-                ) : cross10 ? (
+                ) : (
                   // 10 分钟边界：细分界
                   <div style={{ height: 1, background: "#2c2c2c", margin: "8px 16px" }} />
-                ) : (
-                  <div style={{ height: 6 }} />
                 ))}
-              <StreamCard
-                m={m}
-                shade={b % 2 === 0}
-                sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
-                activeSourceId={activeSourceId}
-                activeProject={activeProject}
-                activeSession={activeSession}
-                onFilterSource={onFilterSource}
-                onFilterProject={onFilterProject}
-                onFilterSession={onFilterSession}
-              />
+              {single ? (
+                // 单轨道：纵向流，宽容器舒适阅读
+                <div className="flex flex-col" style={{ gap: 6 }}>
+                  {g.cards.map((m, ci) => renderCard(m, ci, g.bucket))}
+                </div>
+              ) : (
+                // 多轨道：每个会话固定在自己的列(轨道)；以本桶最早卡片为基准(不下沉)，
+                // 其余列按"相对最早卡片的秒差"下沉形成参差。单列/单卡片桶基准=自己=不下沉
+                (() => {
+                  const baseSec = Math.min(...g.cards.map((m) => secInBucket(m.ts_unix)));
+                  return (
+                    <div className="flex items-start" style={{ gap: 12 }}>
+                      {Array.from({ length: laneCount }, (_, lane) => {
+                        const laneCards = g.cards.filter((m) => (laneOf[m.session_id] ?? 0) === lane);
+                        const top = laneCards.length
+                          ? (secInBucket(laneCards[0].ts_unix) - baseSec) * 0.18
+                          : 0;
+                        return (
+                          <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top }}>
+                            {laneCards.map((m, ci) => renderCard(m, ci, g.bucket))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()
+              )}
             </div>
           );
         })}
@@ -147,13 +249,14 @@ function StreamCard({
 
   // 按 10 分钟桶奇偶相间的卡片背景（与时间轴斑马同节奏）
   const bg = shade ? "#25252c" : "#191919";
+  const { ss } = subSecond(m.ts); // 秒（时:分之外更细一档）
   return (
     <div className="rounded-xl px-4 py-3 flex gap-3" style={{ background: bg, border: "1px solid #2a2a2a" }}>
-      <div
-        className="shrink-0 font-mono"
-        style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, width: 46, paddingTop: 1, letterSpacing: "0.3px" }}
-      >
-        {clock(m.ts_unix)}
+      <div className="shrink-0 font-mono" style={{ width: 46, paddingTop: 1 }}>
+        <div style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, letterSpacing: "0.3px" }}>{clock(m.ts_unix)}</div>
+        {ss && (
+          <div style={{ fontSize: 11, fontWeight: 600, marginTop: 2, letterSpacing: "0.5px", color: "#8b9096" }}>:{ss}</div>
+        )}
       </div>
 
       <div className="min-w-0 flex-1">
