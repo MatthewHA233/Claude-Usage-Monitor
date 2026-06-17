@@ -33,26 +33,10 @@ interface Props {
   messages: StreamMessage[];
   loading: boolean;
   sessionTitles: Record<string, string>;
-  activeSourceId: string | null;
-  activeProject: string | null;
-  activeSession: string | null;
-  onFilterSource: (id: string) => void;
-  onFilterProject: (name: string) => void;
-  onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
 }
 
 /** flomo 风格卡片流：当天我的发言，时间正序（新消息在底部）、滚动默认贴底，每条一张卡片 */
-export default function MessageStream({
-  messages,
-  loading,
-  sessionTitles,
-  activeSourceId,
-  activeProject,
-  activeSession,
-  onFilterSource,
-  onFilterProject,
-  onFilterSession,
-}: Props) {
+export default function MessageStream({ messages, loading, sessionTitles }: Props) {
   // 时间正序：新消息排在底部（messages 传入为倒序，这里翻正）
   const ordered = useMemo(() => [...messages].reverse(), [messages]);
   // 滚动贴底：仅在「切换数据集(切天/筛选, 首条变了)」或「用户本就停在底部」时贴底，
@@ -155,12 +139,6 @@ export default function MessageStream({
       m={m}
       shade={bucket % 2 === 0}
       sessionTitle={sessionTitles[m.session_id] || m.session_id.slice(0, 8)}
-      activeSourceId={activeSourceId}
-      activeProject={activeProject}
-      activeSession={activeSession}
-      onFilterSource={onFilterSource}
-      onFilterProject={onFilterProject}
-      onFilterSession={onFilterSession}
     />
   );
 
@@ -221,27 +199,7 @@ export default function MessageStream({
   );
 }
 
-function StreamCard({
-  m,
-  shade,
-  sessionTitle,
-  activeSourceId,
-  activeProject,
-  activeSession,
-  onFilterSource,
-  onFilterProject,
-  onFilterSession,
-}: {
-  m: StreamMessage;
-  shade: boolean;
-  sessionTitle: string;
-  activeSourceId: string | null;
-  activeProject: string | null;
-  activeSession: string | null;
-  onFilterSource: (id: string) => void;
-  onFilterProject: (name: string) => void;
-  onFilterSession: (sourceId: string, sessionId: string, title: string) => void;
-}) {
+function StreamCard({ m, shade, sessionTitle }: { m: StreamMessage; shade: boolean; sessionTitle: string }) {
   const [open, setOpen] = useState(false);
   const blocks = m.blocks ?? [];
   const toolCount = blocks.reduce((n, b) => n + (b.type === "tool" ? 1 : 0), 0);
@@ -263,27 +221,9 @@ function StreamCard({
         <CollapsibleText text={m.text} images={m.images} bg={bg} />
 
       <div className="flex items-center gap-1.5 mt-2 text-[10px] flex-wrap">
-        <Tag
-          icon={<FolderGit2 size={10} />}
-          label={m.project_name || "—"}
-          active={activeProject === (m.project_name || "—")}
-          accent="green"
-          onClick={() => onFilterProject(m.project_name || "—")}
-        />
-        <Tag
-          icon={<MessagesSquare size={10} />}
-          label={sessionTitle}
-          active={activeSession === m.session_id}
-          accent="violet"
-          onClick={() => onFilterSession(m.source_id, m.session_id, sessionTitle)}
-        />
-        <Tag
-          icon={<Monitor size={10} />}
-          label={m.source_label}
-          active={activeSourceId === m.source_id}
-          accent="green"
-          onClick={() => onFilterSource(m.source_id)}
-        />
+        <Tag icon={<FolderGit2 size={10} />} label={m.project_name || "—"} accent="green" />
+        <Tag icon={<MessagesSquare size={10} />} label={sessionTitle} accent="violet" />
+        <Tag icon={<Monitor size={10} />} label={m.source_label} accent="green" />
 
         {hasReply ? (
           <button
@@ -405,40 +345,18 @@ function CollapsibleText({
   );
 }
 
-function Tag({
-  icon,
-  label,
-  active,
-  accent,
-  onClick,
-}: {
-  icon: ReactNode;
-  label: string;
-  active: boolean;
-  accent: "green" | "violet";
-  onClick: () => void;
-}) {
-  const activeBg = accent === "green" ? "#2f6f4f" : "#5a4a8c";
+// 纯展示标签（筛选已撤，仅标识项目/会话/机器）
+function Tag({ icon, label, accent }: { icon: ReactNode; label: string; accent: "green" | "violet" }) {
+  const dot = accent === "green" ? "#7fd1a8" : "#b3a0e0";
   return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
+    <span
       className="card-tag inline-flex items-center gap-1 px-1.5 py-0.5 rounded"
-      style={{
-        background: active ? activeBg : "#2c2c2c",
-        color: active ? "#f9fafb" : "#c7ccd1",
-        border: 0,
-        cursor: "pointer",
-        maxWidth: 190,
-      }}
+      style={{ background: "#2c2c2c", color: "#c7ccd1", maxWidth: 190 }}
       title={label}
     >
-      <span className="shrink-0 inline-flex">{icon}</span>
+      <span className="shrink-0 inline-flex" style={{ color: dot }}>{icon}</span>
       <span className="truncate">{label}</span>
-    </button>
+    </span>
   );
 }
 

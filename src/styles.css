@@ -189,9 +189,9 @@
               0 0 26px rgba(var(--hud-accent), .28);
 }
 
-/* 展开态：HUD 面板，从左下角 clip 向右"伸展"展开 */
+/* 展开态：HUD 面板，从右上角 clip 向左"伸展"展开 */
 .draft-hud-panel {
-  position: absolute; left: 0; bottom: 0; transform-origin: left bottom;
+  position: absolute; right: 0; top: 0; transform-origin: right top;
   background: linear-gradient(150deg, rgba(17,23,27,.95), rgba(12,15,19,.96));
   border: 1px solid rgba(var(--hud-accent), .34);
   border-radius: 14px;
@@ -203,8 +203,8 @@
   overflow: hidden;
 }
 .draft-hud-panel.closed {
-  clip-path: inset(0 100% 0 0 round 14px);
-  opacity: 0; transform: translateX(-8px); pointer-events: none;
+  clip-path: inset(0 0 0 100% round 14px);
+  opacity: 0; transform: translateX(8px); pointer-events: none;
 }
 .draft-hud-panel.open {
   clip-path: inset(0 0 0 0 round 14px);

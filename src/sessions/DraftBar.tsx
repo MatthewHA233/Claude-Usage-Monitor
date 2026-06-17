@@ -201,7 +201,7 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
   const canSubmit = !!text.trim();
 
   return (
-    <div style={{ position: "fixed", left: 16, bottom: 16, zIndex: 45 }}>
+    <div style={{ position: "fixed", right: 16, top: 16, zIndex: 45 }}>
       {/* 收起态：左下角常驻 handle */}
       <button
         ref={handleRef}
