@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import type { TimelineRowWithSource } from "./types";
 import { dayLabel, todayYmd } from "./format";
-import { laneKey } from "./lanes";
+import { laneKey, assignLanesPacked } from "./lanes";
 
 const ROW_H = 14; // 单行点阵的行高
 const ROW_H2 = 26; // 双行点阵(某格 >5 条)的行高
@@ -17,9 +17,6 @@ interface Props {
   date: string;
   rows: TimelineRowWithSource[];
   loading: boolean;
-  laneOf: Record<string, number>;
-  laneCount: number;
-  labelsByLane: string[][];
 }
 
 type Tip = { x: number; y: number; big?: number; title: string; sub?: string; lines?: string[] } | null;
@@ -47,7 +44,9 @@ function DotCell({ n }: { n: number }) {
 
 // 竖排迷你时间轴：纵向时间(小时合并列 + 分钟列两级表头)，横向轨道列(会话, 与卡片同序同列)。
 // 配色融入左栏(暗基调)，表头/字/点提亮保持清晰。hover 十字标定 + 悬浮面板。连续空小时折叠。
-export default function SessionTimeline({ date, rows, loading, laneOf, laneCount, labelsByLane }: Props) {
+export default function SessionTimeline({ date, rows, loading }: Props) {
+  // 时间轴专用「紧凑」轨道分配（最少轨道 + 充实轨在左）。卡片流仍用 SessionsApp 传下来的旧分配。
+  const { laneOf, laneCount, labelsByLane } = useMemo(() => assignLanesPacked(rows), [rows]);
   const [tip, setTip] = useState<Tip>(null);
   const [hb, setHb] = useState<number | null>(null);
   const [hl, setHl] = useState<number | null>(null);
@@ -236,7 +235,7 @@ export default function SessionTimeline({ date, rows, loading, laneOf, laneCount
                 时·分
               </div>
               {Array.from({ length: laneCount }, (_, lane) => {
-                const lr = laneRows[lane] ?? [];
+                const main = mainByLane[lane];
                 const on = hl === lane;
                 return (
                   <div
@@ -244,20 +243,16 @@ export default function SessionTimeline({ date, rows, loading, laneOf, laneCount
                     className="shrink-0 flex items-center justify-center font-mono truncate"
                     style={{ width: COL_W, height: 24, fontSize: 11, fontWeight: 600, color: on ? "#fff" : "#e5e7eb", background: on ? "#2f2f33" : "#34343c", borderLeft: "1px solid #2a2a2a", borderBottom: `2px solid ${on ? "#e08a6a" : "#3a3a40"}`, transition: "background .1s, border-color .1s, color .1s" }}
                     onMouseEnter={(e) => {
-                      if (!lr.length) return;
+                      if (!main) return;
                       setHl(lane);
                       setHb(null);
                       setHh(null);
-                      if (lr.length === 1) {
-                        const r = lr[0];
-                        showTip(e, { big: r.count, title: `${seqLabel(r)}  ${r.title || r.session_id.slice(0, 8)}`, sub: `${r.project_name || "—"} · ${r.source_label}` });
-                      } else {
-                        showTip(e, { title: `轨道 · ${lr.length} 个会话`, lines: lr.map((r) => `${seqLabel(r)}  ${r.title || r.session_id.slice(0, 8)} · ${r.count}句`) });
-                      }
+                      // 列标头只司管它负责的主线会话 → 统一的单会话面板（与格子/插队段一致），不再列整轨
+                      showTip(e, { big: main.count, title: `${seqLabel(main)}  ${main.title || main.session_id.slice(0, 8)}`, sub: `${main.project_name || "—"} · ${main.source_label}` });
                     }}
                     onMouseLeave={clear}
                   >
-                    {mainByLane[lane] ? seqLabel(mainByLane[lane]!) : (labelsByLane[lane] ?? []).join(" ")}
+                    {main ? seqLabel(main) : (labelsByLane[lane] ?? []).join(" ")}
                   </div>
                 );
               })}

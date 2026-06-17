@@ -54,3 +54,69 @@ export function assignLanes(rows: TimelineRow[]): LaneAssignment {
   }
   return { laneOf, laneCount: Math.max(1, laneEnd.length), labelsByLane };
 }
+
+/**
+ * 时间轴专用「紧凑」轨道分配（实验中，先只用于左下角缩略图）：
+ *  1. 按 first_unix 升序贪心着色，放进最左「已空闲(end ≤ start)」的轨 → 轨道数 = 最大同时重叠，理论最少；
+ *  2. 按轨道「充实度」降序重排左右：轨内最充实会话(句数)为主、轨总句数 / 总跨度为次 →
+ *     越靠左 = 当天越充实的轨，越靠右 = 越拼凑的碎片轨。
+ * 不再对 ≤3 特殊处理（统一复用，进一步压少轨道数）。
+ */
+export function assignLanesPacked(rows: TimelineRow[]): LaneAssignment {
+  const sess = rows.map((r) => ({
+    key: laneKey(r.source_id, r.session_id),
+    start: r.first_unix ?? 0,
+    end: r.last_unix ?? 0,
+    span: (r.last_unix ?? 0) - (r.first_unix ?? 0),
+    count: r.count ?? 0,
+    label: r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—",
+  }));
+  if (sess.length === 0) return { laneOf: {}, laneCount: 1, labelsByLane: [] };
+
+  // 1. 最优着色：按起点升序，放最左空闲轨
+  const byStart = [...sess].sort((a, b) => a.start - b.start || b.span - a.span);
+  const laneEnd: number[] = [];
+  const laneSess: (typeof sess)[] = [];
+  const colorLane: Record<string, number> = {};
+  for (const s of byStart) {
+    let lane = laneEnd.findIndex((e) => e <= s.start);
+    if (lane === -1) {
+      lane = laneEnd.length;
+      laneEnd.push(s.end);
+      laneSess.push([]);
+    } else {
+      laneEnd[lane] = s.end;
+    }
+    colorLane[s.key] = lane;
+    laneSess[lane].push(s);
+  }
+
+  // 2. 轨道充实度排序（充实→左）
+  const scoreOf = (arr: typeof sess) => ({
+    maxCount: Math.max(...arr.map((s) => s.count)),
+    sumCount: arr.reduce((a, s) => a + s.count, 0),
+    sumSpan: arr.reduce((a, s) => a + s.span, 0),
+  });
+  const scores = laneSess.map(scoreOf);
+  const order = laneSess
+    .map((_, i) => i)
+    .sort(
+      (a, b) =>
+        scores[b].maxCount - scores[a].maxCount ||
+        scores[b].sumCount - scores[a].sumCount ||
+        scores[b].sumSpan - scores[a].sumSpan,
+    );
+  const remap = new Map<number, number>();
+  order.forEach((orig, newIdx) => remap.set(orig, newIdx));
+
+  // 3. 重映射到充实序的新轨号
+  const laneOf: Record<string, number> = {};
+  for (const s of sess) laneOf[s.key] = remap.get(colorLane[s.key]) ?? 0;
+  const labelsByLane: string[][] = laneSess.map(() => []);
+  laneSess.forEach((arr, orig) => {
+    const nl = remap.get(orig) ?? 0;
+    labelsByLane[nl] = [...arr].sort((a, b) => a.start - b.start).map((s) => s.label);
+  });
+
+  return { laneOf, laneCount: Math.max(1, laneEnd.length), labelsByLane };
+}

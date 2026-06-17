@@ -227,16 +227,9 @@ export default function SessionsApp() {
             refreshing={refreshing}
             syncing={syncing}
           />
-          {/* 竖排迷你时间轴：左栏下方，轨道序与卡片同 */}
+          {/* 竖排迷你时间轴：左栏下方，自带「紧凑」轨道分配（实验：最少轨道 + 充实轨在左） */}
           <div className="flex-1 min-h-0">
-            <SessionTimeline
-              date={date}
-              rows={rows}
-              loading={syncing || refreshing}
-              laneOf={lanes.laneOf}
-              laneCount={lanes.laneCount}
-              labelsByLane={lanes.labelsByLane}
-            />
+            <SessionTimeline date={date} rows={rows} loading={syncing || refreshing} />
           </div>
         </div>
       )}
