@@ -9,6 +9,7 @@ const COL_W = 35; // 每轨道列宽
 const HOUR_W = 30; // 小时列宽（合并单元格）
 const MIN_W = 24; // 分钟列宽
 const TIME_W = HOUR_W + MIN_W;
+const STACK_MAX = 3; // 贴边远方表头同列同方向最多叠放数（一轨最多 4 会话 → 主线外最多 3 插队）
 // 插队会话色（Notion 标签风：柔和中明度实心色，标签填充 + 白字），按同轨插队顺序循环
 const PALETTE = ["#6b5b9a", "#3f8290", "#4f8b60", "#8c7440", "#96587a", "#4e6f9c"];
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -19,7 +20,7 @@ interface Props {
   loading: boolean;
 }
 
-type Tip = { x: number; y: number; big?: number; title: string; sub?: string; lines?: string[] } | null;
+type Tip = { x: number; y: number; place?: "right" | "below"; big?: number; title: string; sub?: string; lines?: string[] } | null;
 
 // 密度点阵：≤5 单行；6–10 双行折半(第一行 ceil、第二行 floor)。横向间距放宽，不挤。
 function DotCell({ n }: { n: number }) {
@@ -52,6 +53,8 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
   const [hl, setHl] = useState<number | null>(null);
   const [hh, setHh] = useState<number | null>(null);
   const [hseg, setHseg] = useState<{ lane: number; label: string } | null>(null); // hover 的插队会话段
+  const [containerW, setContainerW] = useState(0); // 滚动容器可视宽，用于轨道列平分
+  const [nowTs, setNowTs] = useState(() => Date.now()); // 当前时间横线指针，定时刷新
   const clear = () => {
     setHb(null);
     setHl(null);
@@ -69,15 +72,28 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    setContainerW(el.clientWidth);
     const fn = () => layoutRef.current();
     el.addEventListener("scroll", fn, { passive: true });
-    const ro = new ResizeObserver(fn);
+    const ro = new ResizeObserver(() => {
+      setContainerW(el.clientWidth);
+      layoutRef.current();
+    });
     ro.observe(el);
     return () => {
       el.removeEventListener("scroll", fn);
       ro.disconnect();
     };
-  }, [date]);
+  }, [date, rows.length]);
+
+  // 当前时间横线指针：每 30s 刷新一次位置
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 轨道列宽：默认平分容器宽（减时间列），平分后低于最小列宽 COL_W 才固定最小、出现横向滚动
+  const laneW = laneCount > 0 ? Math.max(COL_W, (containerW - TIME_W) / laneCount) : COL_W;
 
   let minB = Infinity;
   let maxB = -Infinity;
@@ -149,9 +165,14 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
   const hoverHour = hh ?? (hb != null ? Math.floor(hb / 6) : null);
   const seqLabel = (r: TimelineRowWithSource) =>
     r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—";
-  const showTip = (e: React.MouseEvent, t: Omit<NonNullable<Tip>, "x" | "y">) => {
+  // place="right" 紧贴元素右侧竖直居中（默认）；place="below" 落在元素正下方（左侧时间表头用，避免遮挡所在行）
+  const showTip = (e: React.MouseEvent, t: Omit<NonNullable<Tip>, "x" | "y" | "place">, place: "right" | "below" = "right") => {
     const rect = e.currentTarget.getBoundingClientRect();
-    setTip({ ...t, x: rect.right, y: (rect.top + rect.bottom) / 2 });
+    if (place === "below") {
+      setTip({ ...t, place: "below", x: rect.left, y: rect.bottom + 4 });
+    } else {
+      setTip({ ...t, place: "right", x: rect.right, y: (rect.top + rect.bottom) / 2 });
+    }
   };
   // 适应性行高：某桶 >5 条则该行双行；小时块高 = 其 6 行高之和
   const rowH = (b: number) => (Math.min(10, bucketMax[b] ?? 0) > 5 ? ROW_H2 : ROW_H);
@@ -181,9 +202,19 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
     return { ...s, topY, height: bottomY - topY };
   });
 
-  // imperative 贴边布局：直接改表头 DOM 的 top/display，不触发 React 重渲染。
-  // 段在视野=首格上方；段顶滚到视口上方=贴顶；段在视口下方=贴底（位置即方向，实色无透明无箭头）。
-  // 同列同方向多段只显示最接近视口的一个，避免标签互相叠住。
+  // 当前时间横线：今天且该桶在显示范围内，按桶内秒数比例插在格子里
+  const nowLineY = (() => {
+    if (!isToday) return null;
+    const d = new Date(nowTs);
+    const nb = Math.floor((d.getHours() * 60 + d.getMinutes()) / 10);
+    if (bucketY[nb] == null) return null;
+    const secInBucket = (d.getMinutes() % 10) * 60 + d.getSeconds();
+    return bucketY[nb] + (secInBucket / 600) * rowH(nb);
+  })();
+
+  // imperative 贴边布局：直接改表头 DOM 的 top/display/箭头，不触发 React 重渲染。
+  // 段在视野=首格上方；段顶滚到视口上方=贴顶(▲)、段在视口下方=贴底(▼)。
+  // 同列同方向多段「叠放」最多 STACK_MAX 个：最接近视口的贴边、其余依次往里叠（提示远处还有几个）。
   layoutRef.current = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -197,20 +228,39 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
     });
     const byLane: Record<number, typeof info> = {};
     info.forEach((p) => (byLane[p.lane] ??= []).push(p));
-    const visible = new Set<number>();
+    // 每段终态：top + 箭头方向（""=视野内无箭头 / "up"=贴顶 / "down"=贴底）
+    const place = new Map<number, { top: number; dir: "" | "up" | "down" }>();
     for (const k of Object.keys(byLane)) {
       const arr = byLane[Number(k)];
-      arr.filter((p) => !p.atTop && !p.atBot).forEach((p) => visible.add(p.i)); // 视口内全显示
-      const tops = arr.filter((p) => p.atTop);
-      const bots = arr.filter((p) => p.atBot);
-      if (tops.length) visible.add(tops.reduce((a, b) => (a.botY >= b.botY ? a : b)).i); // 贴顶留最接近视口顶
-      if (bots.length) visible.add(bots.reduce((a, b) => (a.topY <= b.topY ? a : b)).i); // 贴底留最接近视口底
+      arr.filter((p) => !p.atTop && !p.atBot).forEach((p) => place.set(p.i, { top: p.headerTop, dir: "" }));
+      // 贴顶：最接近视口顶(botY 最大)贴边在最上，其余每个往下叠 ROW_H
+      arr
+        .filter((p) => p.atTop)
+        .sort((a, b) => b.botY - a.botY)
+        .slice(0, STACK_MAX)
+        .forEach((p, k) => place.set(p.i, { top: vTop + k * ROW_H, dir: "up" }));
+      // 贴底：最接近视口底(topY 最小)贴边在最下，其余每个往上叠 ROW_H
+      arr
+        .filter((p) => p.atBot)
+        .sort((a, b) => a.topY - b.topY)
+        .slice(0, STACK_MAX)
+        .forEach((p, k) => place.set(p.i, { top: vBot - ROW_H - k * ROW_H, dir: "down" }));
     }
     info.forEach((p) => {
       const h = headerRefs.current[p.i];
       if (!h) return;
-      h.style.display = visible.has(p.i) ? "flex" : "none";
-      if (visible.has(p.i)) h.style.top = `${p.headerTop}px`;
+      const pl = place.get(p.i);
+      if (!pl) {
+        h.style.display = "none";
+        return;
+      }
+      h.style.display = "flex";
+      h.style.top = `${pl.top}px`;
+      const arrow = h.querySelector("[data-arrow]") as HTMLElement | null;
+      if (arrow) {
+        arrow.textContent = pl.dir === "up" ? "▲" : pl.dir === "down" ? "▼" : "";
+        arrow.style.display = pl.dir ? "inline-block" : "none";
+      }
     });
   };
 
@@ -228,7 +278,7 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
         </div>
       ) : (
         <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto">
-          <div style={{ width: TIME_W + laneCount * COL_W, position: "relative" }}>
+          <div style={{ width: TIME_W + laneCount * laneW, position: "relative" }}>
             {/* 列标头：时间区表头 + 轨道编号，sticky 顶 */}
             <div className="flex sticky top-0" style={{ zIndex: 15 }}>
               <div className="shrink-0 sticky left-0 flex items-center justify-center font-mono" style={{ width: TIME_W, height: 24, fontSize: 10, color: "#aab0ba", background: "#34343c", zIndex: 16, borderBottom: "1px solid #3a3a40" }}>
@@ -240,8 +290,8 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                 return (
                   <div
                     key={lane}
-                    className="shrink-0 flex items-center justify-center font-mono truncate"
-                    style={{ width: COL_W, height: 24, fontSize: 11, fontWeight: 600, color: on ? "#fff" : "#e5e7eb", background: on ? "#2f2f33" : "#34343c", borderLeft: "1px solid #2a2a2a", borderBottom: `2px solid ${on ? "#e08a6a" : "#3a3a40"}`, transition: "background .1s, border-color .1s, color .1s" }}
+                    className="shrink-0 flex items-center font-mono truncate"
+                    style={{ width: laneW, height: 24, justifyContent: "flex-start", paddingLeft: 5, fontSize: 11, fontWeight: 600, color: on ? "#fff" : "#e5e7eb", background: on ? "#2f2f33" : "#34343c", borderLeft: "1px solid #2a2a2a", borderBottom: `2px solid ${on ? "#e08a6a" : "#3a3a40"}`, transition: "background .1s, border-color .1s, color .1s" }}
                     onMouseEnter={(e) => {
                       if (!main) return;
                       setHl(lane);
@@ -252,7 +302,11 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                     }}
                     onMouseLeave={clear}
                   >
-                    {main ? seqLabel(main) : (labelsByLane[lane] ?? []).join(" ")}
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)" }}>
+                      {main
+                        ? `${seqLabel(main)} ${main.title || main.session_id.slice(0, 8)}`
+                        : (labelsByLane[lane] ?? []).join(" ")}
+                    </span>
                   </div>
                 );
               })}
@@ -276,19 +330,18 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
               }
               const h = g.h;
               const hourOn = hoverHour === h;
-              const isNow = h === nowHour;
               const hTot = hourTotals[h] ?? 0;
               return (
                 <div key={h} className="flex" style={{ borderTop: "2px solid transparent", borderImage: "linear-gradient(90deg, #c8825a 0%, #57575f 26%, #3a3a40 100%) 1" }}>
                   {/* 小时合并单元格：小时 + 该小时综合句数 */}
                   <div
                     className="shrink-0 sticky left-0 flex flex-col items-center justify-center font-mono"
-    style={{ width: HOUR_W, height: hourH(h), color: hourOn ? "#f0b489" : isNow ? "#9ec3e6" : "#e2e5ea", background: hourOn ? "#2c2c30" : "#2b2b32", zIndex: 4, borderRight: "1px solid #2a2a2a", transition: "background .1s, color .1s" }}
+    style={{ width: HOUR_W, height: hourH(h), color: hourOn ? "#f0b489" : "#e2e5ea", background: hourOn ? "#2c2c30" : "#2b2b32", zIndex: 4, borderRight: "1px solid #2a2a2a", transition: "background .1s, color .1s" }}
                     onMouseEnter={(e) => {
                       setHh(h);
                       setHb(null);
                       setHl(null);
-                      if (hTot) showTip(e, { big: hTot, title: `${pad2(h)}:00–${pad2(h)}:59`, sub: "全部会话综合" });
+                      if (hTot) showTip(e, { big: hTot, title: `${pad2(h)}:00–${pad2(h)}:59`, sub: "全部会话综合" }, "below");
                     }}
                     onMouseLeave={clear}
                   >
@@ -313,7 +366,7 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                               setHl(null);
                               setHh(null);
                               const lineN = Object.values(cell).reduce((s, m) => s + (m[b]?.n ?? 0), 0);
-                              if (lineN) showTip(e, { big: lineN, title: `${pad2(h)}:${pad2(i * 10)}–${pad2(h)}:${pad2(i * 10 + 9)}`, sub: "该 10 分钟综合" });
+                              if (lineN) showTip(e, { big: lineN, title: `${pad2(h)}:${pad2(i * 10)}–${pad2(h)}:${pad2(i * 10 + 9)}`, sub: "该 10 分钟综合" }, "below");
                             }}
                             onMouseLeave={clear}
                           >
@@ -326,32 +379,38 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                             const cov = coverMeta[lane]?.[b];
                             const interFirst = cov?.isFirst ?? false;
                             const interLast = cov?.isLast ?? false;
-                            const cross = hb === b && hl === lane;
                             const colOn = hl === lane;
                             const segOn = hseg != null && cov != null && hseg.lane === lane && hseg.label === cov.label; // hover 悬浮表头掌控的段
                             // 插队整段内框（左右竖线每格 + 首尾横线），用柔和主题色
                             const interShadow = cov
                               ? [`inset 1px 0 0 ${cov.color}`, `inset -1px 0 0 ${cov.color}`, interFirst ? `inset 0 1px 0 ${cov.color}` : "", interLast ? `inset 0 -1px 0 ${cov.color}` : ""].filter(Boolean).join(", ")
                               : "";
-                            const boxShadow = [interShadow, cross ? "inset 0 0 0 1px #ef9d77" : ""].filter(Boolean).join(", ") || undefined;
+                            // 行/列高亮：亮边框框出（行=上下、列=左右）。交叉聚焦格不画边框、只靠明显变亮的背景突出
+                            const cross = rowOn && colOn;
+                            const HL = "rgba(232,164,130,0.82)";
+                            const rowEdge = rowOn && !cross ? `inset 0 1px 0 ${HL}, inset 0 -1px 0 ${HL}` : "";
+                            const colEdge = colOn && !cross ? `inset 1px 0 0 ${HL}, inset -1px 0 0 ${HL}` : "";
+                            const boxShadow = [interShadow, rowEdge, colEdge].filter(Boolean).join(", ") || undefined;
+                            // 填充：统一暗底（去斑马相间 + 去当前小时染色）；行/列单边微亮、十字交叉聚焦格明显变亮
+                            const lit = rowOn || colOn || hh === h;
                             const bg = segOn
                               ? `${cov!.color}44`
                               : cross
-                              ? "rgba(224,138,106,0.30)"
-                              : isNow
-                              ? "rgba(96,165,250,0.12)"
-                              : rowOn || (colOn && !cov) || hh === h
-                              ? "rgba(255,255,255,0.05)"
+                              ? n > 0
+                                ? "rgba(224,138,106,0.42)"
+                                : "rgba(255,255,255,0.16)"
                               : n > 0
-                              ? "rgba(224,138,106,0.18)"
-                              : b % 2 === 1
-                              ? "rgba(255,255,255,0.05)"
+                              ? lit
+                                ? "rgba(224,138,106,0.28)"
+                                : "rgba(224,138,106,0.18)"
+                              : lit
+                              ? "rgba(255,255,255,0.04)"
                               : "transparent";
                             return (
                               <div
                                 key={lane}
                                 className="shrink-0 flex items-center justify-center"
-                                style={{ width: COL_W, height: rowH(b), background: bg, borderLeft: `1px solid ${isNow ? "#314a60" : "#343439"}`, boxShadow, transition: "background .1s, box-shadow .1s" }}
+                                style={{ width: laneW, height: rowH(b), background: bg, borderLeft: "1px solid #343439", boxShadow, transition: "background .1s, box-shadow .1s" }}
                                 onMouseEnter={(e) => {
                                   setHb(b);
                                   setHl(lane);
@@ -374,8 +433,8 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
               );
             })}
 
-            {/* 贴边表头：位置由 layoutRef imperative 设置（top/display 滚动时直接改 DOM）。
-                实色 pill、不透明、无箭头——贴在视口顶=上方有，贴底=下方有，居中=在视野，位置即方向。 */}
+            {/* 贴边表头：位置/箭头由 layoutRef imperative 设置。贴顶▲/贴底▼，同列同向叠放最多 3 个。
+                点击 → 平滑滚动到该段、停到视窗中间。 */}
             {segs.map((s, si) => {
               const segHover = hseg?.lane === s.lane && hseg?.label === s.label;
               return (
@@ -393,24 +452,44 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                     setTip({ x: rect.right, y: (rect.top + rect.bottom) / 2, big: s.row.count, title: `${s.label}  ${s.row.title || s.row.session_id.slice(0, 8)}`, sub: `${s.row.project_name || "—"} · ${s.row.source_label}` });
                   }}
                   onMouseLeave={clear}
-                  style={{ position: "absolute", top: s.topY, left: TIME_W + s.lane * COL_W, width: COL_W, height: ROW_H, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, fontFamily: "ui-monospace, monospace", color: "#fff", background: s.color, borderRadius: 3, cursor: "default", whiteSpace: "nowrap", zIndex: 9, transform: segHover ? "translateY(-1px)" : "none", filter: segHover ? "brightness(1.12)" : "none", boxShadow: segHover ? `0 2px 7px ${s.color}aa` : "0 1px 3px rgba(0,0,0,0.45)", transition: "transform .12s, filter .12s, box-shadow .12s" }}
+                  onClick={() => {
+                    const el = scrollRef.current;
+                    if (el) el.scrollTo({ top: Math.max(0, s.topY - el.clientHeight / 2), behavior: "smooth" });
+                  }}
+                  style={{ position: "absolute", top: s.topY, left: TIME_W + s.lane * laneW, width: laneW, height: ROW_H, display: "flex", alignItems: "center", justifyContent: "flex-start", paddingLeft: 4, gap: 1, fontSize: 10, fontWeight: 600, fontFamily: "ui-monospace, monospace", color: "#fff", background: s.color, borderRadius: 3, cursor: "pointer", overflow: "hidden", whiteSpace: "nowrap", zIndex: 9, transform: segHover ? "translateY(-1px)" : "none", filter: segHover ? "brightness(1.12)" : "none", boxShadow: segHover ? `0 2px 7px ${s.color}aa` : "0 1px 3px rgba(0,0,0,0.45)", transition: "transform .12s, filter .12s, box-shadow .12s" }}
                 >
-                  {s.label}
+                  <span data-arrow style={{ fontSize: 6, lineHeight: 1, display: "none", opacity: 0.85, flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)" }}>
+                    {`${s.label} ${s.row.title || s.row.session_id.slice(0, 8)}`}
+                  </span>
                 </div>
               );
             })}
+
+            {/* 当前时间横线指针：今天的「现在」，桶内按秒数比例插入 */}
+            {nowLineY != null && (
+              <div style={{ position: "absolute", top: nowLineY, transform: "translateY(-50%)", left: TIME_W, width: laneCount * laneW, height: 1.5, background: "rgba(224,112,58,0.55)", zIndex: 8, pointerEvents: "none" }}>
+                <div style={{ position: "absolute", left: -1, top: "50%", transform: "translateY(-50%)", width: 0, height: 0, borderTop: "3.5px solid transparent", borderBottom: "3.5px solid transparent", borderLeft: "6px solid #e0703a" }} />
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* 悬浮面板：紧贴元素右侧、垂直居中、clamp 防溢出 */}
+      {/* 悬浮面板：right=紧贴右侧竖直居中；below=落在元素正下方（左侧时间表头用，不挡所在行）。clamp 防溢出 */}
       {tip && (
         <div
           style={{
             position: "fixed",
-            left: Math.min(tip.x + 8, window.innerWidth - 280),
-            top: Math.min(Math.max(tip.y, 50), window.innerHeight - 70),
-            transform: "translateY(-50%)",
+            left:
+              tip.place === "below"
+                ? Math.min(tip.x, window.innerWidth - 280)
+                : Math.min(tip.x + 8, window.innerWidth - 280),
+            top:
+              tip.place === "below"
+                ? Math.min(tip.y, window.innerHeight - 90)
+                : Math.min(Math.max(tip.y, 50), window.innerHeight - 70),
+            transform: tip.place === "below" ? "none" : "translateY(-50%)",
             zIndex: 60,
             pointerEvents: "none",
             background: "#22232b",
