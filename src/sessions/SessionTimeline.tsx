@@ -163,8 +163,6 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
   }
 
   const hoverHour = hh ?? (hb != null ? Math.floor(hb / 6) : null);
-  const seqLabel = (r: TimelineRowWithSource) =>
-    r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—";
   // place="right" 紧贴元素右侧竖直居中（默认）；place="below" 落在元素正下方（左侧时间表头用，避免遮挡所在行）
   const showTip = (e: React.MouseEvent, t: Omit<NonNullable<Tip>, "x" | "y" | "place">, place: "right" | "below" = "right") => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -298,13 +296,13 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                       setHb(null);
                       setHh(null);
                       // 列标头只司管它负责的主线会话 → 统一的单会话面板（与格子/插队段一致），不再列整轨
-                      showTip(e, { big: main.count, title: `${seqLabel(main)}  ${main.title || main.session_id.slice(0, 8)}`, sub: `${main.project_name || "—"} · ${main.source_label}` });
+                      showTip(e, { big: main.count, title: `${main.title || main.session_id.slice(0, 8)}`, sub: `${main.project_name || "—"} · ${main.source_label}` });
                     }}
                     onMouseLeave={clear}
                   >
                     <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)" }}>
                       {main
-                        ? `${seqLabel(main)} ${main.title || main.session_id.slice(0, 8)}`
+                        ? `${main.title || main.session_id.slice(0, 8)}`
                         : (labelsByLane[lane] ?? []).join(" ")}
                     </span>
                   </div>
@@ -417,7 +415,7 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                                   setHh(null);
                                   if (!info) return;
                                   const r = info.row;
-                                  showTip(e, { big: info.n, title: `${seqLabel(r)}  ${r.title || r.session_id.slice(0, 8)}`, sub: `${pad2(h)}:${pad2(i * 10)}–${pad2(h)}:${pad2(i * 10 + 9)} · ${r.project_name || "—"} · ${r.source_label}` });
+                                  showTip(e, { big: info.n, title: `${r.title || r.session_id.slice(0, 8)}`, sub: `${pad2(h)}:${pad2(i * 10)}–${pad2(h)}:${pad2(i * 10 + 9)} · ${r.project_name || "—"} · ${r.source_label}` });
                                 }}
                                 onMouseLeave={clear}
                               >
@@ -449,7 +447,7 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                     setHl(null);
                     setHh(null);
                     const rect = e.currentTarget.getBoundingClientRect();
-                    setTip({ x: rect.right, y: (rect.top + rect.bottom) / 2, big: s.row.count, title: `${s.label}  ${s.row.title || s.row.session_id.slice(0, 8)}`, sub: `${s.row.project_name || "—"} · ${s.row.source_label}` });
+                    setTip({ x: rect.right, y: (rect.top + rect.bottom) / 2, big: s.row.count, title: `${s.row.title || s.row.session_id.slice(0, 8)}`, sub: `${s.row.project_name || "—"} · ${s.row.source_label}` });
                   }}
                   onMouseLeave={clear}
                   onClick={() => {
@@ -460,7 +458,7 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                 >
                   <span data-arrow style={{ fontSize: 6, lineHeight: 1, display: "none", opacity: 0.85, flexShrink: 0 }} />
                   <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)" }}>
-                    {`${s.label} ${s.row.title || s.row.session_id.slice(0, 8)}`}
+                    {`${s.row.title || s.row.session_id.slice(0, 8)}`}
                   </span>
                 </div>
               );
