@@ -58,11 +58,14 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   // 滚动贴底：仅在「切换数据集(切天/筛选, 首条变了)」或「用户本就停在底部」时贴底，
   // 不打断用户向上翻看历史（父组件轮询刷新会换 messages 引用，不能每次都拉回底部）
   const scrollRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const firstKeyRef = useRef("");
-  // 浮动会话表头 imperative 布局（绕开 React 重渲染，滚动直接改 DOM top/亮度）
-  const headerRefs = useRef<(HTMLDivElement | null)[]>([]);
+  // 抗抖动：贴边表头放在不滚动的 overlay 层（屏幕坐标恒定，不随合成器滚动闪）；
+  // 视野内表头留在流里(inline marker)，由合成器平滑滚动。markerRefs=流内锚点，overlayHeaderRefs=overlay 贴边副本。
   const markerRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const overlayHeaderRefs = useRef<(HTMLDivElement | null)[]>([]);
   const layoutRef = useRef<() => void>(() => {});
   const onScroll = () => {
     const el = scrollRef.current;
@@ -144,8 +147,8 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   }, [ordered, single, singleSession, laneOf, sessionTitles]);
   const floatSegs = segs;
   const segByAnchor = useMemo(() => {
-    const map = new Map<string, { idx: number; isFloat: boolean }>();
-    for (const s of segs) map.set(s.anchorKey, { idx: s.idx, isFloat: s.isFloat });
+    const map = new Map<string, Seg>();
+    for (const s of segs) map.set(s.anchorKey, s);
     return map;
   }, [segs]);
   const useFloat = floatSegs.length > 0;
@@ -182,76 +185,80 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     return (
       <Fragment key={`${ck}:${ci}`}>
         {seg && (
-          // 段首锚点：插队段占位 MARKER_H 给浮动表头留位；主线段高 0(仅供静态表头点击定位)。offsetTop 供 layoutRef 测量
-          <div aria-hidden ref={(el) => { markerRefs.current[seg.idx] = el; }} style={{ height: seg.isFloat ? MARKER_H : 0 }} />
+          // 段首锚点 = 流内「自然位置」会话表头：随内容被合成器平滑滚动(不抖)；滚出视口后由 overlay 贴边副本接管。
+          // marker 同时占位 MARKER_H、其 getBoundingClientRect 供 layoutRef 测段顶屏幕 Y。
+          <div ref={(el) => { markerRefs.current[seg.idx] = el; }} style={{ height: MARKER_H }}>
+            <div onClick={() => scrollToSeg(seg.idx)} title="点击滚到该会话开头" style={{ height: SEG_H, cursor: "pointer" }}>
+              <LaneHeader head={seg.head} />
+            </div>
+          </div>
         )}
         <StreamCard m={m} shade={bucket % 2 === 0} />
       </Fragment>
     );
   };
 
-  // 点击浮动表头：平滑滚到该段段首
+  // 点击表头：平滑滚到该会话段首（用 getBoundingClientRect，不依赖 offsetParent）
   const scrollToSeg = (idx: number) => {
     const el = scrollRef.current;
-    const wrap = el?.firstElementChild as HTMLElement | null;
     const mk = markerRefs.current[idx];
-    if (el && wrap && mk) el.scrollTo({ top: wrap.offsetTop + mk.offsetTop - 4, behavior: "smooth" });
+    if (!el || !mk) return;
+    const target = el.scrollTop + (mk.getBoundingClientRect().top - el.getBoundingClientRect().top) - 4;
+    el.scrollTo({ top: target, behavior: "smooth" });
   };
 
-  // imperative 贴边叠层布局（按 lane 分组）：
-  //   · 视野内 → 浮在段首自然位置；滚过 → 贴顶叠放；未到 → 贴底叠放（各方向整高紧邻、最多 STACK_MAX_S 层）。
-  //   · bright：该会话内容 [topY, 下一段顶) 与视口 [vTop, vBot] 有重叠 → 亮；否则(纯远方提示)用不透明滤镜暗下去。
-  //   · 暗用 grayscale+brightness（不透明，避免底部卡片文字透上来）；按 lane 算横向 left/width 落在对应列。
+  // 抗抖动叠层布局：贴边表头放 overlay(不滚动层、屏幕坐标恒定 → 合成器滚动时不闪)；视野内由流内 inline 表头平滑显示。
+  //   · 各 lane 恒按时间(marker 屏幕 Y)升序排序 → 叠层顺序固定；滚过→贴顶叠放、未到→贴底叠放(整高紧邻、≤STACK_MAX)。
+  //   · 当前会话亮、远方提示用 grayscale+brightness 不透明暗下去。横向用 clientWidth、纵向用 clientHeight(排除滚动条→逃开它)。
   layoutRef.current = () => {
     if (!useFloat) return;
     const el = scrollRef.current;
-    const wrap = el?.firstElementChild as HTMLElement | null;
+    const wrap = wrapRef.current;
     if (!el || !wrap) return;
-    const wrapTop = wrap.offsetTop;
+    const sRect = el.getBoundingClientRect();
+    const wrapScreenLeft = wrap.getBoundingClientRect().left - sRect.left; // 含横向滚动 + 居中偏移
     const wrapW = wrap.clientWidth;
+    const vW = el.clientWidth; // 排除竖向滚动条
     const laneW = single ? wrapW : (wrapW - (laneCount - 1) * LANE_GAP) / laneCount;
-    const vTop = el.scrollTop - wrapTop;
-    const vBot = vTop + el.clientHeight;
-    const DIM = "grayscale(1) brightness(0.55)"; // 不透明的"暗"
+    const vTop = 0;                // overlay 顶 = 卡片区视口顶
+    const vBot = el.clientHeight;  // 排除横向滚动条 → 贴底表头逃开它
     const byLane: Record<number, { idx: number; topY: number; bottom: number }[]> = {};
     for (const s of floatSegs) {
       const mk = markerRefs.current[s.idx];
-      (byLane[s.lane] ??= []).push({ idx: s.idx, topY: mk ? mk.offsetTop : 0, bottom: Infinity });
+      const y = mk ? mk.getBoundingClientRect().top - sRect.top : 0; // 段顶屏幕 Y
+      (byLane[s.lane] ??= []).push({ idx: s.idx, topY: y, bottom: Infinity });
     }
-    const place = new Map<number, { top: number; z: number; bright: boolean }>();
+    const place = new Map<number, { top: number; bright: boolean }>(); // 只放「贴边」的；视野内不放(由 inline 表头显示)
     for (const k of Object.keys(byLane)) {
-      // 恒按时间(topY)升序排列 → 叠层顺序始终固定，不随谁高亮/变暗而重排
-      const arr = byLane[Number(k)].sort((a, b) => a.topY - b.topY);
+      const arr = byLane[Number(k)].sort((a, b) => a.topY - b.topY); // 恒按时间升序 → 叠层顺序固定
       arr.forEach((p, i) => { p.bottom = i + 1 < arr.length ? arr[i + 1].topY : Infinity; });
       const bright = (p: { topY: number; bottom: number }) => p.topY < vBot && p.bottom > vTop;
-      const above = arr.filter((p) => p.topY < vTop);                              // 已滚过(含当前) → 贴顶
-      const inView = arr.filter((p) => p.topY >= vTop && p.topY <= vBot - SEG_H);   // 视野内 → 自然位置
-      const below = arr.filter((p) => p.topY > vBot - SEG_H);                       // 还没到 → 贴底
-      // 贴顶：留最近 STACK_MAX 个，但仍按时间升序(最早在上、当前在最下、紧贴内容)
-      const aTop = above.slice(-STACK_MAX_S);
-      aTop.forEach((p, j) => place.set(p.idx, { top: vTop + j * SEG_H, z: 12 + j, bright: bright(p) }));
-      inView.forEach((p) => place.set(p.idx, { top: p.topY, z: 12, bright: bright(p) }));
-      // 贴底：留最近 STACK_MAX 个，按时间升序(最近的在上、最远在最下、贴底边)
+      const above = arr.filter((p) => p.topY < vTop);          // 滚过 → 贴顶(含当前，在最下、紧贴内容)
+      const below = arr.filter((p) => p.topY > vBot - SEG_H);  // 未到 → 贴底
+      above.slice(-STACK_MAX_S).forEach((p, j) => place.set(p.idx, { top: vTop + j * SEG_H, bright: bright(p) }));
       const bBot = below.slice(0, STACK_MAX_S);
-      bBot.forEach((p, j) => place.set(p.idx, { top: vBot - (bBot.length - j) * SEG_H, z: 12 + (bBot.length - j), bright: bright(p) }));
+      bBot.forEach((p, j) => place.set(p.idx, { top: vBot - (bBot.length - j) * SEG_H, bright: bright(p) }));
     }
     for (const s of floatSegs) {
-      const h = headerRefs.current[s.idx];
+      const h = overlayHeaderRefs.current[s.idx];
       if (!h) continue;
       const pl = place.get(s.idx);
-      if (!pl) { h.style.display = "none"; continue; }
+      const left = wrapScreenLeft + (single ? 0 : s.lane * (laneW + LANE_GAP));
+      // 视野内 → 隐藏(由 inline 表头显示)；横向滚出卡片区的 lane 也隐藏
+      if (!pl || left + laneW <= 0 || left >= vW) { h.style.display = "none"; continue; }
       h.style.display = "flex";
       h.style.top = `${pl.top}px`;
-      h.style.left = single ? "0px" : `${s.lane * (laneW + LANE_GAP)}px`;
+      h.style.left = `${left}px`;
       h.style.width = `${laneW}px`;
-      h.style.zIndex = String(pl.z);
-      h.style.filter = pl.bright ? "none" : DIM; // 当前会话亮，远方提示不透明暗下去
+      h.classList.toggle("seg-dim", !pl.bright); // 暗用 class(只压暗保留颜色) + :hover 高亮
     }
   };
 
   return (
+   <div style={{ position: "relative", height: "100%" }}>
     <div ref={scrollRef} onScroll={onScroll} className={`overflow-auto h-full py-4 ${single ? "px-5" : "px-3"}`}>
       <div
+        ref={wrapRef}
         className={single ? "mx-auto" : undefined}
         style={single ? { maxWidth: 760, position: "relative" } : { minWidth: laneCount * MIN_LANE_W + (laneCount - 1) * LANE_GAP, position: "relative" }}
       >
@@ -260,7 +267,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
           <div className="sticky flex" style={{ top: -16, zIndex: 10, paddingTop: 16, paddingBottom: 7, justifyContent: "center", background: "#181818" }}>
             {/* 单会话：居中迷你单表头（紧凑、按内容定宽），悬浮看全貌；点击回到开头 */}
             <div onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })} title="点击回到开头" style={{ minWidth: 0, display: "flex", alignItems: "stretch", height: 25, cursor: "pointer" }}>
-              <LaneHeader head={soleHead} popAlign="center" mini />
+              <LaneHeader head={soleHead} mini />
             </div>
           </div>
         )}
@@ -311,25 +318,28 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
           );
         })}
 
-        {/* 浮动会话表头（绝对定位，layoutRef 滚动时改 top/left/width：视野内浮段首上方、滚过贴顶、未到贴底，
-            同轨叠放按整高紧邻）。文本与静态主线表头一致：填满列宽 + 超出 ellipsis（非 mini） */}
-        {useFloat &&
-          floatSegs.map((s) => (
-            <div
-              key={s.idx}
-              ref={(el) => { headerRefs.current[s.idx] = el; }}
-              onClick={() => scrollToSeg(s.idx)}
-              title="点击滚到该会话"
-              style={{ position: "absolute", left: 0, width: "100%", display: "none", alignItems: "center", height: SEG_H, cursor: "pointer", background: "#181818" }}
-            >
-              {/* 包裹用普通 block(flex:1 minWidth:0)，让 .lane-head 以 block 填满列宽 → project/session 正常 fill + ellipsis */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <LaneHeader head={s.head} popAlign="center" />
-              </div>
-            </div>
-          ))}
       </div>
     </div>
+    {/* 贴边表头 overlay：脱离滚动容器、屏幕坐标恒定 → 合成器滚动时不抖动。layoutRef 改 top/left/width/filter。 */}
+    {useFloat && (
+      <div ref={overlayRef} style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none", zIndex: 11 }}>
+        {floatSegs.map((s) => (
+          <div
+            key={s.idx}
+            ref={(el) => { overlayHeaderRefs.current[s.idx] = el; }}
+            onClick={() => scrollToSeg(s.idx)}
+            title="点击滚到该会话开头"
+            style={{ position: "absolute", left: 0, width: 0, display: "none", alignItems: "center", height: SEG_H, cursor: "pointer", background: "transparent", pointerEvents: "auto" }}
+          >
+            {/* 普通 block(flex:1 minWidth:0)，让 .lane-head 填满列宽 → project/session 正常 fill + ellipsis */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <LaneHeader head={s.head} />
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+   </div>
   );
 }
 
@@ -534,22 +544,14 @@ function Bullet({ icon, label, grad, accent, zi, first, flex, fill, maxW }: { ic
 
 // mini=true（单会话居中表头）：项目/会话按内容定宽 + maxW 封顶省略，整体紧凑不铺满；
 // mini=false（多轨道）：项目/会话 flex 充满轨道列、absolute fill 省略。
-function LaneHeader({ head, popAlign = "center", mini = false }: { head?: LaneHeadInfo; popAlign?: "left" | "center" | "right"; mini?: boolean }) {
+// 表头本身即悬浮面板，故不再额外弹「看全貌」说明面板（避免两个悬浮面板重复）；title 给完整文本兜底。
+function LaneHeader({ head, mini = false }: { head?: LaneHeadInfo; mini?: boolean }) {
   if (!head) return null;
-  const popCls = popAlign === "left" ? " pop-left" : popAlign === "right" ? " pop-right" : "";
   return (
-    <div className="lane-head" style={{ position: "relative", height: 25, minWidth: 0, display: "flex", alignItems: "stretch" }}>
+    <div className="lane-head" title={`${head.sourceLabel} › ${head.projectName} › ${head.sessionTitle}`} style={{ position: "relative", height: 25, minWidth: 0, display: "flex", alignItems: "stretch" }}>
       <Bullet icon={<Monitor size={12} />} label={head.sourceLabel} grad="linear-gradient(180deg,#36424f,#28323d)" accent="#5aa0e0" zi={3} first flex="0 1 auto" maxW={96} />
       <Bullet icon={<FolderGit2 size={12} />} label={head.projectName} grad="linear-gradient(180deg,#35432f,#27311f)" accent="#6fc23f" zi={2} flex={mini ? "0 1 auto" : "1 1 0"} fill={!mini} maxW={mini ? 150 : undefined} />
       <Bullet icon={<MessagesSquare size={12} />} label={head.sessionTitle} grad="linear-gradient(180deg,#3b3252,#2c2540)" accent="#9d6fe8" zi={1} flex={mini ? "0 1 auto" : "1.6 1 0"} fill={!mini} maxW={mini ? 230 : undefined} />
-      {/* 悬浮看全貌：向下弹出不省略的完整面包屑。边缘轨道朝容器内侧展开(左轨向右/右轨向左)，不溢出被裁 */}
-      <div className={`lane-head-pop${popCls}`}>
-        <span className="inline-flex items-center" style={{ gap: 4, color: "#7cc0ee" }}><Monitor size={12} />{head.sourceLabel}</span>
-        <span style={{ color: "#5b626c" }}>›</span>
-        <span className="inline-flex items-center" style={{ gap: 4, color: "#8fd364" }}><FolderGit2 size={12} />{head.projectName}</span>
-        <span style={{ color: "#5b626c" }}>›</span>
-        <span className="inline-flex items-center" style={{ gap: 4, color: "#b89aef" }}><MessagesSquare size={12} />{head.sessionTitle}</span>
-      </div>
     </div>
   );
 }
