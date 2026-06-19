@@ -38,6 +38,7 @@ export default function SessionsApp() {
   const [syncing, setSyncing] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
 
   const [stream, setStream] = useState<StreamMessage[]>([]);
   const [rows, setRows] = useState<TimelineRowWithSource[]>([]);
@@ -226,6 +227,9 @@ export default function SessionsApp() {
             onToggleCollapse={() => setSidebarCollapsed(true)}
             refreshing={refreshing}
             syncing={syncing}
+            draftCount={drafts.filter((d) => !d.done).length}
+            draftOpen={draftOpen}
+            onToggleDrafts={() => setDraftOpen((v) => !v)}
           />
           {/* 竖排迷你时间轴：左栏下方，自带「紧凑」轨道分配（实验：最少轨道 + 充实轨在左） */}
           <div className="flex-1 min-h-0">
@@ -295,7 +299,7 @@ export default function SessionsApp() {
       )}
 
       {/* 预备发言：右上角悬浮 HUD（position:fixed，不占文档流） */}
-      <DraftBar drafts={drafts} onChange={persistDrafts} sessions={sessionOptions} defaultTarget={null} />
+      <DraftBar drafts={drafts} onChange={persistDrafts} sessions={sessionOptions} defaultTarget={null} open={draftOpen} onOpenChange={setDraftOpen} />
     </div>
   );
 }

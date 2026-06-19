@@ -34,6 +34,10 @@ interface Props {
   sessions: SessionOption[];
   /** 当前选中的会话（时间轴筛选），作为新待办的默认归属 */
   defaultTarget: SessionOption | null;
+  /** 受控展开态：触发入口已挪到左栏时间轴标题行，故 open 由父组件持有 */
+  open: boolean;
+  /** 请求开/收面板 */
+  onOpenChange: (open: boolean) => void;
 }
 
 const nowUnix = () => Math.floor(Date.now() / 1000);
@@ -69,8 +73,7 @@ async function copyText(text: string): Promise<boolean> {
  * 向右"伸展"成悬浮面板，叠在卡片之上、不挤占任何组件。
  * 始终展示全部未完成（不随选中日期收窄），即「纵观全局已写好的发言」。
  */
-export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: Props) {
-  const [open, setOpen] = useState(false);
+export default function DraftBar({ drafts, onChange, sessions, defaultTarget, open, onOpenChange }: Props) {
   const [text, setText] = useState("");
   const [targetKey, setTargetKey] = useState<string>(""); // "" = 通用
   const [selOpen, setSelOpen] = useState(false); // 归属下拉是否展开（自定义，非原生 select）
@@ -79,7 +82,6 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
   const [pushedId, setPushedId] = useState<string | null>(null);
   const [pushErr, setPushErr] = useState<{ id: string; msg: string } | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const handleRef = useRef<HTMLButtonElement | null>(null);
 
   // 时间轴选中会话变化时，把新待办默认归属切到该会话。
   // 依赖稳定的 key 字符串（非对象引用），避免 15s 轮询重建对象时反复覆盖手动选择。
@@ -92,12 +94,14 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") onOpenChange(false);
     };
     const onDown = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (panelRef.current?.contains(t) || handleRef.current?.contains(t)) return;
-      setOpen(false);
+      if (panelRef.current?.contains(t)) return;
+      // 触发入口（时间轴标题行的「预备发言」按钮）自己 toggle，点它不在此处收回
+      if (t instanceof Element && t.closest("[data-draft-trigger]")) return;
+      onOpenChange(false);
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onDown);
@@ -105,7 +109,7 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onDown);
     };
-  }, [open]);
+  }, [open, onOpenChange]);
 
   const pending = useMemo(
     () => drafts.filter((d) => !d.done).sort((a, b) => b.created_unix - a.created_unix),
@@ -201,40 +205,9 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
   const canSubmit = !!text.trim();
 
   return (
-    <div style={{ position: "fixed", right: 16, top: 16, zIndex: 45 }}>
-      {/* 收起态：左下角常驻 handle */}
-      <button
-        ref={handleRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="draft-hud-handle"
-        title="预备发言：提前写好未来要发给 Claude 的话"
-        style={{ opacity: open ? 0 : 1, pointerEvents: open ? "none" : "auto", transition: "opacity .18s ease" }}
-      >
-        <ListTodo size={15} style={{ color: "#5fd3e0" }} />
-        预备发言
-        {pending.length > 0 && (
-          <span
-            className="tabular-nums"
-            style={{
-              fontSize: 11,
-              fontWeight: 700,
-              minWidth: 17,
-              height: 17,
-              padding: "0 4px",
-              borderRadius: 9,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "#0b1316",
-              background: "#5fd3e0",
-            }}
-          >
-            {pending.length}
-          </span>
-        )}
-      </button>
-
+    <div style={{ position: "fixed", right: 16, top: 16, zIndex: 45, pointerEvents: "none" }}>
+      {/* 触发入口已挪到左栏时间轴标题行（受控 open）；此处仅保留悬浮展开面板。
+          容器 pointerEvents:none 避免收起时空壳拦右上角点击；面板 .open 自身 pointer-events:auto 恢复可交互 */}
       {/* 展开态：HUD 面板（始终在 DOM，靠 class 切 clip 动画） */}
       <div
         ref={panelRef}
@@ -265,7 +238,7 @@ export default function DraftBar({ drafts, onChange, sessions, defaultTarget }: 
           </span>
           <button
             type="button"
-            onClick={() => setOpen(false)}
+            onClick={() => onOpenChange(false)}
             title="收起（Esc）"
             className="inline-flex items-center justify-center"
             style={{ width: 24, height: 24, borderRadius: 7, color: "#9ca3af", background: "rgba(255,255,255,0.04)", border: "1px solid #2c3338", cursor: "pointer" }}

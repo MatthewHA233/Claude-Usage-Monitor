@@ -29,7 +29,8 @@ TypeScript 类型检查：`npx tsc --noEmit`（前端），Rust 检查直接用 
   用 PowerShell `Start-Process` detached 启动（exe 独立于会话，重启 Claude Code 不影响它）。
   注意 IPv4/IPv6 撞端口：9224 空闲时 WebView2 绑 IPv4 `127.0.0.1`（MCP 能连）；若该端口已被别的 WebView2 占用，
   本 app 会退到绑 IPv6 `::1`，而 MCP 连的是 IPv4 → 连不上（换一个真正空闲的端口即可）。
-- **连接**：`list_pages` 应只看到 `http://localhost:1420/`（本 app 前端，需 `npm run dev` 在跑）。
+- **连接**：`list_pages` 应只看到 `http://localhost:1430/`（本 app 前端，需 `npm run dev` 在跑）。
+  端口 **1430**（HMR 1431）：1420 被同机另一个 Tauri 项目（磁盘扫描器）占用，故本项目改用 1430（见 `vite.config.ts` + `tauri.conf.json` 的 `devUrl`；改 devUrl 后需重新 `cargo xwin build` 才会烘进 exe）。
 - **跑命令**：`evaluate_script` 里用 `window.__TAURI__.core.invoke('命令名', { 参数 })`
   （`tauri.conf.json` 已开 `app.withGlobalTauri: true`，故页面里有全局 `__TAURI__`）。
 - 新增/改 MCP（配置在 `~/.claude.json` 的 `mcpServers`）需**重启 Claude Code 会话**才加载。

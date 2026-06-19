@@ -1,5 +1,5 @@
 import { type CSSProperties } from "react";
-import { Wifi, WifiOff, RefreshCw, ChevronLeft, ChevronRight, PanelLeftClose } from "lucide-react";
+import { Wifi, WifiOff, RefreshCw, ChevronLeft, ChevronRight, PanelLeftClose, ListTodo } from "lucide-react";
 import type { DailyStat } from "./types";
 import { nfmt } from "./format";
 import Heatmap from "./Heatmap";
@@ -26,6 +26,12 @@ interface Props {
   onToggleCollapse: () => void;
   refreshing: boolean;
   syncing: boolean;
+  /** 「预备发言」待办数（徽章） */
+  draftCount?: number;
+  /** 「预备发言」面板是否展开（高亮按钮） */
+  draftOpen?: boolean;
+  /** 开/收「预备发言」面板 */
+  onToggleDrafts?: () => void;
 }
 
 export default function Sidebar({
@@ -47,6 +53,9 @@ export default function Sidebar({
   onToggleCollapse,
   refreshing,
   syncing,
+  draftCount = 0,
+  draftOpen = false,
+  onToggleDrafts,
 }: Props) {
   return (
     <div className="shrink-0 flex flex-col" data-tauri-drag-region>
@@ -57,6 +66,29 @@ export default function Sidebar({
           {syncing && <span className="text-[10px] animate-pulse" style={{ color: "#8b9298" }}>初始化中…</span>}
         </div>
         <div className="flex items-center gap-1">
+          {/* 预备发言入口（受控展开，面板悬浮于右上） */}
+          <button
+            type="button"
+            data-draft-trigger
+            title="预备发言：提前写好未来要发给 Claude 的话"
+            onClick={onToggleDrafts}
+            className="inline-flex items-center justify-center gap-1"
+            style={{
+              height: 26,
+              width: draftCount > 0 ? undefined : 28,
+              padding: draftCount > 0 ? "0 7px" : 0,
+              borderRadius: 7,
+              color: draftOpen ? "#06131a" : "#5fd3e0",
+              background: draftOpen ? "#5fd3e0" : "rgba(95,211,224,0.10)",
+              border: `1px solid ${draftOpen ? "#5fd3e0" : "rgba(95,211,224,0.34)"}`,
+              cursor: "pointer",
+            }}
+          >
+            <ListTodo size={14} />
+            {draftCount > 0 && (
+              <span className="tabular-nums" style={{ fontSize: 10.5, fontWeight: 700, lineHeight: 1 }}>{draftCount}</span>
+            )}
+          </button>
           <button
             type="button"
             title={networkOffline ? "连接管理（有机器离线）" : "连接管理（跨机器）"}
