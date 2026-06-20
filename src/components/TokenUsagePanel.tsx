@@ -193,8 +193,8 @@ export default function TokenUsagePanel({ report, loading, error, onRefresh }: P
         </>
       )}
 
-      <div className="overflow-hidden" style={{ border: "1px solid #303030", borderRadius: 8 }}>
-        <table className="w-full text-xs" style={{ borderCollapse: "collapse" }}>
+      <div className="overflow-x-auto" style={{ border: "1px solid #303030", borderRadius: 8 }}>
+        <table className="w-full text-xs" style={{ borderCollapse: "collapse", minWidth: "max-content" }}>
           <thead style={{ background: "#202020", color: "#9ca3af" }}>
             <tr>
               <Th>日期</Th>
@@ -333,9 +333,9 @@ function TokenUsageChart({ rows, multiSource }: { rows: TokenUsageDay[]; multiSo
           <>
             <span style={{ color: "#6b7280" }}>·</span>
             {sources.map((s) => (
-              <span key={s} className="inline-flex items-center gap-1.5" style={{ color: "#9ca3af" }}>
-                <span style={{ width: 11, height: 11, borderRadius: 2, background: "transparent", boxShadow: `inset 0 0 0 1.5px ${sourceColor(s)}` }} />
-                {s || "本机"}
+              <span key={s} className="inline-flex items-center gap-1.5" style={{ color: "#9ca3af" }} title={s || "本机"}>
+                <span style={{ width: 11, height: 11, borderRadius: 2, background: "transparent", boxShadow: `inset 0 0 0 1.5px ${sourceColor(s)}`, flexShrink: 0 }} />
+                {(s || "本机").replace(/\.local$/i, "")}
               </span>
             ))}
           </>
@@ -428,9 +428,13 @@ function TokenRow({ row, showSource, dateRowSpan }: { row: TokenUsageDay; showSo
         </Td>
       )}
       {showSource && (
-        <Td>
-          {dot(sourceColor(row.source))}
-          {row.source || "本机"}
+        <Td title={row.source || "本机"}>
+          <div style={{ display: "flex", alignItems: "center", maxWidth: 160, minWidth: 0 }}>
+            {dot(sourceColor(row.source))}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {(row.source || "本机").replace(/\.local$/i, "")}
+            </span>
+          </div>
         </Td>
       )}
       <Td>

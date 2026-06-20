@@ -222,29 +222,41 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     const laneW = single ? wrapW : (wrapW - (laneCount - 1) * LANE_GAP) / laneCount;
     const vTop = 0;                // overlay 顶 = 卡片区视口顶
     const vBot = el.clientHeight;  // 排除横向滚动条 → 贴底表头逃开它
-    const byLane: Record<number, { idx: number; topY: number; bottom: number }[]> = {};
+    const byLane: Record<number, { idx: number; topY: number }[]> = {};
     for (const s of floatSegs) {
       const mk = markerRefs.current[s.idx];
       const y = mk ? mk.getBoundingClientRect().top - sRect.top : 0; // 段顶屏幕 Y
-      (byLane[s.lane] ??= []).push({ idx: s.idx, topY: y, bottom: Infinity });
+      (byLane[s.lane] ??= []).push({ idx: s.idx, topY: y });
     }
-    const place = new Map<number, { top: number; bright: boolean }>(); // 只放「贴边」的；视野内不放(由 inline 表头显示)
+    const place = new Map<number, { top: number; bright: boolean }>(); // overlay 贴边副本：idx→位置
+    const stuck = new Set<number>(); // 贴顶的段 → 隐藏其内联表头，改由 overlay 副本显示(避免双重影/重叠)
     for (const k of Object.keys(byLane)) {
       const arr = byLane[Number(k)].sort((a, b) => a.topY - b.topY); // 恒按时间升序 → 叠层顺序固定
-      arr.forEach((p, i) => { p.bottom = i + 1 < arr.length ? arr[i + 1].topY : Infinity; });
-      const bright = (p: { topY: number; bottom: number }) => p.topY < vBot && p.bottom > vTop;
-      const above = arr.filter((p) => p.topY < vTop);          // 滚过 → 贴顶(含当前，在最下、紧贴内容)
+      // 顶部贪心占槽：从上往下槽位 0,1,2…；某段滚到它的槽位(上方已贴段数×SEG_H)即贴住、停在上一个的下沿。
+      // → 新进来的会话表头不再冲进上方栈、不重叠(修复"y 同位、z 压下")；slotY 封顶 STACK_MAX×SEG_H(栈不超高)。
+      let slotY = vTop;
+      const above: typeof arr = [];
+      for (const p of arr) {
+        if (p.topY <= slotY) { above.push(p); slotY = Math.min(slotY + SEG_H, vTop + STACK_MAX_S * SEG_H); }
+        else break;
+      }
       const below = arr.filter((p) => p.topY > vBot - SEG_H);  // 未到 → 贴底
-      above.slice(-STACK_MAX_S).forEach((p, j) => place.set(p.idx, { top: vTop + j * SEG_H, bright: bright(p) }));
+      above.forEach((p) => stuck.add(p.idx)); // 贴顶段一律隐藏内联(含被栈挤出 STACK_MAX 的，彻底不显示)
+      // 只有栈最底那枚(最贴内容=当前会话)亮；其上(更早滚过)与贴底(未到的将来)一律暗下去
+      const aboveShown = above.slice(-STACK_MAX_S);
+      aboveShown.forEach((p, j) => place.set(p.idx, { top: vTop + j * SEG_H, bright: j === aboveShown.length - 1 }));
       const bBot = below.slice(0, STACK_MAX_S);
-      bBot.forEach((p, j) => place.set(p.idx, { top: vBot - (bBot.length - j) * SEG_H, bright: bright(p) }));
+      bBot.forEach((p, j) => place.set(p.idx, { top: vBot - (bBot.length - j) * SEG_H, bright: false }));
     }
     for (const s of floatSegs) {
+      // 贴顶段隐藏内联表头(由 overlay 显示)；其余(视野内/贴底)内联正常显示，由 overflow 裁切边缘
+      const inner = (markerRefs.current[s.idx]?.firstElementChild ?? null) as HTMLElement | null;
+      if (inner) inner.style.visibility = stuck.has(s.idx) ? "hidden" : "visible";
       const h = overlayHeaderRefs.current[s.idx];
       if (!h) continue;
       const pl = place.get(s.idx);
       const left = wrapScreenLeft + (single ? 0 : s.lane * (laneW + LANE_GAP));
-      // 视野内 → 隐藏(由 inline 表头显示)；横向滚出卡片区的 lane 也隐藏
+      // 未贴边 / 横向滚出卡片区的 lane → 隐藏 overlay 副本
       if (!pl || left + laneW <= 0 || left >= vW) { h.style.display = "none"; continue; }
       h.style.display = "flex";
       h.style.top = `${pl.top}px`;
@@ -525,6 +537,9 @@ function Bullet({ icon, label, grad, accent, zi, first, flex, fill, maxW }: { ic
         style={{
           position: fill ? "absolute" : "relative",
           inset: fill ? 0 : undefined,
+          // fill=false（设备/紧凑段）内容层为 relative，须自带宽度上界 + 裁切，否则 label 的 ellipsis 失效会溢出
+          maxWidth: fill ? undefined : maxW,
+          overflow: "hidden",
           height: "100%",
           gap: 4,
           paddingLeft: first ? 9 : ARROW + 5,
