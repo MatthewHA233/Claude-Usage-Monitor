@@ -629,13 +629,14 @@ impl Database {
               output_tokens, total_tokens, cost_usd, models_json, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(source, provider, date) DO UPDATE SET
-                input_tokens = excluded.input_tokens,
-                cache_read_tokens = excluded.cache_read_tokens,
-                cache_creation_tokens = excluded.cache_creation_tokens,
-                output_tokens = excluded.output_tokens,
-                total_tokens = excluded.total_tokens,
-                cost_usd = excluded.cost_usd,
-                models_json = excluded.models_json,
+                input_tokens = MAX(input_tokens, excluded.input_tokens),
+                cache_read_tokens = MAX(cache_read_tokens, excluded.cache_read_tokens),
+                cache_creation_tokens = MAX(cache_creation_tokens, excluded.cache_creation_tokens),
+                output_tokens = MAX(output_tokens, excluded.output_tokens),
+                total_tokens = MAX(total_tokens, excluded.total_tokens),
+                cost_usd = MAX(COALESCE(cost_usd, 0), COALESCE(excluded.cost_usd, 0)),
+                models_json = CASE WHEN excluded.total_tokens >= total_tokens
+                                   THEN excluded.models_json ELSE models_json END,
                 updated_at = excluded.updated_at",
             params![
                 day.source,
@@ -654,7 +655,8 @@ impl Database {
         Ok(())
     }
 
-    /// 删某来源在 [since, until] 内的全部 token 日行。配合 rebuild/远程同步做窗口内全量覆盖。
+    /// 删某来源在 [since, until] 内的全部 token 日行。（改"只增 keep-max"后已不再用于同步；保留备用）
+    #[allow(dead_code)]
     pub fn delete_token_usage_days_for_source(&self, source: &str, since: &str, until: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

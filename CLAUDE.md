@@ -101,7 +101,9 @@ Claude Pro 三账号用量追踪与调度推荐工具。
   因此**只有经更新后的启动器进入/恢复的会话**才带 watcher——旧启动器拉起的旧会话需重新 `ccrun` 进入一次才生效。
 
 **中继生命周期**：由 launcher 幂等自启 —— `session_api_autostart.py` 的 `ensure_running()`，
-在 `claude_launcher.py` / `codex_launcher.py` 启动时调用；detached、不弹窗、空闲 900s 自动退、多窗口竞态由 bind 失败兜底。
+在 `claude_launcher.py` / `codex_launcher.py` 启动时调用；detached、不弹窗、多窗口竞态由 bind 失败兜底。
+**常驻不退**（`IDLE_TIMEOUT_SECONDS=0`，v2.2.0 起）：中继是归档数据出口，别的机器随时可能来读，不再空闲自动退；
+关机即没、重启随 launcher 幂等自启、`pkill` 可手动停（改代码后必须 pkill 重跑才生效）。
 **关键约束**：本机读文件系统**不需要**中继；只有「别的机器要读本机数据」才需要在那台机器跑中继。
 
 **物化库**：`<LocalAppData>/claude-usage-monitor/sessions.db`（与 usage.db 同目录、独立文件）。

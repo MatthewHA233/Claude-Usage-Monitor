@@ -26,6 +26,8 @@ pub enum ReplyBlock {
 
 /// 一条「我的发言 + 折叠回复」
 pub struct UserTurn {
+    /// 该 user 消息行的 JSONL uuid（全局唯一），作物化档案的稳定键（只增 upsert）；空则物化层用合成键兜底
+    pub uuid: String,
     pub ts: String,
     pub ts_unix: Option<i64>,
     pub local_date: String,
@@ -342,6 +344,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
             }
             let ts = obj.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
             cur = Some(UserTurn {
+                uuid: obj.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 ts_unix: iso_to_unix(&ts),
                 local_date: iso_to_local_date(&ts),
                 chars: qp.chars().count() as i64,
@@ -366,6 +369,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
                 .unwrap_or("")
                 .to_string();
             cur = Some(UserTurn {
+                uuid: obj.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 ts_unix: iso_to_unix(&ts),
                 local_date: iso_to_local_date(&ts),
                 chars: ut.chars().count() as i64,

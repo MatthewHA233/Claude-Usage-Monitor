@@ -91,14 +91,8 @@ pub fn load_report(db: &Database, since_days: i64) -> TokenUsageReport {
             Ok(remote_days) => {
                 // 持久化 key 用稳定的 source id（与会话数据对齐），不用可改名/可重名的 label
                 let token_days = aggregate_remote_days(&remote.id, remote_days, remote_since, until);
-                // 窗口内全量覆盖该来源：先删后写
-                if let Err(e) = db.delete_token_usage_days_for_source(
-                    &remote.id,
-                    &remote_since.to_string(),
-                    &until.to_string(),
-                ) {
-                    remote_errors.push(e.to_string());
-                }
+                // 只增档案：不再"先删后写"。keep-max upsert——源 JSONL 被删/截断，token 历史峰值仍保留；
+                // 当天数据增多则取新的更大值；某天被删则该天不在 fetch 里，旧值原样留着。
                 for day in &token_days {
                     if let Err(e) = db.upsert_token_usage_day(day) {
                         remote_errors.push(e.to_string());
@@ -550,12 +544,7 @@ fn rebuild_daily_cache(
     }
 
     let report = build_report(aggregate, since, until);
-    if let Err(error) =
-        db.delete_token_usage_days_for_source("本机", &since.to_string(), &until.to_string())
-    {
-        stats.errors.push(error.to_string());
-        return report;
-    }
+    // 只增档案：不再"先删后写"。keep-max upsert——本机 JSONL 被 Claude 删了，token 历史峰值仍保留。
     for day in &report.days {
         if let Err(error) = db.upsert_token_usage_day(day) {
             stats.errors.push(error.to_string());

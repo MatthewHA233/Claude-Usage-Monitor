@@ -92,7 +92,7 @@ fn join_url(base_url: &str, path: &str) -> String {
 }
 
 /// 解析器版本：升级后清空 files 表，触发全部会话重新解析（回填新增的 blocks/工具调用）
-const PARSE_VERSION: &str = "2";
+const PARSE_VERSION: &str = "3"; // 3: 逐条 uuid 稳定键 + 只增档案
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reply       TEXT,
     reply_chars INTEGER,
     images      TEXT,
-    blocks      TEXT
+    blocks      TEXT,
+    uuid        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_msg_ts      ON messages(ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_date    ON messages(local_date);
@@ -366,6 +367,13 @@ impl SessionStore {
         conn.execute_batch(SCHEMA)?;
         // 旧库迁移：补 blocks 列（已存在则忽略 duplicate column 错误）
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN blocks TEXT", []);
+        // 只增档案：补 uuid 稳定键列 + (source,uuid) 唯一索引（upsert 冲突目标）。
+        // 旧行 uuid 为 NULL（多 NULL 互不冲突）；新行带真 uuid/合成键，重解析时按文件清掉旧 NULL 行后回填。
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN uuid TEXT", []);
+        let _ = conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_src_uuid ON messages(source, uuid)",
+            [],
+        );
         // 会话编号列：项目序号 / 项目内会话序号（renumber 填充）
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project_seq INTEGER", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN session_seq INTEGER", []);
@@ -432,9 +440,7 @@ impl SessionStore {
             Err(_) => return Ok(()), // 离线/出错：跳过，保留已有数据
         };
 
-        let mut seen: Vec<String> = Vec::new();
         for f in &list.files {
-            seen.push(f.key.clone());
             let existing: Option<(i64, i64)> = {
                 let conn = self.conn.lock().unwrap();
                 conn.query_row(
@@ -466,30 +472,7 @@ impl SessionStore {
             )?;
         }
 
-        // 清理远程已删除的文件
-        let known: Vec<String> = {
-            let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT path FROM files WHERE source=?1")?;
-            let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
-            rows.filter_map(|x| x.ok()).collect()
-        };
-        for p in known {
-            if !seen.contains(&p) {
-                let conn = self.conn.lock().unwrap();
-                conn.execute(
-                    "DELETE FROM messages WHERE source=?1 AND file_path=?2",
-                    params![source_id, p],
-                )?;
-                conn.execute(
-                    "DELETE FROM sessions WHERE source=?1 AND file_path=?2",
-                    params![source_id, p],
-                )?;
-                conn.execute(
-                    "DELETE FROM files WHERE source=?1 AND path=?2",
-                    params![source_id, p],
-                )?;
-            }
-        }
+        // 只增档案：远端文件即使被 Claude 删了，本地物化也保留——不再"清理远程已删除的文件"。
         Ok(())
     }
 
@@ -526,7 +509,6 @@ impl SessionStore {
             return Ok(());
         }
         let conn = self.conn.lock().unwrap();
-        let mut seen: Vec<String> = Vec::new();
 
         for dir_entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             let dir = dir_entry.path();
@@ -539,7 +521,6 @@ impl SessionStore {
                     continue;
                 }
                 let p = fp.to_string_lossy().to_string();
-                seen.push(p.clone());
 
                 let Ok(meta) = std::fs::metadata(&fp) else {
                     continue;
@@ -578,28 +559,7 @@ impl SessionStore {
             }
         }
 
-        // 清理已删除的本机文件
-        let known: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT path FROM files WHERE source=?1")?;
-            let rows = stmt.query_map(params![LOCAL_SOURCE], |r| r.get::<_, String>(0))?;
-            rows.filter_map(|x| x.ok()).collect()
-        };
-        for p in known {
-            if !seen.contains(&p) {
-                conn.execute(
-                    "DELETE FROM messages WHERE source=?1 AND file_path=?2",
-                    params![LOCAL_SOURCE, p],
-                )?;
-                conn.execute(
-                    "DELETE FROM sessions WHERE source=?1 AND file_path=?2",
-                    params![LOCAL_SOURCE, p],
-                )?;
-                conn.execute(
-                    "DELETE FROM files WHERE source=?1 AND path=?2",
-                    params![LOCAL_SOURCE, p],
-                )?;
-            }
-        }
+        // 只增档案：本机 JSONL 被 Claude 删了，本地物化也保留——不再"清理已删除的本机文件"。
         Ok(())
     }
 
@@ -963,16 +923,28 @@ fn ingest(
     let meta = parse_session(content, session_id);
     let project_name = basename(&meta.cwd);
 
+    // 只增档案：不再整段 DELETE（源被 Claude 删/截断也不丢本地历史）。
+    // 仅一次性清掉本文件的旧 NULL-uuid 遗留行(升级前物化的、无稳定键)，之后纯按 (source,uuid) upsert。
     conn.execute(
-        "DELETE FROM messages WHERE source=?1 AND file_path=?2",
+        "DELETE FROM messages WHERE source=?1 AND file_path=?2 AND uuid IS NULL",
         params![source, file_path],
     )?;
     for (seq, t) in meta.turns.iter().enumerate() {
         let images_json = serde_json::to_string(&t.images).unwrap_or_else(|_| "[]".to_string());
         let blocks_json = serde_json::to_string(&t.blocks).unwrap_or_else(|_| "[]".to_string());
+        // 稳定键：JSONL 行 uuid（全局唯一）；空(罕见，如排队插话)→ 用内容合成键兜底
+        let key = if t.uuid.is_empty() {
+            format!("syn:{}:{}:{}", session_id, t.ts_unix.unwrap_or(0), t.chars)
+        } else {
+            t.uuid.clone()
+        };
         conn.execute(
-            "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images,blocks) \
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            "INSERT INTO messages(source,session_id,file_path,seq,ts,ts_unix,local_date,text,chars,reply,reply_chars,images,blocks,uuid) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) \
+             ON CONFLICT(source,uuid) DO UPDATE SET \
+                file_path=excluded.file_path, seq=excluded.seq, ts=excluded.ts, ts_unix=excluded.ts_unix, \
+                local_date=excluded.local_date, text=excluded.text, chars=excluded.chars, \
+                reply=excluded.reply, reply_chars=excluded.reply_chars, images=excluded.images, blocks=excluded.blocks",
             params![
                 source,
                 session_id,
@@ -986,7 +958,8 @@ fn ingest(
                 t.reply,
                 t.reply_chars,
                 images_json,
-                blocks_json
+                blocks_json,
+                key
             ],
         )?;
     }
