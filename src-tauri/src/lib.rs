@@ -105,6 +105,7 @@ pub fn run() {
             session_store::session_timeline,
             session_store::session_stats,
             session_store::session_status,
+            session_store::session_probe,
             session_store::session_sync_state,
             session_store::session_image,
         ])

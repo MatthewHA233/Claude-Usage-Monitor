@@ -502,6 +502,21 @@ impl SessionStore {
             .unwrap_or(false)
     }
 
+    /// 拉远程 /api/info：取机器稳定 id(machine_id) + hostname + os。
+    /// machine_id 是 OS 原生硬件/系统 id（换 IP/改名/重装都不变），供前端按设备绑定/对齐源 id。
+    pub fn info_remote(base_url: &str) -> (String, String, String) {
+        blocking_client(3)
+            .get(join_url(base_url, "/api/info"))
+            .send()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+            .map(|v| {
+                let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                (s("machine_id"), s("hostname"), s("os"))
+            })
+            .unwrap_or_default()
+    }
+
     /// 本机文件系统增量同步
     pub fn sync_local(&self) -> Result<()> {
         let Some(root) = projects_dir() else {
@@ -1022,6 +1037,7 @@ pub struct SourceStatus {
     pub id: String,
     pub label: String,
     pub online: bool,
+    pub machine_id: String, // 远程机器稳定 id（在线时从 /api/info 取）；前端据此把源 id 对齐为 machine_id
     pub hostname: String,
     pub os: String,
     pub session_count: i64,
@@ -1281,6 +1297,7 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
             id: LOCAL_SOURCE.to_string(),
             label: "本机".to_string(),
             online: true,
+            machine_id: String::new(),
             hostname: local_hostname(),
             os: "windows".to_string(),
             session_count: sc,
@@ -1293,6 +1310,7 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
                 id: HISTORY_SOURCE.to_string(),
                 label: "本机·历史".to_string(),
                 online: true,
+                machine_id: String::new(),
                 hostname: local_hostname(),
                 os: "windows".to_string(),
                 session_count: hsc,
@@ -1301,6 +1319,12 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
         }
         for s in remotes {
             let online = SessionStore::ping_remote(&s.base_url);
+            // 在线则读 /api/info 拿 machine_id + hostname/os（前端据 machine_id 把源 id 对齐为稳定设备 id）
+            let (machine_id, hostname, os) = if online {
+                SessionStore::info_remote(&s.base_url)
+            } else {
+                (String::new(), String::new(), String::new())
+            };
             let (rsc, rpc) = if online {
                 store.counts(&s.id).unwrap_or((0, 0))
             } else {
@@ -1310,8 +1334,9 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
                 id: s.id,
                 label: s.label,
                 online,
-                hostname: String::new(),
-                os: String::new(),
+                machine_id,
+                hostname,
+                os,
                 session_count: rsc,
                 project_count: rpc,
             });
@@ -1320,6 +1345,31 @@ pub async fn session_status(state: State<'_, AppState>) -> Result<Vec<SourceStat
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+pub struct SourceProbe {
+    pub online: bool,
+    pub machine_id: String,
+    pub hostname: String,
+    pub os: String,
+}
+
+/// 探测一个中继地址：在线则返回机器稳定 id(machine_id)+hostname+os。
+/// 手动「添加会话来源」时用——拿到 machine_id 作为源的稳定绑定 id（与发现路径一致）。
+#[tauri::command]
+pub async fn session_probe(base_url: String) -> Result<SourceProbe, String> {
+    tokio::task::spawn_blocking(move || {
+        let online = SessionStore::ping_remote(&base_url);
+        let (machine_id, hostname, os) = if online {
+            SessionStore::info_remote(&base_url)
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+        SourceProbe { online, machine_id, hostname, os }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]

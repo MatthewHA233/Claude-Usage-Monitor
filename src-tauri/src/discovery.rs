@@ -15,6 +15,7 @@ const SERVICE_TYPE: &str = "_claude-relay._tcp.local.";
 pub struct DiscoveredRelay {
     pub hostname: String,
     pub os: String,
+    pub machine_id: String, // 机器稳定 id（mDNS TXT 的 mid）：换 IP 也是同一台设备 → 前端据此识别"已配对"
     pub base_url: String,
     pub ip: String,
     pub port: u16,
@@ -48,11 +49,9 @@ fn browse(timeout: Duration) -> Result<Vec<DiscoveredRelay>, String> {
             Ok(ServiceEvent::ServiceResolved(info)) => {
                 let port = info.get_port();
                 let host = info.get_hostname().trim_end_matches('.').to_string();
-                let os = info
-                    .get_properties()
-                    .get_property_val_str("os")
-                    .unwrap_or("")
-                    .to_string();
+                let props = info.get_properties();
+                let os = props.get_property_val_str("os").unwrap_or("").to_string();
+                let mid = props.get_property_val_str("mid").unwrap_or("").to_string();
                 for addr in info.get_addresses() {
                     if addr.is_ipv4() {
                         let ip = addr.to_string();
@@ -60,6 +59,7 @@ fn browse(timeout: Duration) -> Result<Vec<DiscoveredRelay>, String> {
                         found.entry(ip.clone()).or_insert_with(|| DiscoveredRelay {
                             hostname: host.clone(),
                             os: os.clone(),
+                            machine_id: mid.clone(),
                             base_url,
                             ip,
                             port,

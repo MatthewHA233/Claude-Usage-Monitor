@@ -2,14 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import { X, RefreshCw, Wifi, WifiOff, Monitor, Search, Pencil, Trash2, Check } from "lucide-react";
 import { getSources, normalizeBaseUrl } from "./api";
 import { discoverRelays, type DiscoveredRelay } from "./discovery";
-import type { SourceStatus } from "./types";
+import type { SessionSource, SourceStatus } from "./types";
 
 // 本机隐式来源（不可改名/删除）
 const LOCAL_IDS = new Set(["local", "history"]);
 
 interface Props {
   sourceStatuses: SourceStatus[];
-  onAdd: (label: string, address: string) => void;
+  /** machineId：发现路径带机器稳定 id → 按设备绑定/配对（命中已有源则只更新地址） */
+  onAdd: (label: string, address: string, machineId?: string) => void;
   onRename: (id: string, label: string) => void;
   onDelete: (id: string, label: string) => void;
   onClose: () => void;
@@ -19,13 +20,13 @@ interface Props {
 export default function NetworkPanel({ sourceStatuses, onAdd, onRename, onDelete, onClose }: Props) {
   const [found, setFound] = useState<DiscoveredRelay[]>([]);
   const [scanning, setScanning] = useState(false);
-  const [existing, setExisting] = useState<string[]>([]); // 已添加来源的 base_url（去重）
+  const [sources, setSources] = useState<SessionSource[]>([]); // 已添加来源（id=machine_id / base_url）
   const [editId, setEditId] = useState<string | null>(null);
   const [editVal, setEditVal] = useState("");
 
-  // sourceStatuses 变化（添加/删除后）重取已添加地址，发现列表据此过滤掉已匹配的
+  // sourceStatuses 变化（添加/删除后）重取已添加来源，发现列表据此判断「已配对/地址变更/全新」
   useEffect(() => {
-    void getSources().then((ss) => setExisting(ss.map((s) => s.base_url))).catch(() => undefined);
+    void getSources().then(setSources).catch(() => undefined);
   }, [sourceStatuses]);
 
   const scan = useCallback(() => {
@@ -38,7 +39,18 @@ export default function NetworkPanel({ sourceStatuses, onAdd, onRename, onDelete
 
   const remotes = sourceStatuses.filter((s) => !LOCAL_IDS.has(s.id));
   const onlineRemotes = remotes.filter((s) => s.online);
-  const freshFound = found.filter((r) => !existing.includes(normalizeBaseUrl(r.base_url)));
+  // 按设备(machine_id)判断：已配对(machine_id 命中)且地址没变=已是最新→隐藏；
+  // 已配对但 IP 变了→显示「已配对·点击更新地址」；都没命中→全新可添加。同地址(无 machine_id)也算已添加→隐藏。
+  const cards = found
+    .map((r) => {
+      const byMid = r.machine_id ? sources.find((s) => s.id === r.machine_id) : undefined;
+      const sameUrl = sources.some((s) => normalizeBaseUrl(s.base_url) === normalizeBaseUrl(r.base_url));
+      const ipChanged = !!byMid && normalizeBaseUrl(byMid.base_url) !== normalizeBaseUrl(r.base_url);
+      const upToDate = (!!byMid && !ipChanged) || (!byMid && sameUrl);
+      return { r, paired: !!byMid, ipChanged, upToDate };
+    })
+    .filter((d) => !d.upToDate);
+  const freshFound = cards;
 
   let statusText: string;
   let statusColor: string;
@@ -159,25 +171,27 @@ export default function NetworkPanel({ sourceStatuses, onAdd, onRename, onDelete
               {scanning ? "正在扫描局域网…" : "未发现可添加的中继。确保对端 Claude 启动器已运行（会自动开中继）。"}
             </div>
           ) : (
-            freshFound.map((r) => (
+            freshFound.map(({ r, ipChanged }) => (
               <button
                 key={r.ip}
                 type="button"
-                onClick={() => onAdd(r.hostname || r.ip, r.base_url)}
+                title={ipChanged ? "同一台设备(IP 已变) · 点击更新地址，历史数据不丢" : "点击添加为会话/Token 来源"}
+                onClick={() => onAdd(r.hostname || r.ip, r.base_url, r.machine_id)}
                 className="flex items-center gap-2 w-full text-left px-3 py-2"
                 style={{ background: "transparent", border: 0, borderBottom: "1px solid #222", cursor: "pointer" }}
                 onMouseEnter={(e) => (e.currentTarget.style.background = "#202020")}
                 onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
               >
-                <Monitor size={14} style={{ color: "#4ade80", flexShrink: 0 }} />
+                <Monitor size={14} style={{ color: ipChanged ? "#60a5fa" : "#4ade80", flexShrink: 0 }} />
                 <div className="min-w-0 flex-1">
                   <div className="text-xs truncate" style={{ color: "#e5e7eb" }}>
                     {r.hostname || r.ip}
                     {r.os ? <span style={{ color: "#6b7280" }}> · {r.os}</span> : null}
+                    {ipChanged ? <span style={{ color: "#60a5fa" }}> · 已配对·更新地址</span> : null}
                   </div>
                   <div className="text-[10px] font-mono truncate" style={{ color: "#6b7280" }}>{r.ip}:{r.port}</div>
                 </div>
-                <Wifi size={13} style={{ color: "#4ade80", flexShrink: 0 }} />
+                <Wifi size={13} style={{ color: ipChanged ? "#60a5fa" : "#4ade80", flexShrink: 0 }} />
               </button>
             ))
           )}

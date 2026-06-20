@@ -106,6 +106,7 @@ export interface SourceStatus {
   id: string;
   label: string;
   online: boolean;
+  machine_id: string; // 远程机器稳定 id（在线时从 /api/info 取，空=离线/本机）
   hostname: string;
   os: string;
   session_count: number;

@@ -3,6 +3,7 @@ import { Wifi, WifiOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import NetworkPanel from "./NetworkPanel";
 import { getSources, saveSources, fetchStatus, normalizeBaseUrl } from "./api";
+import { probeSource } from "./discovery";
 import type { SessionSource, SourceStatus } from "./types";
 
 // 本机隐式来源（不计入「远程离线」判断）
@@ -33,12 +34,26 @@ export default function NetworkButton() {
   const anyRemoteOffline = statuses.some((s) => !LOCAL_IDS.has(s.id) && !s.online);
 
   const onAdd = useCallback(
-    async (label: string, address: string) => {
+    async (label: string, address: string, machineId?: string) => {
       const base_url = normalizeBaseUrl(address);
       if (!base_url) return;
       const current = await getSources().catch(() => [] as SessionSource[]);
-      if (current.some((s) => s.base_url === base_url)) return; // 已存在则忽略
-      const id = crypto.randomUUID();
+      // 机器稳定 id：发现路径直接带；手动填地址则连一下 /api/info 拿。拿到就用它当源的绑定 id。
+      let mid = machineId || "";
+      if (!mid) mid = await probeSource(base_url).then((p) => p.machine_id).catch(() => "");
+      // 已配对：machine_id 命中已有源 → 同一台设备(只是换了 IP)，只更新 base_url、不新增、历史数据不丢
+      if (mid) {
+        const exist = current.find((s) => s.id === mid);
+        if (exist) {
+          if (exist.base_url !== base_url) {
+            await saveSources(current.map((s) => (s.id === mid ? { ...s, base_url } : s))).catch(() => undefined);
+          }
+          refresh();
+          return;
+        }
+      }
+      if (current.some((s) => s.base_url === base_url)) return; // 同地址去重
+      const id = mid || crypto.randomUUID();
       const next = [...current, { id, label: label || base_url.replace(/^https?:\/\//, ""), base_url }];
       await saveSources(next).catch(() => undefined);
       refresh();

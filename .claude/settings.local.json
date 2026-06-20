@@ -68,7 +68,9 @@
       "Bash(NODE_OPTIONS=--max-old-space-size=2048 npx tsc --noEmit)",
       "Bash(echo \"再次失败\\(exit $?\\)\")",
       "PowerShell(Stop-Process *)",
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:help.apiyi.com)"
     ]
   }
 }
