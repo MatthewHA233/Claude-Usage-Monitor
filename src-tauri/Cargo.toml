@@ -1,6 +1,6 @@
 [package]
 name = "claude-usage-monitor"
-version = "1.1.5"
+version = "2.0.0"
 edition = "2021"
 
 [lib]
@@ -24,6 +24,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 base64 = "0.22"
 winreg = "0.55"
 mdns-sd = "0.11"
+# 图片归档：从 JSONL 的 base64 解码 → 缩放 + 重编码压缩存盘（预览永久不丢）。只带需要的编解码器以控体积。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+sha2 = "0.10"
 
 [profile.dev]
 incremental = true

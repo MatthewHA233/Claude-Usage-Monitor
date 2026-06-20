@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod discovery;
 mod http_server;
+mod image_archive;
 mod local_usage;
 mod models;
 mod recommender;

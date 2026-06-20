@@ -9,6 +9,8 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::image_archive::archive_b64;
+
 /// 回复里的一个有序块：文字 或 工具调用。用于展开回复时按真实顺序交错展示。
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -155,6 +157,34 @@ fn extract_image_sources(obj: &Value) -> Vec<String> {
         }
     }
     paths
+}
+
+/// 从 user 消息 content 里的 `type:image` 块取内嵌 base64，逐张压缩归档，按出现顺序返回归档路径。
+/// 这是图片的「真身」(JSONL 自带、归档安全)，取代会被 Claude 清理的 image-cache 临时副本路径。
+fn archive_user_images(obj: &Value) -> Vec<String> {
+    let Some(arr) = obj
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for block in arr {
+        if block.get("type").and_then(|v| v.as_str()) != Some("image") {
+            continue;
+        }
+        if let Some(data) = block
+            .get("source")
+            .and_then(|s| s.get("data"))
+            .and_then(|v| v.as_str())
+        {
+            if let Some(path) = archive_b64(data) {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 /// 「工作中排队插话」：type=attachment 且 attachment.type=queued_command，
@@ -327,11 +357,14 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
             }
         }
 
-        // 图片来源注释（可能多行/多图）：把路径挂到当前这条消息上
+        // 图片来源注释（[Image: source: 路径]）：仅作兜底——若该条已从 base64 归档拿到图就不再叠加
+        // （注释里是会被 Claude 清理的 image-cache 临时路径；base64 归档才是永久真身）
         let imgs = extract_image_sources(&obj);
         if !imgs.is_empty() {
             if let Some(c) = cur.as_mut() {
-                c.images.extend(imgs);
+                if c.images.is_empty() {
+                    c.images.extend(imgs);
+                }
             }
             continue;
         }
@@ -378,7 +411,7 @@ pub fn parse_session(content: &str, session_id: &str) -> SessionMeta {
                 reply: String::new(),
                 reply_chars: 0,
                 blocks: Vec::new(),
-                images: Vec::new(),
+                images: archive_user_images(&obj), // 内嵌 base64 图 → 压缩归档 → 永久路径
             });
         } else if obj.get("type").and_then(|v| v.as_str()) == Some("assistant") {
             // 收回复文字（reply 用于字数/搜索/fallback）+ 有序块（含纯工具调用事件）

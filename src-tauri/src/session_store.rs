@@ -92,7 +92,7 @@ fn join_url(base_url: &str, path: &str) -> String {
 }
 
 /// 解析器版本：升级后清空 files 表，触发全部会话重新解析（回填新增的 blocks/工具调用）
-const PARSE_VERSION: &str = "3"; // 3: 逐条 uuid 稳定键 + 只增档案
+const PARSE_VERSION: &str = "5"; // 5: 图归档 JPEG/PNG 智能分流(真扫 alpha)；4=base64 图压缩归档
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files (
@@ -463,8 +463,10 @@ impl SessionStore {
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            // 解析 + 图归档（重活）在锁外做，避免占锁堵查询
+            let meta = parse_session(&content, &f.session_id);
             let conn = self.conn.lock().unwrap();
-            ingest(&conn, source_id, &f.session_id, &f.key, &content)?;
+            ingest(&conn, source_id, &f.session_id, &f.key, &meta)?;
             conn.execute(
                 "INSERT INTO files(source,path,mtime,size) VALUES(?1,?2,?3,?4) \
                  ON CONFLICT(source,path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size",
@@ -508,7 +510,6 @@ impl SessionStore {
         if !root.exists() {
             return Ok(());
         }
-        let conn = self.conn.lock().unwrap();
 
         for dir_entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             let dir = dir_entry.path();
@@ -522,24 +523,27 @@ impl SessionStore {
                 }
                 let p = fp.to_string_lossy().to_string();
 
-                let Ok(meta) = std::fs::metadata(&fp) else {
+                let Ok(fmeta) = std::fs::metadata(&fp) else {
                     continue;
                 };
-                let size = meta.len() as i64;
-                let mtime = meta
+                let size = fmeta.len() as i64;
+                let mtime = fmeta
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
 
-                let existing: Option<(i64, i64)> = conn
-                    .query_row(
+                // 锁内快速查 existing（未变即跳过）；其余重活都在锁外，避免整轮持锁堵查询
+                let existing: Option<(i64, i64)> = {
+                    let conn = self.conn.lock().unwrap();
+                    conn.query_row(
                         "SELECT mtime, size FROM files WHERE source=?1 AND path=?2",
                         params![LOCAL_SOURCE, p],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
-                    .optional()?;
+                    .optional()?
+                };
                 if existing == Some((mtime, size)) {
                     continue; // 未变
                 }
@@ -550,7 +554,11 @@ impl SessionStore {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_string();
-                ingest(&conn, LOCAL_SOURCE, &session_id, &p, &content)?;
+                // 解析 + 图归档（重活）在锁外做
+                let meta = parse_session(&content, &session_id);
+                // 锁内只写
+                let conn = self.conn.lock().unwrap();
+                ingest(&conn, LOCAL_SOURCE, &session_id, &p, &meta)?;
                 conn.execute(
                     "INSERT INTO files(source,path,mtime,size) VALUES(?1,?2,?3,?4) \
                      ON CONFLICT(source,path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size",
@@ -912,15 +920,15 @@ impl SessionStore {
     }
 }
 
-/// 整文件重解析后替换其行（+ 更新会话元信息）
+/// 把已解析好的会话写库（+ 更新会话元信息）。**只做 DB 写、不解析**——
+/// 解析+图归档是重活，须由调用方在**锁外**先 `parse_session` 好再传进来，避免长时间占锁堵查询。
 fn ingest(
     conn: &Connection,
     source: &str,
     session_id: &str,
     file_path: &str,
-    content: &str,
+    meta: &crate::session_parse::SessionMeta,
 ) -> Result<()> {
-    let meta = parse_session(content, session_id);
     let project_name = basename(&meta.cwd);
 
     // 只增档案：不再整段 DELETE（源被 Claude 删/截断也不丢本地历史）。
