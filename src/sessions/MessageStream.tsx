@@ -20,6 +20,7 @@ import {
 import type { StreamMessage, ReplyBlock } from "./types";
 import { clock, nfmt, bucketOf, subSecond, secInBucket } from "./format";
 import { laneKey } from "./lanes";
+import { machineColor } from "../colors"; // 设备段边框按机器配色，与 token 面板/时间轴一致
 import { fetchToolResult } from "./api";
 import MessageText from "./MessageText";
 import Markdown from "./Markdown";
@@ -30,9 +31,12 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 const MIN_LANE_W = 300;
 const LANE_GAP = 12;
 // 浮动会话表头（镜像时间轴贴边逻辑：滚过贴顶叠放、未到贴底叠放，当前会话亮、远方暗）
-const SEG_H = 28; // 浮动表头高度
+const SEG_H = 28; // 段首锚点(in-flow)占位高度
+const HEAD_H = 25; // chevron 表头实际高 = 叠放间距：贴边叠罗汉按它一格紧贴、无缝（SEG_H 比它高 3px 会留缝）
 const MARKER_H = SEG_H + 8; // 段首锚点占位高度（给浮动表头留位，兼作会话分隔间距）
-const STACK_MAX_S = 3; // 同向贴边叠放上限（按整高紧邻排开，不重叠覆盖）
+const ARROW = 10; // chevron 右凸尖箭头进深；表头与会话框右边都按它内收，框右竖线正落在 chevron 右拐点(100%-ARROW)
+const FRAME_INSET = ARROW; // 会话框距轨道左右边的内缩 = 尖尖宽 → 右边对齐表头拐点；宽度仍=轨宽-2×内缩(自适应)
+const CARD_PAD = FRAME_INSET + 4; // 卡片再多缩一点，框落在卡片外侧的留白里
 
 interface LaneHeadInfo {
   sourceLabel: string; // 设备/机器
@@ -66,6 +70,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   // 视野内表头留在流里(inline marker)，由合成器平滑滚动。markerRefs=流内锚点，overlayHeaderRefs=overlay 贴边副本。
   const markerRefs = useRef<(HTMLDivElement | null)[]>([]);
   const overlayHeaderRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const frameRefs = useRef<(HTMLDivElement | null)[]>([]); // 每会话块的机器色描边框（绝对定位、随卡片滚动）
   const layoutRef = useRef<() => void>(() => {});
   const onScroll = () => {
     const el = scrollRef.current;
@@ -232,21 +237,19 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     const stuck = new Set<number>(); // 贴顶的段 → 隐藏其内联表头，改由 overlay 副本显示(避免双重影/重叠)
     for (const k of Object.keys(byLane)) {
       const arr = byLane[Number(k)].sort((a, b) => a.topY - b.topY); // 恒按时间升序 → 叠层顺序固定
-      // 顶部贪心占槽：从上往下槽位 0,1,2…；某段滚到它的槽位(上方已贴段数×SEG_H)即贴住、停在上一个的下沿。
-      // → 新进来的会话表头不再冲进上方栈、不重叠(修复"y 同位、z 压下")；slotY 封顶 STACK_MAX×SEG_H(栈不超高)。
+      // 顶部贪心占槽：从上往下槽位 0,1,2…；某段滚到它的槽位(上方已贴段数×HEAD_H)即贴住、停在上一个的下沿。
+      // 用 HEAD_H(chevron 实高)做间距 → 叠罗汉严丝合缝无缝。无上限——一轨多少会话就叠多少。
       let slotY = vTop;
       const above: typeof arr = [];
       for (const p of arr) {
-        if (p.topY <= slotY) { above.push(p); slotY = Math.min(slotY + SEG_H, vTop + STACK_MAX_S * SEG_H); }
+        if (p.topY <= slotY) { above.push(p); slotY += HEAD_H; }
         else break;
       }
-      const below = arr.filter((p) => p.topY > vBot - SEG_H);  // 未到 → 贴底
-      above.forEach((p) => stuck.add(p.idx)); // 贴顶段一律隐藏内联(含被栈挤出 STACK_MAX 的，彻底不显示)
+      const below = arr.filter((p) => p.topY > vBot - HEAD_H);  // 未到 → 贴底
+      above.forEach((p) => stuck.add(p.idx)); // 贴顶段一律隐藏内联(由 overlay 副本显示)
       // 只有栈最底那枚(最贴内容=当前会话)亮；其上(更早滚过)与贴底(未到的将来)一律暗下去
-      const aboveShown = above.slice(-STACK_MAX_S);
-      aboveShown.forEach((p, j) => place.set(p.idx, { top: vTop + j * SEG_H, bright: j === aboveShown.length - 1 }));
-      const bBot = below.slice(0, STACK_MAX_S);
-      bBot.forEach((p, j) => place.set(p.idx, { top: vBot - (bBot.length - j) * SEG_H, bright: false }));
+      above.forEach((p, j) => place.set(p.idx, { top: vTop + j * HEAD_H, bright: j === above.length - 1 }));
+      below.forEach((p, j) => place.set(p.idx, { top: vBot - (below.length - j) * HEAD_H, bright: false }));
     }
     for (const s of floatSegs) {
       // 贴顶段隐藏内联表头(由 overlay 显示)；其余(视野内/贴底)内联正常显示，由 overflow 裁切边缘
@@ -263,6 +266,33 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
       h.style.left = `${left}px`;
       h.style.width = `${laneW}px`;
       h.classList.toggle("seg-dim", !pl.bright); // 暗用 class(只压暗保留颜色) + :hover 高亮
+    }
+
+    // 会话块机器色描边框：内容坐标(随卡片滚动，不随合成器贴边)。每 lane 按相邻 marker 定首尾、画框
+    if (!single) {
+      const wrapTop = wrap.getBoundingClientRect().top;
+      const wrapH = wrap.scrollHeight;
+      const segByLane: Record<number, { idx: number; cy: number; color: string }[]> = {};
+      for (const s of floatSegs) {
+        const mk = markerRefs.current[s.idx];
+        if (!mk) continue;
+        const cy = mk.getBoundingClientRect().top - wrapTop; // 内容 Y（随滚动不变）
+        (segByLane[s.lane] ??= []).push({ idx: s.idx, cy, color: machineColor(s.head.sourceLabel) });
+      }
+      for (const key of Object.keys(segByLane)) {
+        const arr = segByLane[Number(key)].sort((a, b) => a.cy - b.cy);
+        arr.forEach((it, i) => {
+          const f = frameRefs.current[it.idx];
+          if (!f) return;
+          const top = it.cy + SEG_H + 2; // 表头下方起
+          const bottom = i + 1 < arr.length ? arr[i + 1].cy : wrapH; // 到下个会话表头 / 内容底
+          // 只设纵向(首尾)；横向 left/right 由 CSS(flex 列)管 → 窗口缩放自适应不闪
+          f.style.display = "block";
+          f.style.top = `${top}px`;
+          f.style.height = `${Math.max(0, bottom - top - 4)}px`;
+          f.style.borderColor = it.color;
+        });
+      }
     }
   };
 
@@ -317,7 +347,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
                           ? (secInBucket(laneCards[0].ts_unix) - baseSec) * 0.18
                           : 0;
                         return (
-                          <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top }}>
+                          <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top, paddingLeft: CARD_PAD, paddingRight: CARD_PAD }}>
                             {laneCards.map((m, ci) => renderCard(m, ci, g.bucket))}
                           </div>
                         );
@@ -330,6 +360,23 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
           );
         })}
 
+        {/* 会话块机器色描边框：横向用 flex 列(与卡片同套布局，随窗口缩放 CSS 自适应、不靠 JS 重算→不闪)，
+            纵向首尾由 layoutRef 按相邻 marker 算。线条与表头 accent 一致(2px 机器色)。 */}
+        {!single && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", gap: LANE_GAP, pointerEvents: "none", zIndex: 1 }}>
+            {Array.from({ length: laneCount }, (_, lane) => (
+              <div key={lane} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+                {floatSegs.filter((s) => s.lane === lane).map((s) => (
+                  <div
+                    key={s.idx}
+                    ref={(el) => { frameRefs.current[s.idx] = el; }}
+                    style={{ position: "absolute", left: FRAME_INSET, right: FRAME_INSET, display: "none", border: "2px solid transparent", borderRadius: 10, boxSizing: "border-box" }}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
     {/* 贴边表头 overlay：脱离滚动容器、屏幕坐标恒定 → 合成器滚动时不抖动。layoutRef 改 top/left/width/filter。 */}
@@ -341,7 +388,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
             ref={(el) => { overlayHeaderRefs.current[s.idx] = el; }}
             onClick={() => scrollToSeg(s.idx)}
             title="点击滚到该会话开头"
-            style={{ position: "absolute", left: 0, width: 0, display: "none", alignItems: "center", height: SEG_H, cursor: "pointer", background: "transparent", pointerEvents: "auto" }}
+            style={{ position: "absolute", left: 0, width: 0, display: "none", alignItems: "center", height: HEAD_H, cursor: "pointer", background: "transparent", pointerEvents: "auto" }}
           >
             {/* 普通 block(flex:1 minWidth:0)，让 .lane-head 填满列宽 → project/session 正常 fill + ellipsis */}
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -506,7 +553,6 @@ function CollapsibleText({
 // 轨道顶部表头：设备 / 项目 / 会话 三枚「锥体」标签层叠堆放——左侧强调竖线、右侧尖头（楔形）。
 // 后一枚负 margin 压进前一枚右尖下方，zIndex 递减 → 最左（设备）在最顶、最右（会话）在最底；
 // 设备/项目按内容自适应（左短），会话占满剩余（右长），溢出才省略。
-const ARROW = 10; // 右凸尖箭头进深（紧凑）
 // 弹头/箭头标签：左侧平直 + 右侧凸尖。后一枚整条直左边压进前一枚右凸尖之下(overlap=ARROW)，
 // zIndex 递减 → 有「被前一枚挡住」的层叠感(claude-switch 被本机挡住、横着压过去)。
 // 双层实体描边：底层铺 accent 实色，填充层(渐变)露出 accent 边——但「被挡的左边」不留 accent(left:0)，
@@ -564,7 +610,7 @@ function LaneHeader({ head, mini = false }: { head?: LaneHeadInfo; mini?: boolea
   if (!head) return null;
   return (
     <div className="lane-head" title={`${head.sourceLabel} › ${head.projectName} › ${head.sessionTitle}`} style={{ position: "relative", height: 25, minWidth: 0, display: "flex", alignItems: "stretch" }}>
-      <Bullet icon={<Monitor size={12} />} label={head.sourceLabel} grad="linear-gradient(180deg,#36424f,#28323d)" accent="#5aa0e0" zi={3} first flex="0 1 auto" maxW={96} />
+      <Bullet icon={<Monitor size={12} />} label={head.sourceLabel} grad="linear-gradient(180deg,#36424f,#28323d)" accent={machineColor(head.sourceLabel)} zi={3} first flex="0 1 auto" maxW={96} />
       <Bullet icon={<FolderGit2 size={12} />} label={head.projectName} grad="linear-gradient(180deg,#35432f,#27311f)" accent="#6fc23f" zi={2} flex={mini ? "0 1 auto" : "1 1 0"} fill={!mini} maxW={mini ? 150 : undefined} />
       <Bullet icon={<MessagesSquare size={12} />} label={head.sessionTitle} grad="linear-gradient(180deg,#3b3252,#2c2540)" accent="#9d6fe8" zi={1} flex={mini ? "0 1 auto" : "1.6 1 0"} fill={!mini} maxW={mini ? 230 : undefined} />
     </div>

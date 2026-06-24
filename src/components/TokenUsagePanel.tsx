@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import type { TokenUsageDay, TokenUsageReport } from "../types";
 import NetworkButton from "../sessions/NetworkButton";
+import { machineColor as sourceColor } from "../colors"; // 机器配色与会话时间轴共用
 
 interface Props {
   report: TokenUsageReport | null;
@@ -28,15 +29,8 @@ const compact = (value: number) => {
 // Provider 品牌色：Claude=橙、Codex=蓝紫（对齐两者桌面端图标配色）
 const providerColor = (provider: string) => provider === "codex" ? "#7c6cf0" : "#cc785c";
 
-// 机器配色：本机固定绿，远程按名字 hash 取一个稳定色（避开 provider 的橙/蓝紫，免撞色）。
-// 同时用于表格圆点和条形图「整柱边框」——靠边框色区分机器（支持任意多台）。
-const REMOTE_COLORS = ["#22d3ee", "#f472b6", "#fbbf24", "#fb7185", "#2dd4bf", "#a3e635"];
-const sourceColor = (source: string) => {
-  if (source === "本机" || source === "") return "#4ade80";
-  let h = 0;
-  for (let i = 0; i < source.length; i++) h = (h * 31 + source.charCodeAt(i)) >>> 0;
-  return REMOTE_COLORS[h % REMOTE_COLORS.length];
-};
+// 机器配色见 ../colors.ts（machineColor，本机蓝 + 远程青/粉/琥珀/玫红，避开绿/紫/橙）。
+// 用于表格圆点 + 条形图「整柱边框」——靠边框色区分机器；会话时间轴共用同一函数保证同色。
 
 // 条形图：Provider 用品牌色填充（Claude 橙 / Codex 蓝紫）；
 // 机器用「整柱边框色」区分（本机绿框、各远程不同色框），支持任意多台。

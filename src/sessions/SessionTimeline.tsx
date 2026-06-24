@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import type { TimelineRowWithSource } from "./types";
 import { dayLabel, todayYmd } from "./format";
 import { laneKey, assignLanesPacked } from "./lanes";
+import { machineColor } from "../colors"; // 会话按机器配色，与 token 面板一致
 
 const ROW_H = 14; // 单行点阵的行高
 const ROW_H2 = 26; // 双行点阵(某格 >5 条)的行高
@@ -9,9 +10,6 @@ const COL_W = 35; // 每轨道列宽
 const HOUR_W = 30; // 小时列宽（合并单元格）
 const MIN_W = 24; // 分钟列宽
 const TIME_W = HOUR_W + MIN_W;
-const STACK_MAX = 3; // 贴边远方表头同列同方向最多叠放数（一轨最多 4 会话 → 主线外最多 3 插队）
-// 插队会话色（Notion 标签风：柔和中明度实心色，标签填充 + 白字），按同轨插队顺序循环
-const PALETTE = ["#6b5b9a", "#3f8290", "#4f8b60", "#8c7440", "#96587a", "#4e6f9c"];
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 interface Props {
@@ -47,7 +45,7 @@ function DotCell({ n }: { n: number }) {
 // 配色融入左栏(暗基调)，表头/字/点提亮保持清晰。hover 十字标定 + 悬浮面板。连续空小时折叠。
 export default function SessionTimeline({ date, rows, loading }: Props) {
   // 时间轴专用「紧凑」轨道分配（最少轨道 + 充实轨在左）。卡片流仍用 SessionsApp 传下来的旧分配。
-  const { laneOf, laneCount, labelsByLane } = useMemo(() => assignLanesPacked(rows), [rows]);
+  const { laneOf, laneCount } = useMemo(() => assignLanesPacked(rows), [rows]);
   const [tip, setTip] = useState<Tip>(null);
   const [hb, setHb] = useState<number | null>(null);
   const [hl, setHl] = useState<number | null>(null);
@@ -113,23 +111,21 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
     }
   }
 
-  // 占轨复用：每轨道按首发排序，[0]=主线(独占列标头)，其余=插队(主题色按顺序循环)
-  const mainByLane: Record<number, TimelineRowWithSource | undefined> = {};
+  // 占轨复用：每轨道按首发排序，[0]=主线(不画框)，其余=插队(画框)；所有会话都出浮动表头
   // (lane, bucket) → 插队会话框线信息（覆盖该会话整个时间段, 含中间无发言桶）
   const coverMeta: Record<number, Record<number, { color: string; isFirst: boolean; isLast: boolean; label: string; row: TimelineRowWithSource }>> = {};
   const segsRaw: { lane: number; color: string; label: string; row: TimelineRowWithSource; fb: number; lb: number }[] = [];
   for (const laneStr of Object.keys(laneRows)) {
     const lane = Number(laneStr);
     const sorted = [...laneRows[lane]].sort((a, b) => (a.first_unix ?? 0) - (b.first_unix ?? 0));
-    mainByLane[lane] = sorted[0];
-    sorted.forEach((r, idx) => {
-      if (idx === 0) return; // 主线不画框（独占列标头）
-      const color = PALETTE[(idx - 1) % PALETTE.length];
+    sorted.forEach((r) => {
+      const color = machineColor(r.source_label); // 按机器配色（同机器同色，与 token 面板一致）
       const bs = r.buckets.map((bk) => bk.b).sort((a, b) => a - b); // 仅有发言的桶
       const fb = bs[0];
       const lb = bs[bs.length - 1];
       const label = r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—";
-      segsRaw.push({ lane, color, label, row: r, fb, lb });
+      segsRaw.push({ lane, color, label, row: r, fb, lb }); // 所有会话(含主线)都出浮动表头（卡片流式）
+      // 所有会话(含主线)都画机器色框（常驻边框高亮，与浮动表头对应）；同轨各会话已隔≥2桶、互不占格
       const m = (coverMeta[lane] ??= {});
       // 框圈整段 fb..lb（中间空白格也圈住）；唯独被主轨道/他人占用的格让位、归其司管
       for (let b = fb; b <= lb; b++) {
@@ -210,55 +206,50 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
     return bucketY[nb] + (secInBucket / 600) * rowH(nb);
   })();
 
-  // imperative 贴边布局：直接改表头 DOM 的 top/display/箭头，不触发 React 重渲染。
-  // 段在视野=首格上方；段顶滚到视口上方=贴顶(▲)、段在视口下方=贴底(▼)。
-  // 同列同方向多段「叠放」最多 STACK_MAX 个：最接近视口的贴边、其余依次往里叠（提示远处还有几个）。
+  // imperative 卡片流式贴边表头：直接改表头 DOM 的 top/display/亮暗，不触发 React 重渲染。
+  // 每列贪心占槽（同 MessageStream）：滚过的从上往下叠（无上限），某段滚到它的槽位即贴住、停在上一个下沿——
+  // 不冲进上方栈、不与"视野内"那枚重叠；当前(栈底·最贴内容)亮，更早的在上变暗；未到的将来贴底叠放、全变暗。
   layoutRef.current = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const vTop = el.scrollTop + COLHEAD_H;
+    const vTop = el.scrollTop; // 钉到视口最顶（真表头带），用上那条空带、不压住首行格子
     const vBot = el.scrollTop + el.clientHeight;
-    const info = segs.map((s, i) => {
-      const topY = s.topY;
-      const botY = s.topY + s.height;
-      const headerTop = Math.max(vTop, Math.min(topY, vBot - ROW_H));
-      return { i, lane: s.lane, topY, botY, headerTop, atTop: topY < vTop, atBot: topY > vBot - ROW_H };
-    });
-    const byLane: Record<number, typeof info> = {};
-    info.forEach((p) => (byLane[p.lane] ??= []).push(p));
-    // 每段终态：top + 箭头方向（""=视野内无箭头 / "up"=贴顶 / "down"=贴底）
-    const place = new Map<number, { top: number; dir: "" | "up" | "down" }>();
+    const byLane: Record<number, { i: number; topY: number }[]> = {};
+    segs.forEach((s, i) => (byLane[s.lane] ??= []).push({ i, topY: s.topY }));
+    const place = new Map<number, { top: number; bright: boolean }>();
     for (const k of Object.keys(byLane)) {
-      const arr = byLane[Number(k)];
-      arr.filter((p) => !p.atTop && !p.atBot).forEach((p) => place.set(p.i, { top: p.headerTop, dir: "" }));
-      // 贴顶：最接近视口顶(botY 最大)贴边在最上，其余每个往下叠 ROW_H
-      arr
-        .filter((p) => p.atTop)
-        .sort((a, b) => b.botY - a.botY)
-        .slice(0, STACK_MAX)
-        .forEach((p, k) => place.set(p.i, { top: vTop + k * ROW_H, dir: "up" }));
-      // 贴底：最接近视口底(topY 最小)贴边在最下，其余每个往上叠 ROW_H
-      arr
-        .filter((p) => p.atBot)
-        .sort((a, b) => a.topY - b.topY)
-        .slice(0, STACK_MAX)
-        .forEach((p, k) => place.set(p.i, { top: vBot - ROW_H - k * ROW_H, dir: "down" }));
+      const arr = byLane[Number(k)].sort((a, b) => a.topY - b.topY); // 按位置(时间)升序
+      // 顶部贪心叠放（无上限）：某段 topY 滚到它的槽位即贴住，停在上一个下沿 → 不重叠
+      let slotY = vTop;
+      const above: typeof arr = [];
+      for (const p of arr) {
+        if (p.topY <= slotY) { above.push(p); slotY += ROW_H; } else break;
+      }
+      const stuck = new Set(above.map((p) => p.i));
+      // 贴底（未到的将来，排除已贴顶的）：无上限叠
+      const below = arr.filter((p) => !stuck.has(p.i) && p.topY > vBot - ROW_H);
+      below.forEach((p) => stuck.add(p.i));
+      // 贴顶：栈底(当前)亮、其上更早的暗
+      above.forEach((p, j) => place.set(p.i, { top: vTop + j * ROW_H, bright: j === above.length - 1 }));
+      // 贴底：最近的在栈顶(贴内容)、全暗
+      below.forEach((p, j) => place.set(p.i, { top: vBot - ROW_H - (below.length - 1 - j) * ROW_H, bright: false }));
+      // 视野内：自然位、亮
+      arr.forEach((p) => {
+        if (stuck.has(p.i)) return;
+        place.set(p.i, { top: Math.max(vTop, Math.min(p.topY, vBot - ROW_H)), bright: true });
+      });
     }
-    info.forEach((p) => {
-      const h = headerRefs.current[p.i];
+    segs.forEach((_s, i) => {
+      const h = headerRefs.current[i];
       if (!h) return;
-      const pl = place.get(p.i);
+      const pl = place.get(i);
       if (!pl) {
         h.style.display = "none";
         return;
       }
       h.style.display = "flex";
       h.style.top = `${pl.top}px`;
-      const arrow = h.querySelector("[data-arrow]") as HTMLElement | null;
-      if (arrow) {
-        arrow.textContent = pl.dir === "up" ? "▲" : pl.dir === "down" ? "▼" : "";
-        arrow.style.display = pl.dir ? "inline-block" : "none";
-      }
+      h.classList.toggle("tl-seg-dim", !pl.bright); // 暗下去（hover 仍恢复亮，见 styles.css）
     });
   };
 
@@ -277,37 +268,9 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
       ) : (
         <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto">
           <div style={{ width: TIME_W + laneCount * laneW, position: "relative" }}>
-            {/* 列标头：时间区表头 + 轨道编号，sticky 顶 */}
-            <div className="flex sticky top-0" style={{ zIndex: 15 }}>
-              <div className="shrink-0 sticky left-0 flex items-center justify-center font-mono" style={{ width: TIME_W, height: 24, fontSize: 10, color: "#aab0ba", background: "#34343c", zIndex: 16, borderBottom: "1px solid #3a3a40" }}>
-                时·分
-              </div>
-              {Array.from({ length: laneCount }, (_, lane) => {
-                const main = mainByLane[lane];
-                const on = hl === lane;
-                return (
-                  <div
-                    key={lane}
-                    className="shrink-0 flex items-center font-mono truncate"
-                    style={{ width: laneW, height: 24, justifyContent: "flex-start", paddingLeft: 5, fontSize: 11, fontWeight: 600, color: on ? "#fff" : "#e5e7eb", background: on ? "#2f2f33" : "#34343c", borderLeft: "1px solid #2a2a2a", borderBottom: `2px solid ${on ? "#e08a6a" : "#3a3a40"}`, transition: "background .1s, border-color .1s, color .1s" }}
-                    onMouseEnter={(e) => {
-                      if (!main) return;
-                      setHl(lane);
-                      setHb(null);
-                      setHh(null);
-                      // 列标头只司管它负责的主线会话 → 统一的单会话面板（与格子/插队段一致），不再列整轨
-                      showTip(e, { big: main.count, title: `${main.title || main.session_id.slice(0, 8)}`, sub: `${main.project_name || "—"} · ${main.source_label}` });
-                    }}
-                    onMouseLeave={clear}
-                  >
-                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 13px),transparent)" }}>
-                      {main
-                        ? `${main.title || main.session_id.slice(0, 8)}`
-                        : (labelsByLane[lane] ?? []).join(" ")}
-                    </span>
-                  </div>
-                );
-              })}
+            {/* 左上「时·分」角标固定（不占整行，让出右侧空带给浮动表头顶上去）；列标题由浮动表头承担 */}
+            <div className="sticky flex items-center justify-center font-mono" style={{ position: "sticky", top: 0, left: 0, width: TIME_W, height: COLHEAD_H, fontSize: 10, color: "#aab0ba", background: "#34343c", zIndex: 16, borderBottom: "1px solid #3a3a40", borderRight: "1px solid #2a2a2a" }}>
+              时·分
             </div>
 
             {groups.map((g, gi) => {
@@ -454,9 +417,8 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                     const el = scrollRef.current;
                     if (el) el.scrollTo({ top: Math.max(0, s.topY - el.clientHeight / 2), behavior: "smooth" });
                   }}
-                  style={{ position: "absolute", top: s.topY, left: TIME_W + s.lane * laneW, width: laneW, height: ROW_H, display: "flex", alignItems: "center", justifyContent: "flex-start", paddingLeft: 4, gap: 1, fontSize: 10, fontWeight: 600, fontFamily: "ui-monospace, monospace", color: "#fff", background: s.color, borderRadius: 3, cursor: "pointer", overflow: "hidden", whiteSpace: "nowrap", zIndex: 9, transform: segHover ? "translateY(-1px)" : "none", filter: segHover ? "brightness(1.12)" : "none", boxShadow: segHover ? `0 2px 7px ${s.color}aa` : "0 1px 3px rgba(0,0,0,0.45)", transition: "transform .12s, filter .12s, box-shadow .12s" }}
+                  style={{ position: "absolute", top: s.topY, left: TIME_W + s.lane * laneW, width: laneW, height: ROW_H, display: "flex", alignItems: "center", justifyContent: "flex-start", paddingLeft: 4, gap: 1, fontSize: 10, fontWeight: 600, fontFamily: "ui-monospace, monospace", color: "#fff", background: s.color, borderRadius: 3, cursor: "pointer", overflow: "hidden", whiteSpace: "nowrap", zIndex: 9, transform: segHover ? "translateY(-1px)" : "none", filter: segHover ? "brightness(1.12)" : "none", boxShadow: segHover ? `0 2px 7px ${s.color}aa` : "0 1px 3px rgba(0,0,0,0.45)", transition: "transform .12s, filter .12s, box-shadow .12s, opacity .12s" }}
                 >
-                  <span data-arrow style={{ fontSize: 6, lineHeight: 1, display: "none", opacity: 0.85, flexShrink: 0 }} />
                   <span style={{ flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", WebkitMaskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)", maskImage: "linear-gradient(90deg,#000 calc(100% - 12px),transparent)" }}>
                     {`${s.row.title || s.row.session_id.slice(0, 8)}`}
                   </span>

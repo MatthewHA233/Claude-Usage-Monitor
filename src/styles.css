@@ -169,6 +169,10 @@
 .seg-dim { filter: brightness(0.5); transition: filter 0.12s ease; }
 .seg-dim:hover { filter: none; }
 
+/* 时间轴贴边表头（卡片流式）：远方/将来会话压暗，悬浮恢复 */
+.tl-seg-dim { opacity: 0.42; }
+.tl-seg-dim:hover { opacity: 1; }
+
 /* ───────────── 预备发言 · 科幻 HUD（左下角悬浮、向右伸展） ───────────── */
 :root { --hud-accent: 95, 211, 224; } /* #5fd3e0 青色 */
 

@@ -63,29 +63,35 @@ export function assignLanes(rows: TimelineRow[]): LaneAssignment {
  * 不再对 ≤3 特殊处理（统一复用，进一步压少轨道数）。
  */
 export function assignLanesPacked(rows: TimelineRow[]): LaneAssignment {
-  const sess = rows.map((r) => ({
-    key: laneKey(r.source_id, r.session_id),
-    start: r.first_unix ?? 0,
-    end: r.last_unix ?? 0,
-    span: (r.last_unix ?? 0) - (r.first_unix ?? 0),
-    count: r.count ?? 0,
-    label: r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—",
-  }));
+  const sess = rows.map((r) => {
+    const bs = (r.buckets ?? []).map((x) => x.b);
+    return {
+      key: laneKey(r.source_id, r.session_id),
+      start: r.first_unix ?? 0,
+      // 占轨用「桶」粒度（10 分钟格），不用秒——否则同格的细小会话(时间不重叠)会被塞进同一轨、撞格
+      fb: bs.length ? Math.min(...bs) : 0, // 首桶
+      lb: bs.length ? Math.max(...bs) : 0, // 末桶
+      span: (r.last_unix ?? 0) - (r.first_unix ?? 0),
+      count: r.count ?? 0,
+      label: r.project_seq != null && r.session_seq != null ? `${r.project_seq}-${r.session_seq}` : "—",
+    };
+  });
   if (sess.length === 0) return { laneOf: {}, laneCount: 1, labelsByLane: [] };
 
-  // 1. 最优着色：按起点升序，放最左空闲轨
+  // 1. 最优着色：按起点升序，放最左空闲轨。「空闲」= 轨末桶 ≤ 本会话首桶-2，即两会话至少隔 2 桶(20 分钟)——
+  //    留出首桶上方那 1 桶空格给浮动表头(标题)摆放；否则同桶/相邻桶的细小会话标题会没位置、撞一起。
   const byStart = [...sess].sort((a, b) => a.start - b.start || b.span - a.span);
-  const laneEnd: number[] = [];
+  const laneEnd: number[] = []; // 每轨最后占用的「桶」
   const laneSess: (typeof sess)[] = [];
   const colorLane: Record<string, number> = {};
   for (const s of byStart) {
-    let lane = laneEnd.findIndex((e) => e <= s.start);
+    let lane = laneEnd.findIndex((e) => e <= s.fb - 2);
     if (lane === -1) {
       lane = laneEnd.length;
-      laneEnd.push(s.end);
+      laneEnd.push(s.lb);
       laneSess.push([]);
     } else {
-      laneEnd[lane] = s.end;
+      laneEnd[lane] = s.lb;
     }
     colorLane[s.key] = lane;
     laneSess[lane].push(s);
