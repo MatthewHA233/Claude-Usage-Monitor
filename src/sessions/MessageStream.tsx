@@ -211,7 +211,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     );
   }
 
-  const renderCard = (m: StreamMessage, ci: number, bucket: number) => {
+  const renderCard = (m: StreamMessage, ci: number) => {
     const ck = `${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}`;
     const seg = segByAnchor.get(ck);
     return (
@@ -229,7 +229,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
             </div>
           </div>
         )}
-        <StreamCard m={m} shade={bucket % 2 === 0} />
+        <StreamCard m={m} />
         {segEndByAnchor.has(ck) && (
           // 会话末卡后的零高结束锚点：框底收到这里（不延伸到下个会话/空白时段）
           <div ref={(el) => { endMarkerRefs.current[segEndByAnchor.get(ck)!] = el; }} style={{ height: 0 }} />
@@ -358,20 +358,78 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
             <div key={`${g.bucket}:${gi}`}>
               {gi > 0 &&
                 (crossHour ? (
-                  // 1 小时边界：醒目分界 + 时刻
-                  <div className="flex items-center gap-2" style={{ margin: "13px 6px 11px" }}>
-                    <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
-                    <span className="text-[10px] font-mono" style={{ color: "#9ca3af" }}>{pad2(g.hour)}:00</span>
-                    <div style={{ height: 1, flex: 1, background: "#3a3a3a" }} />
+                  // 1 小时边界：一整条连续暖橙斜纹带横跨（不断开），每列中点叠一个 HH:00 标签
+                  <div style={{ position: "relative", height: 18, margin: "16px 8px 12px" }}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: 4,
+                        background:
+                          "repeating-linear-gradient(135deg, rgba(224,138,106,0.34) 0 6px, rgba(224,138,106,0.07) 6px 12px)",
+                      }}
+                    />
+                    <div className="flex" style={{ position: "relative", height: "100%", gap: single ? 0 : LANE_GAP }}>
+                      {Array.from({ length: single ? 1 : laneCount }, (_, lane) => (
+                        <div key={lane} className="flex items-center justify-center" style={{ flex: 1, minWidth: 0 }}>
+                          <span
+                            className="font-mono"
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              color: "#f0d9cb",
+                              background: "#1c130d",
+                              border: "1px solid rgba(224,138,106,0.5)",
+                              borderRadius: 5,
+                              padding: "1px 8px",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {pad2(g.hour)}:00
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : (
-                  // 10 分钟边界：细分界
-                  <div style={{ height: 1, background: "#2c2c2c", margin: "8px 16px" }} />
+                  // 10 分钟边界：连续中性淡斜纹带 + 每列中点一个 :MM 小标签（比小时弱：更小、暖灰、低调）
+                  <div style={{ position: "relative", height: 14, margin: "9px 18px" }}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: 3,
+                        background:
+                          "repeating-linear-gradient(135deg, rgba(255,255,255,0.06) 0 5px, transparent 5px 10px)",
+                      }}
+                    />
+                    <div className="flex" style={{ position: "relative", height: "100%", gap: single ? 0 : LANE_GAP }}>
+                      {Array.from({ length: single ? 1 : laneCount }, (_, lane) => (
+                        <div key={lane} className="flex items-center justify-center" style={{ flex: 1, minWidth: 0 }}>
+                          <span
+                            className="font-mono"
+                            style={{
+                              fontSize: 9.5,
+                              fontWeight: 600,
+                              color: "#9ca3af",
+                              background: "#1c1c1c",
+                              border: "1px solid rgba(255,255,255,0.16)",
+                              borderRadius: 4,
+                              padding: "0 6px",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {pad2(g.hour)}:{pad2((g.bucket % 6) * 10)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               {single ? (
                 // 单轨道：纵向流，宽容器舒适阅读
                 <div className="flex flex-col" style={{ gap: 6 }}>
-                  {g.cards.map((m, ci) => renderCard(m, ci, g.bucket))}
+                  {g.cards.map((m, ci) => renderCard(m, ci))}
                 </div>
               ) : (
                 // 多轨道：每个会话固定在自己的列(轨道)；以本桶最早卡片为基准(不下沉)，
@@ -387,7 +445,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
                           : 0;
                         return (
                           <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top, paddingLeft: CARD_PAD, paddingRight: CARD_PAD }}>
-                            {laneCards.map((m, ci) => renderCard(m, ci, g.bucket))}
+                            {laneCards.map((m, ci) => renderCard(m, ci))}
                           </div>
                         );
                       })}
@@ -441,21 +499,21 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   );
 }
 
-const StreamCard = memo(function StreamCard({ m, shade }: { m: StreamMessage; shade: boolean }) {
+const StreamCard = memo(function StreamCard({ m }: { m: StreamMessage }) {
   const [open, setOpen] = useState(false);
   const blocks = m.blocks ?? [];
   const toolCount = blocks.reduce((n, b) => n + (b.type === "tool" ? 1 : 0), 0);
   const hasReply = m.reply_chars > 0 || blocks.length > 0;
 
-  // 按 10 分钟桶奇偶相间的卡片背景（与时间轴斑马同节奏）
-  const bg = shade ? "#25252c" : "#191919";
+  // 卡片统一单色（去斑马相间）：Claude 赤陶橙的深色调底，暖而不刺、白字仍清晰
+  const bg = "#2a1c15";
   const { ss } = subSecond(m.ts); // 秒（时:分之外更细一档）
   return (
     // content-visibility:auto → 视口外卡片跳过布局/绘制（长列表性能关键）；
     // contain-intrinsic-size 给未渲染时的占位高度，auto 让浏览器记住渲染过的真实高度、避免滚动条跳动
     <div
       className="rounded-xl px-4 py-3 flex gap-3"
-      style={{ background: bg, border: "1px solid #2a2a2a", contentVisibility: "auto", containIntrinsicSize: "auto 88px" }}
+      style={{ background: bg, border: "1px solid #43301f", contentVisibility: "auto", containIntrinsicSize: "auto 88px" }}
     >
       <div className="shrink-0 font-mono" style={{ width: 46, paddingTop: 1 }}>
         <div style={{ color: "#e5e7eb", fontSize: 15, fontWeight: 700, letterSpacing: "0.3px" }}>{clock(m.ts_unix)}</div>
