@@ -4,11 +4,38 @@ use crate::models::{
 };
 use crate::session_store::SessionDraft;
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const PLAN_OVERRIDES_KEY: &str = "plan_overrides";
+
+/// 文件占用 claim 的 TTL（秒）：超过此时长没收到心跳即视为过期、可被抢占/清理。
+pub const CLAIM_TTL_SECS: i64 = 1800; // 30 分钟
+
+/// 一条文件占用记录（advisory「先来后到」软锁）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileClaim {
+    pub path: String,
+    pub owner: String,
+    #[serde(default)]
+    pub machine_id: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub claimed_at: i64,
+    pub heartbeat: i64,
+}
+
+/// acquire 结果：granted=true → 拿到（holder 为自己的记录）；
+/// granted=false → 被他人占用（holder 为当前占用者，先来后到）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireOutcome {
+    pub granted: bool,
+    pub holder: Option<FileClaim>,
+}
 
 /// 从已存 pct/total 反推原始 used_percent 再乘新倍率：pct_new = pct_old * 100 / total_old * mult
 fn reconv_pct(pct: Option<f64>, total_old: Option<f64>, new_mult: f64) -> Option<f64> {
@@ -220,6 +247,17 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_session_drafts_created
                 ON session_drafts(created_unix DESC);
+            CREATE TABLE IF NOT EXISTS file_claims (
+                path        TEXT PRIMARY KEY,
+                owner       TEXT    NOT NULL,
+                machine_id  TEXT    NOT NULL DEFAULT '',
+                host        TEXT    NOT NULL DEFAULT '',
+                session_id  TEXT,
+                claimed_at  INTEGER NOT NULL,
+                heartbeat   INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_claims_claimed
+                ON file_claims(claimed_at ASC);
         ",
         )?;
         drop(conn);
@@ -492,6 +530,138 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM session_drafts WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    // ---- 跨机文件占用 claim（advisory 软锁，先来后到） ----
+
+    /// 解析一行 file_claims。
+    fn row_to_claim(row: &rusqlite::Row) -> rusqlite::Result<FileClaim> {
+        Ok(FileClaim {
+            path: row.get(0)?,
+            owner: row.get(1)?,
+            machine_id: row.get(2)?,
+            host: row.get(3)?,
+            session_id: row.get(4)?,
+            claimed_at: row.get(5)?,
+            heartbeat: row.get(6)?,
+        })
+    }
+
+    /// 尝试占用某文件，遵循「先来后到」：
+    /// - 无人占 → 授予；
+    /// - 同一设备（machine_id 匹配，或无 machine_id 时按 owner 匹配）→ 续租（保留最初 claimed_at）；
+    /// - 他人占且未过期 → 拒绝，返回当前占用者；
+    /// - 他人占但已过期（超 TTL 无心跳）→ 抢占。
+    /// 全程在单次连接锁内完成，天然原子。
+    pub fn claim_acquire(
+        &self,
+        path: &str,
+        owner: &str,
+        machine_id: &str,
+        host: &str,
+        session_id: Option<&str>,
+    ) -> Result<AcquireOutcome> {
+        let now = chrono::Utc::now().timestamp();
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<FileClaim> = conn
+            .query_row(
+                "SELECT path, owner, machine_id, host, session_id, claimed_at, heartbeat
+                 FROM file_claims WHERE path = ?1",
+                params![path],
+                Self::row_to_claim,
+            )
+            .optional()?;
+        // 占用身份按「会话」区分：同机器不同会话也是不同占用者（先来后到照样生效，
+        // 本机另一个会话在改也会报冲突/被提示）。无 session_id 时回退按设备。
+        let is_same = |h: &FileClaim| -> bool {
+            match (h.session_id.as_deref(), session_id) {
+                (Some(hs), Some(s)) if !s.is_empty() && !hs.is_empty() => hs == s,
+                _ => !machine_id.is_empty() && h.machine_id == machine_id,
+            }
+        };
+        let mut claimed_at = now;
+        if let Some(h) = &existing {
+            let expired = now - h.heartbeat > CLAIM_TTL_SECS;
+            if is_same(h) {
+                claimed_at = h.claimed_at; // 续租：保留最初「先到」时间
+            } else if !expired {
+                return Ok(AcquireOutcome {
+                    granted: false,
+                    holder: existing,
+                });
+            }
+            // 否则（他人但已过期）→ 抢占，claimed_at = now
+        }
+        conn.execute(
+            "INSERT INTO file_claims (path, owner, machine_id, host, session_id, claimed_at, heartbeat)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(path) DO UPDATE SET
+                owner = excluded.owner,
+                machine_id = excluded.machine_id,
+                host = excluded.host,
+                session_id = excluded.session_id,
+                claimed_at = excluded.claimed_at,
+                heartbeat = excluded.heartbeat",
+            params![path, owner, machine_id, host, session_id, claimed_at, now],
+        )?;
+        Ok(AcquireOutcome {
+            granted: true,
+            holder: Some(FileClaim {
+                path: path.to_string(),
+                owner: owner.to_string(),
+                machine_id: machine_id.to_string(),
+                host: host.to_string(),
+                session_id: session_id.map(|s| s.to_string()),
+                claimed_at,
+                heartbeat: now,
+            }),
+        })
+    }
+
+    /// 列出所有未过期 claim（顺手清掉过期的），按最初占用时间升序（先来在前）。
+    pub fn claims_list(&self) -> Result<Vec<FileClaim>> {
+        let now = chrono::Utc::now().timestamp();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM file_claims WHERE ?1 - heartbeat > ?2",
+            params![now, CLAIM_TTL_SECS],
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT path, owner, machine_id, host, session_id, claimed_at, heartbeat
+             FROM file_claims ORDER BY claimed_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_claim)?;
+        rows.collect()
+    }
+
+    /// 批量续租自己的 claim（只动同设备/同 owner 的行）。
+    pub fn claims_heartbeat(&self, owner: &str, machine_id: &str, paths: &[String]) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let conn = self.conn.lock().unwrap();
+        for p in paths {
+            conn.execute(
+                "UPDATE file_claims SET heartbeat = ?1
+                 WHERE path = ?2 AND (machine_id = ?3 OR (machine_id = '' AND owner = ?4))",
+                params![now, p, machine_id, owner],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 释放某文件 claim。owner 与 machine_id 都为空 → 强制释放（UI 管理用）；
+    /// 否则只释放匹配同设备/同 owner 的行（hook 自释放用）。返回删除行数。
+    pub fn claim_release(&self, path: &str, owner: &str, machine_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = if owner.is_empty() && machine_id.is_empty() {
+            conn.execute("DELETE FROM file_claims WHERE path = ?1", params![path])?
+        } else {
+            conn.execute(
+                "DELETE FROM file_claims
+                 WHERE path = ?1 AND (machine_id = ?2 OR (machine_id = '' AND owner = ?3))",
+                params![path, machine_id, owner],
+            )?
+        };
+        Ok(n)
     }
 
     pub fn set_local_usage_status(

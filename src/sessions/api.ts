@@ -8,6 +8,7 @@ import type {
   SourceStatus,
   StreamFilter,
   SyncState,
+  FileClaim,
 } from "./types";
 
 // 远程薄中继默认端口（添加来源时补全用）
@@ -103,4 +104,21 @@ export function normalizeBaseUrl(input: string): string {
     s = `${s}:${DEFAULT_PORT}`;
   }
   return s.replace(/\/+$/, "");
+}
+
+// ---- 跨机文件占用 claim ----
+
+/** 列出当前所有文件占用（先来在前）。本机是 registry → 读 db；否则 HTTP 读主控机 */
+export function claimsList(): Promise<FileClaim[]> {
+  return invoke<FileClaim[]>("session_claims_list");
+}
+
+/** 手动释放某文件占用（强制） */
+export function claimRelease(path: string): Promise<void> {
+  return invoke<void>("session_claim_release", { path });
+}
+
+/** 把本机 registry 地址下发给各远程中继（加源后调用，远程 hook 据此 acquire） */
+export function syncClaimRegistry(): Promise<void> {
+  return invoke<void>("session_claim_sync_registry");
 }

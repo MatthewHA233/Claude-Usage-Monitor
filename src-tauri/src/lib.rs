@@ -1,4 +1,5 @@
 mod analyzer;
+mod claims;
 mod commands;
 mod db;
 mod discovery;
@@ -53,6 +54,8 @@ pub fn run() {
     let db_for_http = std::sync::Arc::clone(&app_state.db);
     let runtime_for_http = std::sync::Arc::clone(&app_state.runtime);
     let db_for_local_usage = std::sync::Arc::clone(&app_state.db);
+    let db_for_claims = std::sync::Arc::clone(&app_state.db);
+    let db_for_broadcast = std::sync::Arc::clone(&app_state.db);
 
     tauri::Builder::default()
         .manage(app_state)
@@ -62,6 +65,15 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(async move {
                 local_usage::run_background_collector(db_for_local_usage).await;
+            });
+            // 跨机文件占用 registry：本机（开着 monitor 这台）恒为 registry，绑 0.0.0.0:47801
+            tauri::async_runtime::spawn(async move {
+                claims::start(db_for_claims).await;
+            });
+            // 启动后把本机 registry 地址下发给各远程中继（远程 hook 据此 acquire）
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                claims::broadcast_registry_url(&db_for_broadcast);
             });
             Ok(())
         })
@@ -109,6 +121,9 @@ pub fn run() {
             session_store::session_probe,
             session_store::session_sync_state,
             session_store::session_image,
+            claims::session_claims_list,
+            claims::session_claim_release,
+            claims::session_claim_sync_registry,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 启动失败");

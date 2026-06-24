@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import { X, RefreshCw, Wifi, WifiOff, Monitor, Search, Pencil, Trash2, Check } from "lucide-react";
-import { getSources, normalizeBaseUrl } from "./api";
+import { X, RefreshCw, Wifi, WifiOff, Monitor, Search, Pencil, Trash2, Check, Lock, Unlock } from "lucide-react";
+import {
+  getSources,
+  normalizeBaseUrl,
+  claimsList,
+  claimRelease,
+  syncClaimRegistry,
+} from "./api";
 import { discoverRelays, type DiscoveredRelay } from "./discovery";
-import type { SessionSource, SourceStatus } from "./types";
+import type { SessionSource, SourceStatus, FileClaim } from "./types";
 
 // 本机隐式来源（不可改名/删除）
 const LOCAL_IDS = new Set(["local", "history"]);
@@ -24,9 +30,28 @@ export default function NetworkPanel({ sourceStatuses, onAdd, onRename, onDelete
   const [editId, setEditId] = useState<string | null>(null);
   const [editVal, setEditVal] = useState("");
 
+  // 跨机文件占用（claim · 先来后到）：本机恒为 registry，UI 直接读本机 db
+  const [claims, setClaims] = useState<FileClaim[]>([]);
+  const loadClaims = useCallback(() => {
+    claimsList().then(setClaims).catch(() => setClaims([]));
+  }, []);
+  useEffect(() => {
+    loadClaims();
+  }, [loadClaims]);
+  const releaseClaim = (path: string) => {
+    claimRelease(path).then(loadClaims).catch(() => undefined);
+  };
+  const claimAgo = (unix: number) => {
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+    if (s < 60) return `${s}秒前`;
+    if (s < 3600) return `${Math.floor(s / 60)}分钟前`;
+    return `${Math.floor(s / 3600)}小时前`;
+  };
+
   // sourceStatuses 变化（添加/删除后）重取已添加来源，发现列表据此判断「已配对/地址变更/全新」
   useEffect(() => {
     void getSources().then(setSources).catch(() => undefined);
+    void syncClaimRegistry().catch(() => undefined); // 源变动后把本机 registry 地址下发给(含新)各源
   }, [sourceStatuses]);
 
   const scan = useCallback(() => {
@@ -193,6 +218,47 @@ export default function NetworkPanel({ sourceStatuses, onAdd, onRename, onDelete
                 </div>
                 <Wifi size={13} style={{ color: ipChanged ? "#60a5fa" : "#4ade80", flexShrink: 0 }} />
               </button>
+            ))
+          )}
+        </div>
+
+        {/* 文件占用（先来后到）：与「新建连接」同款风格 */}
+        <div className="flex items-center justify-between mt-4 mb-1.5">
+          <div className="flex items-center gap-1.5 text-xs" style={{ color: "#9ca3af" }}>
+            <Lock size={13} /> 文件占用（先来后到）
+          </div>
+          <button
+            type="button"
+            onClick={loadClaims}
+            className="inline-flex items-center gap-1 text-[11px]"
+            style={{ color: "#9ca3af", background: "#262626", border: "1px solid #333", borderRadius: 6, padding: "2px 8px", cursor: "pointer" }}
+          >
+            <RefreshCw size={11} /> 刷新
+          </button>
+        </div>
+        <div className="rounded-md overflow-auto" style={{ background: "#161616", border: "1px solid #2a2a2a", maxHeight: 168 }}>
+          {claims.length === 0 ? (
+            <div className="text-[11px] px-3 py-4 text-center" style={{ color: "#6b7280" }}>
+              当前无人占用文件
+            </div>
+          ) : (
+            claims.map((c) => (
+              <div key={c.path} className="group flex items-center gap-2 px-3 py-2" style={{ borderBottom: "1px solid #222" }}>
+                <Lock size={14} style={{ color: "#f59e0b", flexShrink: 0 }} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-mono" style={{ color: "#e5e7eb" }} title={c.path}>{c.path}</div>
+                  <div className="truncate text-[10px]" style={{ color: "#6b7280" }}>{c.owner || c.host} · {claimAgo(c.claimed_at)}</div>
+                </div>
+                <button
+                  type="button"
+                  title="强制释放该占用"
+                  onClick={() => releaseClaim(c.path)}
+                  className="hidden group-hover:inline-flex items-center shrink-0"
+                  style={{ color: "#f87171", background: "transparent", border: 0, cursor: "pointer" }}
+                >
+                  <Unlock size={13} />
+                </button>
+              </div>
             ))
           )}
         </div>

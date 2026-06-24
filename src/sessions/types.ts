@@ -129,3 +129,15 @@ export interface StreamFilter {
   until?: number;
   label: string; // 顶部 banner 展示
 }
+
+// ---- 跨机文件占用 claim（file_claims / registry） ----
+
+export interface FileClaim {
+  path: string; // 仓库名/相对仓库根路径（跨机一致）
+  owner: string; // 占用者显示名
+  machine_id: string; // 占用者设备稳定 id
+  host: string; // 占用者主机名
+  session_id: string | null;
+  claimed_at: number; // 最初占用时间（unix 秒，先来后到依据）
+  heartbeat: number; // 最近续租时间（unix 秒）
+}
