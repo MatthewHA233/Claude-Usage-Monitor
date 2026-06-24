@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeftOpen } from "lucide-react";
 import Sidebar from "./Sidebar";
 import SessionTimeline from "./SessionTimeline";
-import MessageStream from "./MessageStream";
+import MessageStream, { type MessageStreamHandle, type SelectedCell } from "./MessageStream";
 import DraftBar, { type SessionOption } from "./DraftBar";
 import NetworkPanel from "./NetworkPanel";
 import {
@@ -72,9 +72,12 @@ export default function SessionsApp() {
     [setDraftsBoth]
   );
 
+  const streamRef = useRef<MessageStreamHandle>(null); // 缩略图点格 → 调它的 scrollToCell 定位卡片区
+  const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null); // 选中的 10 分钟格（缩略图+卡片区同步高亮）
   const dateRef = useRef(date);
   useEffect(() => {
     dateRef.current = date;
+    setSelectedCell(null); // 切天清除选中（旧桶在新一天无意义）
   }, [date]);
 
   const refreshAll = useCallback(async () => {
@@ -233,7 +236,16 @@ export default function SessionsApp() {
           />
           {/* 竖排迷你时间轴：左栏下方，自带「紧凑」轨道分配（实验：最少轨道 + 充实轨在左） */}
           <div className="flex-1 min-h-0">
-            <SessionTimeline date={date} rows={rows} loading={syncing || refreshing} />
+            <SessionTimeline
+              date={date}
+              rows={rows}
+              loading={syncing || refreshing}
+              selected={selectedCell}
+              onCellClick={(b, sid, ssid) => {
+                setSelectedCell({ bucket: b, sourceId: sid, sessionId: ssid });
+                streamRef.current?.scrollToCell(b, sid, ssid);
+              }}
+            />
           </div>
         </div>
       )}
@@ -241,6 +253,9 @@ export default function SessionsApp() {
       <div className="flex-1 flex flex-col min-w-0">
         <div className="flex-1 min-h-0">
           <MessageStream
+            ref={streamRef}
+            selected={selectedCell}
+            onUserScroll={() => setSelectedCell(null)}
             messages={stream}
             loading={(syncing || refreshing) && stream.length === 0}
             sessionTitles={sessionTitles}

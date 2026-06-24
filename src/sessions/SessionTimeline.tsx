@@ -3,6 +3,7 @@ import type { TimelineRowWithSource } from "./types";
 import { dayLabel, todayYmd } from "./format";
 import { laneKey, assignLanesPacked } from "./lanes";
 import { machineColor } from "../colors"; // 会话按机器配色，与 token 面板一致
+import type { SelectedCell } from "./MessageStream"; // 选中格类型（与卡片区共用）
 
 const ROW_H = 14; // 单行点阵的行高
 const ROW_H2 = 26; // 双行点阵(某格 >5 条)的行高
@@ -16,6 +17,9 @@ interface Props {
   date: string;
   rows: TimelineRowWithSource[];
   loading: boolean;
+  // 点某 10 分钟格 → 通知父级让卡片区横纵滚动到对应桶/会话（会话标识可空=只纵向定位）
+  onCellClick?: (bucket: number, sourceId?: string, sessionId?: string) => void;
+  selected?: SelectedCell | null; // 当前选中格 → 高亮对应格子（与卡片区同步，持久直到用户重新滚动）
 }
 
 type Tip = { x: number; y: number; place?: "right" | "below"; big?: number; title: string; sub?: string; lines?: string[] } | null;
@@ -43,7 +47,7 @@ function DotCell({ n }: { n: number }) {
 
 // 竖排迷你时间轴：纵向时间(小时合并列 + 分钟列两级表头)，横向轨道列(会话, 与卡片同序同列)。
 // 配色融入左栏(暗基调)，表头/字/点提亮保持清晰。hover 十字标定 + 悬浮面板。连续空小时折叠。
-export default function SessionTimeline({ date, rows, loading }: Props) {
+export default function SessionTimeline({ date, rows, loading, onCellClick, selected }: Props) {
   // 时间轴专用「紧凑」轨道分配（最少轨道 + 充实轨在左）。卡片流仍用 SessionsApp 传下来的旧分配。
   const { laneOf, laneCount } = useMemo(() => assignLanesPacked(rows), [rows]);
   const [tip, setTip] = useState<Tip>(null);
@@ -342,6 +346,13 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                             const interLast = cov?.isLast ?? false;
                             const colOn = hl === lane;
                             const segOn = hseg != null && cov != null && hseg.lane === lane && hseg.label === cov.label; // hover 悬浮表头掌控的段
+                            // 选中（点格子来，与卡片区同步、持久）：匹配桶 + 该格会话；无会话(空格)则整桶行高亮
+                            const cellRow = info?.row ?? cov?.row;
+                            const isSel =
+                              selected != null &&
+                              selected.bucket === b &&
+                              (selected.sessionId == null ||
+                                (cellRow?.session_id === selected.sessionId && cellRow?.source_id === selected.sourceId));
                             // 插队整段内框（左右竖线每格 + 首尾横线），用柔和主题色
                             const interShadow = cov
                               ? [`inset 1px 0 0 ${cov.color}`, `inset -1px 0 0 ${cov.color}`, interFirst ? `inset 0 1px 0 ${cov.color}` : "", interLast ? `inset 0 -1px 0 ${cov.color}` : ""].filter(Boolean).join(", ")
@@ -351,7 +362,8 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                             const HL = "rgba(232,164,130,0.82)";
                             const rowEdge = rowOn && !cross ? `inset 0 1px 0 ${HL}, inset 0 -1px 0 ${HL}` : "";
                             const colEdge = colOn && !cross ? `inset 1px 0 0 ${HL}, inset -1px 0 0 ${HL}` : "";
-                            const boxShadow = [interShadow, rowEdge, colEdge].filter(Boolean).join(", ") || undefined;
+                            const selEdge = isSel ? "inset 0 0 0 2px rgba(240,176,130,0.95)" : ""; // 选中：亮橙内框（盖住 hover/段框）
+                            const boxShadow = [interShadow, rowEdge, colEdge, selEdge].filter(Boolean).join(", ") || undefined;
                             // 填充：统一暗底（去斑马相间 + 去当前小时染色）；行/列单边微亮、十字交叉聚焦格明显变亮
                             const lit = rowOn || colOn || hh === h;
                             const bg = segOn
@@ -371,7 +383,11 @@ export default function SessionTimeline({ date, rows, loading }: Props) {
                               <div
                                 key={lane}
                                 className="shrink-0 flex items-center justify-center"
-                                style={{ width: laneW, height: rowH(b), background: bg, borderLeft: "1px solid #343439", boxShadow, transition: "background .1s, box-shadow .1s" }}
+                                style={{ width: laneW, height: rowH(b), background: isSel ? (n > 0 ? "rgba(224,138,106,0.6)" : "rgba(240,176,130,0.28)") : bg, borderLeft: "1px solid #343439", boxShadow, cursor: "pointer", transition: "background .1s, box-shadow .1s" }}
+                                onClick={() => {
+                                  const row = info?.row ?? cov?.row;
+                                  onCellClick?.(b, row?.source_id, row?.session_id);
+                                }}
                                 onMouseEnter={(e) => {
                                   setHb(b);
                                   setHl(lane);

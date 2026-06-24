@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, forwardRef, memo, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Bot,
   ChevronDown,
@@ -47,16 +47,28 @@ interface LaneHeadInfo {
 // 一个会话段：lane=轨道，ordinal=该轨第几个会话(0=主线)，isFloat=是否浮动表头(主线静态时为 false)
 type Seg = { idx: number; lane: number; ordinal: number; isFloat: boolean; anchorKey: string; head: LaneHeadInfo };
 
+export type SelectedCell = { bucket: number; sourceId?: string; sessionId?: string };
+
 interface Props {
   messages: StreamMessage[];
   loading: boolean;
   sessionTitles: Record<string, string>;
   laneOf: Record<string, number>; // laneKey → 列；与时间轴共用
   laneCount: number;
+  selected?: SelectedCell | null; // 点缩略图选中的 10 分钟格 → 高亮对应桶/会话，持久直到用户重新滚动
+  onUserScroll?: () => void; // 用户主动滚动卡片区(wheel/touch) → 通知父级清除选中
+}
+
+export interface MessageStreamHandle {
+  // 缩略图点 10 分钟格 → 卡片区横纵滚动到对应桶/会话（sourceId/sessionId 决定横向 lane，可空=只纵向）
+  scrollToCell: (bucket: number, sourceId?: string, sessionId?: string) => void;
 }
 
 /** flomo 风格卡片流：当天我的发言，时间正序（新消息在底部）、滚动默认贴底，每条一张卡片 */
-export default function MessageStream({ messages, loading, sessionTitles, laneOf, laneCount }: Props) {
+const MessageStream = forwardRef<MessageStreamHandle, Props>(function MessageStream(
+  { messages, loading, sessionTitles, laneOf, laneCount, selected, onUserScroll },
+  ref,
+) {
   // 时间正序：新消息排在底部（messages 传入为倒序，这里翻正）
   const ordered = useMemo(() => [...messages].reverse(), [messages]);
   // 滚动贴底：仅在「切换数据集(切天/筛选, 首条变了)」或「用户本就停在底部」时贴底，
@@ -193,6 +205,31 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // 缩略图(时间轴)点某 10 分钟格 → 卡片区横纵滚动到对应桶/会话。两边 lane 编号是两套分配，靠会话标识桥接。
+  const scrollToCell = (bucket: number, sourceId?: string, sessionId?: string) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 纵向：找该桶 group；空桶(卡片流无此 group)则取最近的（≥bucket 优先，否则最后一个）
+    let target = el.querySelector<HTMLElement>(`[data-bucket="${bucket}"]`);
+    if (!target) {
+      const all = Array.from(el.querySelectorAll<HTMLElement>("[data-bucket]"));
+      target = all.find((g) => Number(g.dataset.bucket) >= bucket) ?? all[all.length - 1] ?? null;
+    }
+    let top = el.scrollTop;
+    if (target) top = el.scrollTop + (target.getBoundingClientRect().top - el.getBoundingClientRect().top) - 8;
+    // 横向：多轨道时滚到该会话所在 lane（用卡片流自己的 laneOf），让该列居中
+    let left = el.scrollLeft;
+    const wrap = wrapRef.current;
+    if (!single && wrap && sourceId && sessionId) {
+      const lane = laneOf[laneKey(sourceId, sessionId)] ?? 0;
+      const laneW = (wrap.clientWidth - (laneCount - 1) * LANE_GAP) / laneCount;
+      const laneLeft = lane * (laneW + LANE_GAP);
+      left = Math.max(0, laneLeft - (el.clientWidth - laneW) / 2);
+    }
+    el.scrollTo({ top: Math.max(0, top), left, behavior: "smooth" });
+  };
+  useImperativeHandle(ref, () => ({ scrollToCell }));
 
   if (loading && messages.length === 0) {
     return (
@@ -335,9 +372,24 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     }
   };
 
+  // 选中高亮（点缩略图来）：选中桶 + 该会话在卡片流的 lane（无会话则整桶）；持久直到用户重新滚动卡片区
+  const selBucket = selected?.bucket ?? null;
+  const selLaneCard =
+    selected?.sessionId != null ? (laneOf[laneKey(selected.sourceId ?? "", selected.sessionId)] ?? 0) : null;
+  const selStyle = (on: boolean): CSSProperties =>
+    on
+      ? { outline: "2px solid rgba(240,176,130,0.85)", outlineOffset: -2, background: "rgba(224,138,106,0.10)", borderRadius: 10 }
+      : {};
+
   return (
    <div style={{ position: "relative", height: "100%" }}>
-    <div ref={scrollRef} onScroll={onScroll} className={`overflow-auto h-full py-4 ${single ? "px-5" : "px-3"}`}>
+    <div
+      ref={scrollRef}
+      onScroll={onScroll}
+      onWheel={() => onUserScroll?.()}
+      onTouchMove={() => onUserScroll?.()}
+      className={`overflow-auto h-full py-4 ${single ? "px-5" : "px-3"}`}
+    >
       <div
         ref={wrapRef}
         className={single ? "mx-auto" : undefined}
@@ -355,7 +407,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
         {groups.map((g, gi) => {
           const crossHour = gi > 0 && groups[gi - 1].hour !== g.hour;
           return (
-            <div key={`${g.bucket}:${gi}`}>
+            <div key={`${g.bucket}:${gi}`} data-bucket={g.bucket}>
               {gi > 0 &&
                 (crossHour ? (
                   // 1 小时边界：一整条连续暖橙斜纹带横跨（不断开），每列中点叠一个 HH:00 标签
@@ -428,7 +480,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
                 ))}
               {single ? (
                 // 单轨道：纵向流，宽容器舒适阅读
-                <div className="flex flex-col" style={{ gap: 6 }}>
+                <div className="flex flex-col" style={{ gap: 6, ...selStyle(selBucket === g.bucket) }}>
                   {g.cards.map((m, ci) => renderCard(m, ci))}
                 </div>
               ) : (
@@ -443,8 +495,9 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
                         const top = laneCards.length
                           ? (secInBucket(laneCards[0].ts_unix) - baseSec) * 0.18
                           : 0;
+                        const laneSel = selBucket === g.bucket && (selLaneCard == null || selLaneCard === lane);
                         return (
-                          <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top, paddingLeft: CARD_PAD, paddingRight: CARD_PAD }}>
+                          <div key={lane} className="flex flex-col" style={{ flex: 1, minWidth: 0, gap: 6, marginTop: top, paddingLeft: CARD_PAD, paddingRight: CARD_PAD, ...selStyle(laneSel) }}>
                             {laneCards.map((m, ci) => renderCard(m, ci))}
                           </div>
                         );
@@ -497,7 +550,9 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     )}
    </div>
   );
-}
+});
+
+export default MessageStream;
 
 const StreamCard = memo(function StreamCard({ m }: { m: StreamMessage }) {
   const [open, setOpen] = useState(false);
