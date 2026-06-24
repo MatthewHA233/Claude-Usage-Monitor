@@ -71,6 +71,7 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
   const markerRefs = useRef<(HTMLDivElement | null)[]>([]);
   const overlayHeaderRefs = useRef<(HTMLDivElement | null)[]>([]);
   const frameRefs = useRef<(HTMLDivElement | null)[]>([]); // 每会话块的机器色描边框（绝对定位、随卡片滚动）
+  const endMarkerRefs = useRef<(HTMLDivElement | null)[]>([]); // 每会话末卡后的零高结束锚点 → 框底收到这里
   const layoutRef = useRef<() => void>(() => {});
   const onScroll = () => {
     const el = scrollRef.current;
@@ -156,6 +157,32 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
     for (const s of segs) map.set(s.anchorKey, s);
     return map;
   }, [segs]);
+  // 每会话「末卡」anchorKey → seg.idx（与上面 segs 同序同 idx）。框底收到末卡、不延伸到下个会话。
+  const segEndByAnchor = useMemo(() => {
+    const map = new Map<string, number>();
+    if (singleSession) return map;
+    const lastByLane: Record<number, string> = {};
+    const curSeg: Record<number, number> = {};
+    const prevAnchor: Record<number, string> = {};
+    let idx = 0;
+    for (const m of ordered) {
+      const lane = single ? 0 : (laneOf[laneKey(m.source_id, m.session_id)] ?? 0);
+      const sk = laneKey(m.source_id, m.session_id);
+      const anchor = `${m.source_id}:${m.session_id}:${m.ts_unix ?? 0}`;
+      if (lastByLane[lane] !== sk) {
+        if (curSeg[lane] !== undefined && prevAnchor[lane] !== undefined) map.set(prevAnchor[lane], curSeg[lane]);
+        lastByLane[lane] = sk;
+        curSeg[lane] = idx;
+        idx += 1;
+      }
+      prevAnchor[lane] = anchor;
+    }
+    for (const laneStr of Object.keys(curSeg)) {
+      const lane = Number(laneStr);
+      if (prevAnchor[lane] !== undefined) map.set(prevAnchor[lane], curSeg[lane]);
+    }
+    return map;
+  }, [ordered, single, singleSession, laneOf]);
   const useFloat = floatSegs.length > 0;
 
   useLayoutEffect(() => layoutRef.current()); // 每次渲染后同步浮动表头位置
@@ -203,6 +230,10 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
           </div>
         )}
         <StreamCard m={m} shade={bucket % 2 === 0} />
+        {segEndByAnchor.has(ck) && (
+          // 会话末卡后的零高结束锚点：框底收到这里（不延伸到下个会话/空白时段）
+          <div ref={(el) => { endMarkerRefs.current[segEndByAnchor.get(ck)!] = el; }} style={{ height: 0 }} />
+        )}
       </Fragment>
     );
   };
@@ -289,7 +320,11 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
           const f = frameRefs.current[it.idx];
           if (!f) return;
           const top = it.cy + SEG_H + 2; // 表头下方起
-          const bottom = i + 1 < arr.length ? arr[i + 1].cy : wrapH; // 到下个会话表头 / 内容底
+          // 框底「提前收」到本会话末卡（结束锚点）；没量到则兜底用下个会话表头/内容底
+          const endMk = endMarkerRefs.current[it.idx];
+          const bottom = endMk
+            ? endMk.getBoundingClientRect().top - wrapTop
+            : i + 1 < arr.length ? arr[i + 1].cy : wrapH;
           // 只设纵向(首尾)；横向 left/right 由 CSS(flex 列)管 → 窗口缩放自适应不闪
           f.style.display = "block";
           f.style.top = `${top}px`;
