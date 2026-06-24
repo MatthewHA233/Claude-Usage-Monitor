@@ -192,7 +192,11 @@ export default function MessageStream({ messages, loading, sessionTitles, laneOf
         {seg && (
           // 段首锚点 = 流内「自然位置」会话表头：随内容被合成器平滑滚动(不抖)；滚出视口后由 overlay 贴边副本接管。
           // marker 同时占位 MARKER_H、其 getBoundingClientRect 供 layoutRef 测段顶屏幕 Y。
-          <div ref={(el) => { markerRefs.current[seg.idx] = el; }} style={{ height: MARKER_H }}>
+          // 负 margin 抵消轨道列的 CARD_PAD → in-flow 表头撑到整 laneW，和 overlay 贴边表头同宽(不滚/滚一致)
+          <div
+            ref={(el) => { markerRefs.current[seg.idx] = el; }}
+            style={{ height: MARKER_H, marginLeft: single ? 0 : -CARD_PAD, marginRight: single ? 0 : -CARD_PAD }}
+          >
             <div onClick={() => scrollToSeg(seg.idx)} title="点击滚到该会话开头" style={{ height: SEG_H, cursor: "pointer" }}>
               <LaneHeader head={seg.head} />
             </div>
